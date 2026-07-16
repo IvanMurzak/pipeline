@@ -5,11 +5,11 @@
   "description": "Unified local CLI for the Claude-Pipeline plugin: deterministic planning (and, in later phases, matching / routing / event emission / UI) computed OUTSIDE the LLM context so agents pay near-zero tokens for control-flow work. Runs directly with Bun; a Node-targeted bundle can be produced for embedding in other local projects.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/IvanMurzak/ai-pipeline-plugin",
+    "url": "git+https://github.com/IvanMurzak/ai-pipeline-plugin.git",
     "directory": "apps/pipeline-cli"
   },
   "bin": {
-    "pipeline": "./src/cli.ts"
+    "pipeline": "src/cli.ts"
   },
   "exports": {
     ".": "./src/index.ts",
