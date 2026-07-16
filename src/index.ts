@@ -175,6 +175,33 @@ export type {
   NextParse,
 } from './lib/script-step';
 
+// Pure PP_* variable substitution engine (env-variables design 04) — grammar,
+// `## Variables` parsing, resolution (CLI > env > manifest default), run-init
+// validation, and single-pass inert substitution. No I/O; never reads
+// process.env (env is an injected parameter).
+export {
+  PP_NAME_RE,
+  PP_TOKEN_RE,
+  PP_NEARMISS_RE,
+  parseVariablesSection,
+  scanOccurrences,
+  scanNearMisses,
+  scanFrontmatter,
+  resolveVariables,
+  parseVarAssignment,
+  validateRun,
+  substituteText,
+  substituteArgv,
+  hasDeclarations,
+} from './lib/substitution';
+export type {
+  VariableDecl,
+  ResolvedVars,
+  Occurrence,
+  SubstitutionIssue,
+  SubstitutionIssueKind,
+} from './lib/substitution';
+
 export { computeNext } from './lib/next';
 export type {
   NextState,
