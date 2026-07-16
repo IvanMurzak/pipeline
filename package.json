@@ -1,0 +1,23 @@
+{
+  "name": "@baizor/pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Unified local CLI for the Claude-Pipeline plugin: deterministic planning (and, in later phases, matching / routing / event emission / UI) computed OUTSIDE the LLM context so agents pay near-zero tokens for control-flow work. Runs directly with Bun; a Node-targeted bundle can be produced for embedding in other local projects.",
+  "bin": {
+    "pipeline": "./src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./plan": "./src/lib/plan.ts"
+  },
+  "scripts": {
+    "cli": "bun src/cli.ts",
+    "test": "bun scripts/parallel-tests.ts tests",
+    "test:seq": "bun test tests/",
+    "build": "bun build src/cli.ts --target=node --format=esm --outfile=dist/cli.mjs"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  }
+}
