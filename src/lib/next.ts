@@ -129,6 +129,20 @@ export interface NextState {
    *  persistence contract as model_overrides. Absent → none. */
   effort_overrides?: Record<string, string | null>;
   /**
+   * The run's FROZEN PP_* variable map (env-variables design, D11): resolved
+   * ONCE at run init by the `pipeline next` COMMAND (`--var`/`--vars-file` >
+   * environment > manifest defaults, D2) and persisted here so resumes reuse
+   * it verbatim — environment drift mid-run can never make step 7 see
+   * different values than step 2. The pure engine never reads this field
+   * (the model_overrides persistence pattern). Key PRESENCE is load-bearing:
+   * a state WITHOUT the key predates variables (legacy, or the first run
+   * after a pipeline gained declarations) and takes the one-time
+   * resolve+write-back (F10); a state WITH it (even `{}`) is frozen — `--var`
+   * on such a run is an error (D11-REVISED). Never written for a pipeline
+   * with no declarations (E9 zero-change).
+   */
+  variables?: Record<string, string>;
+  /**
    * Script-step self-healing bound #1 (DESIGN.md §6.4): step_ids whose
    * ONCE-per-run agent fallback (`on-failure: agent`) has already fired.
    * Written by the engine when opts.scriptFallback dispatches the fallback;
@@ -208,6 +222,14 @@ export interface ActiveChildRun {
 export interface ActionStep {
   step_id: string;
   path: string;
+  /**
+   * The step's SOURCE iteration file (env-variables design, D6): always set,
+   * and `=== path` until rendered shadow copies land (P4/a5) — from then on,
+   * a variable-declaring run's `path` points at the rendered copy under
+   * `.runtime/<run>/rendered/` while `source_path` keeps the author-owned
+   * original for the improver/script-creator briefs.
+   */
+  source_path: string;
   model: string | null;
   /** Resolved reasoning effort for this spawn (override ?? step frontmatter ??
    *  pipeline default ?? null = inherit). The headless runner passes it as
@@ -1022,6 +1044,9 @@ function makeActionStep(
   const actionStep: ActionStep = {
     step_id: step.step_id,
     path: step.path,
+    // Always set; identical to `path` until rendering (P4/a5) points `path`
+    // at a `.runtime/<run>/rendered/` shadow copy (see the field doc).
+    source_path: step.path,
     model: step.model,
     effort: step.effort ?? null,
     isolation,

@@ -1,4 +1,5 @@
-// `pipeline step run <iteration.md> [--param k=v ...] [--json]`
+// `pipeline step run <iteration.md> [--param k=v ...] [--var NAME=value ...]
+//   [--vars-file <path>] [--json]`
 //
 // The author-facing DRY-RUN tool for `type: script` steps (roadmap/
 // script-steps/DESIGN.md §13). It executes ONE script step exactly as the
@@ -29,11 +30,20 @@
 // 1 = script ran but failed (any class), 2 = usage error (missing/agent step,
 // unresolved `${steps…}`/`${run.task}` refs without --param, plan errors).
 
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { computePlan, findEnclosingPipelineRoot, type Plan, type PlanStep } from '../lib/plan';
 import { samePath } from '../lib/next';
+import {
+  addVarFlag,
+  hasDeclarations,
+  initRunVariables,
+  loadVarsFile,
+  mergeCliVars,
+  type ResolvedVars,
+} from '../lib/run-vars';
+import { substituteArgv, substituteText } from '../lib/substitution';
 import { executeScriptStep, resolveParams, type ScriptStepContext } from '../lib/script-step';
 import type { ScriptStepSpec } from '../lib/script-types';
 
@@ -46,6 +56,14 @@ interface StepRunArgs {
   overrides: Record<string, unknown>;
   /** Set when a `--param` token had no `<name>=<value>` shape — loud usage error. */
   paramError?: string;
+  /** PP_* variable overrides from repeated `--var NAME=value` (env-variables
+   *  design, 05 §3): resolved against the pipeline's declarations exactly as
+   *  a real run would, but NEVER frozen — a dry run is ephemeral. */
+  varFlags?: Record<string, string>;
+  /** Path passed via `--vars-file <path>` (dotenv format, strict load). */
+  varsFile?: string;
+  /** Set when a `--var` value was malformed — loud usage error. */
+  varsError?: string;
   /** An unrecognized `--flag` — loud usage error rather than a silent no-op. */
   unknownFlag?: string;
   json: boolean;
@@ -79,6 +97,10 @@ function parseArgs(args: string[]): StepRunArgs {
     const eq = (p: string) => (a.startsWith(p + '=') ? a.slice(p.length + 1) : undefined);
     if (a === '--param') addParam(out, take(i++));
     else if (eq('--param') !== undefined) addParam(out, eq('--param'));
+    else if (a === '--var') addVarFlag(out, take(i++));
+    else if (eq('--var') !== undefined) addVarFlag(out, eq('--var'));
+    else if (a === '--vars-file') out.varsFile = take(i++);
+    else if (eq('--vars-file') !== undefined) out.varsFile = eq('--vars-file');
     else if (a === '--json') out.json = true;
     else if (a === '--') continue;
     else if (a.startsWith('--')) out.unknownFlag = a;
@@ -173,14 +195,17 @@ export function runStep(args: string[]): number {
   if (sub === 'run') return runStepRun(args.slice(1));
   const err = (s: string) => process.stderr.write(s);
   if (sub === undefined || sub === '--help' || sub === '-h') {
-    err('Usage: pipeline step run <iteration.md> [--param <name>=<value> ...] [--json]\n');
+    err(
+      'Usage: pipeline step run <iteration.md> [--param <name>=<value> ...] [--var NAME=value ...] [--vars-file <path>] [--json]\n',
+    );
     return sub === undefined ? 2 : 0;
   }
   err(`pipeline step: unknown subcommand '${sub}' (expected 'run')\n`);
   return 2;
 }
 
-/** `pipeline step run <iteration.md> [--param k=v ...] [--json]`. */
+/** `pipeline step run <iteration.md> [--param k=v ...] [--var NAME=value ...]
+ *  [--vars-file <path>] [--json]`. */
 export function runStepRun(args: string[]): number {
   const a = parseArgs(args);
   const err = (s: string) => process.stderr.write(s);
@@ -190,9 +215,12 @@ export function runStepRun(args: string[]): number {
   };
 
   if (a.paramError !== undefined) return usage(a.paramError);
+  if (a.varsError !== undefined) return usage(a.varsError);
   if (a.unknownFlag !== undefined) return usage(a.unknownFlag);
   if (a.iteration === undefined) {
-    return usage('an iteration file path is required — usage: pipeline step run <iteration.md> [--param k=v ...] [--json]');
+    return usage(
+      'an iteration file path is required — usage: pipeline step run <iteration.md> [--param k=v ...] [--var NAME=value ...] [--vars-file <path>] [--json]',
+    );
   }
 
   const iterationAbs = resolve(a.iteration);
@@ -222,6 +250,60 @@ export function runStepRun(args: string[]): number {
   if (spec === null) {
     return usage(`'${step.step_id}' is type: script but the plan produced no script_spec (plan bug)`);
   }
+
+  // PP_* variables (env-variables design, 05 §3): resolve `--var`/`--vars-file`
+  // against the pipeline's `## Variables` declarations exactly as a real run's
+  // init would (CLI > environment > manifest default, D2) — but EPHEMERALLY:
+  // nothing is frozen or persisted (a dry run has no run state). L6 `missing`
+  // is scoped to THIS step's occurrences (verifying one step must not demand
+  // values the step never uses); L10 `unknown-cli-var` stays global (a typo'd
+  // override is never silently dropped, T11).
+  let vars: ResolvedVars | null = null;
+  {
+    let fileVars: Record<string, string> | undefined;
+    if (a.varsFile !== undefined) {
+      const loaded = loadVarsFile(a.varsFile);
+      if (!loaded.ok) return usage(loaded.error);
+      fileVars = loaded.vars;
+    }
+    const cliVars = mergeCliVars(fileVars, a.varFlags);
+    if (hasDeclarations(plan.variables) || cliVars !== undefined) {
+      let manifestRaw = '';
+      try {
+        manifestRaw = readFileSync(join(pipelineRoot, 'PIPELINE.md'), 'utf8');
+      } catch {
+        // computePlan above already surfaced a missing manifest
+      }
+      const init = initRunVariables(
+        plan.variables,
+        cliVars ?? {},
+        process.env,
+        [{ file: `steps/${step.rel}`, raw: readFileSync(iterationAbs, 'utf8') }],
+        manifestRaw,
+        { scopeMissingToOccurrences: true },
+      );
+      if (init.errors.length) return usage(`variable validation failed:\n${init.message}`);
+      vars = init.resolved;
+    }
+  }
+
+  // Substitute the declared script surfaces EXACTLY as a real run will
+  // (05 §4): `command:` argv PER ELEMENT (after tokenization — a value with
+  // spaces stays one argument, E2) and the `script:` value before the
+  // interpreter ladder / absolute-path resolution. Skipped entirely when the
+  // pipeline declares no variables and no flags were passed (E9 zero-change).
+  // NOTE (a4 seam): when lib/script-step.ts gains ctx.variables and performs
+  // this substitution itself at command build, step-run must switch to
+  // passing ctx.variables INSTEAD of pre-substituting — never both (values
+  // are inert only under a single pass, T4).
+  const substSpec: ScriptStepSpec =
+    vars !== null
+      ? {
+          ...spec,
+          command: spec.command !== null ? substituteArgv(spec.command, vars) : null,
+          script: spec.script !== null ? substituteText(spec.script, vars) : null,
+        }
+      : spec;
 
   // §13 — every `${steps.*}` / `${run.task}` binding is unresolvable in a dry
   // run and REQUIRES a `--param` override. List every missing one at once.
@@ -268,8 +350,12 @@ export function runStepRun(args: string[]): number {
     const resolved = resolveParams(spec.params, ctx, a.overrides);
 
     const scriptAbs =
-      spec.script !== null ? (isAbsolute(spec.script) ? spec.script : join(pipelineRoot, spec.script)) : null;
-    const target = scriptAbs ?? (spec.command ? spec.command.join(' ') : '<none>');
+      substSpec.script !== null
+        ? isAbsolute(substSpec.script)
+          ? substSpec.script
+          : join(pipelineRoot, substSpec.script)
+        : null;
+    const target = scriptAbs ?? (substSpec.command ? substSpec.command.join(' ') : '<none>');
 
     if (!resolved.ok) {
       // A binding-class failure BEFORE any spawn (a bad --param type, an unset
@@ -307,9 +393,10 @@ export function runStepRun(args: string[]): number {
       return 1;
     }
 
-    // Same spec the plan produced, with `script:` pre-resolved to an absolute
-    // path (ctx.pipelineRoot is the throwaway dir — see the header comment).
-    const execSpec: ScriptStepSpec = { ...spec, script: scriptAbs };
+    // Same spec the plan produced (PP_* surfaces substituted above), with
+    // `script:` pre-resolved to an absolute path (ctx.pipelineRoot is the
+    // throwaway dir — see the header comment).
+    const execSpec: ScriptStepSpec = { ...substSpec, script: scriptAbs };
 
     const started = Date.now();
     const res = executeScriptStep(execSpec, iterationAbs, ctx);

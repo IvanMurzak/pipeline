@@ -1098,7 +1098,7 @@ test('regression — parallel worktree still merges (external machinery untouche
 
 const CLI = join(import.meta.dir, '..', 'src', 'cli.ts');
 
-function next(root: string, runId: string, extra: string[]) {
+function next(root: string, runId: string, extra: string[], envVars?: Record<string, string>) {
   // Controlled cwd + env: `pipeline next` now auto-emits UI events whose journal
   // resolves from the subprocess cwd — running from the repo checkout would leak
   // events into the plugin repo itself. cwd = the temp pipeline root (no .git →
@@ -1108,6 +1108,10 @@ function next(root: string, runId: string, extra: string[]) {
   delete env.PIPELINE_UI_RUN_ID;
   delete env.PIPELINE_UI_PARENT_RUN_ID;
   delete env.CLAUDE_SESSION_ID;
+  // Deterministic PP_* environment for the variable tests: a stray PP_* var in
+  // the developer's shell must never satisfy (or fail) a fixture resolution.
+  for (const k of Object.keys(env)) if (k.startsWith('PP_')) delete env[k];
+  Object.assign(env, envVars ?? {});
   env.USERPROFILE = root;
   env.HOME = root;
   // process.execPath (the real bun binary), NOT the string 'bun': with an npm
@@ -1323,4 +1327,342 @@ test('pipeline next CLI (--manual-hooks): finalize:true external run drives prov
   r = next(root, run, ['--manual-hooks', '--record', JSON.stringify({ kind: 'worktree', phase: 'torn-down', ok: true })]);
   expect(r.json.action).toBe('done');
   expect(r.status).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// PP_* variables — run-init resolve → validate → freeze (env-variables design
+// 05 §3, P2): `--var`/`--vars-file` flags, the F2 halt, D11 freeze/resume
+// semantics, the F10 legacy one-time init, and ActionStep.source_path.
+// ---------------------------------------------------------------------------
+
+/** A sequential pipeline declaring variables (## Variables at PIPELINE.md:6;
+ *  PP_SERVICE declared on line 7, PP_MODE on 8, PP_OPT on 9) with occurrences
+ *  in both step bodies (each on line 3 of its file). */
+function scaffoldVars(): string {
+  const root = mkdtempSync(join(tmpdir(), 'next-vars-'));
+  created.push(root);
+  writeFileSync(
+    join(root, 'PIPELINE.md'),
+    [
+      '# P',
+      '',
+      '## End State',
+      'x',
+      '',
+      '## Variables',
+      '- PP_SERVICE (required) — service under release',
+      '- PP_MODE (default: fast) — build mode',
+      '- PP_OPT — optional knob',
+      '',
+    ].join('\n'),
+  );
+  const steps = join(root, 'steps');
+  mkdirSync(steps, { recursive: true });
+  writeFileSync(join(steps, '01-a.md'), '# a\n\nDeploy ${PP_SERVICE} in ${PP_MODE} mode. Opt: ${PP_OPT:-none}.\n');
+  writeFileSync(join(steps, '02-b.md'), '# b\n\nAnnounce ${PP_SERVICE}.\n');
+  return root;
+}
+
+const readState = (root: string, run: string) =>
+  JSON.parse(readFileSync(join(root, '.runtime', run, 'next.json'), 'utf8'));
+
+test('vars: run init resolves --var > env > manifest default and FREEZES the map into next.json; source_path always set', () => {
+  const root = scaffoldVars();
+  const run = 'varfreeze';
+  // PP_SERVICE from --var (beats the env value), PP_MODE from its manifest
+  // default, PP_OPT explicitly EMPTY via `--var PP_OPT=` (resolved-empty is a
+  // value, distinct from unresolved).
+  const r = next(root, run, ['--var', 'PP_SERVICE=payments', '--var', 'PP_OPT='], { PP_SERVICE: 'env-loses' });
+  expect(r.status).toBe(0);
+  expect(r.json.action).toBe('run-step');
+  // ActionStep.source_path: always present, === path until rendering (a5).
+  expect(r.json.steps[0].source_path).toBe(r.json.steps[0].path);
+  expect(readState(root, run).variables).toEqual({ PP_SERVICE: 'payments', PP_MODE: 'fast', PP_OPT: '' });
+});
+
+test('vars: E9 zero-change — a pipeline without declarations never gains a variables key', () => {
+  const root = scaffoldSequential(1);
+  const run = 'novars';
+  expect(next(root, run, []).json.action).toBe('run-step');
+  expect('variables' in readState(root, run)).toBe(false);
+});
+
+test('vars: resume reuses the frozen map VERBATIM — no environment re-read after init (07 P2 gate)', () => {
+  const root = scaffoldVars();
+  const run = 'varresume';
+  // Init resolves PP_SERVICE from the ENVIRONMENT tier.
+  expect(next(root, run, [], { PP_SERVICE: 'from-env' }).json.action).toBe('run-step');
+  expect(readState(root, run).variables.PP_SERVICE).toBe('from-env');
+  // The environment drifts between sessions; a no-record auto-resume re-enters
+  // the run — the frozen value MUST survive untouched.
+  const r = next(root, run, [], { PP_SERVICE: 'drifted' });
+  expect(r.json.action).toBe('run-step');
+  expect(readState(root, run).variables.PP_SERVICE).toBe('from-env');
+});
+
+test('vars: --var on a frozen run is REJECTED (D11) as a USAGE error — state untouched, flag-less resume still works', () => {
+  const root = scaffoldVars();
+  const run = 'varfrozen';
+  expect(next(root, run, ['--var', 'PP_SERVICE=payments']).json.action).toBe('run-step');
+  const before = readFileSync(join(root, '.runtime', run, 'next.json'), 'utf8');
+
+  // Exit 2 (usage), stderr message, NO stdout action: the run is intact — a
+  // halt-shaped rejection would let callers (drive) record a phantom
+  // run.halted for a perfectly healthy run.
+  const spawnRejected = (extra: string[]) =>
+    spawnSync(process.execPath, [CLI, 'next', '--root', root, '--run-id', run, ...extra], {
+      encoding: 'utf8',
+      cwd: root,
+      env: { ...process.env, HOME: root, USERPROFILE: root },
+    });
+  const rejected = spawnRejected(['--resume', '--var', 'PP_SERVICE=other']);
+  expect(rejected.status).toBe(2);
+  expect(rejected.stderr).toContain('variables are frozen');
+  expect(rejected.stderr).toContain('start a new run');
+  expect(rejected.stdout.trim()).toBe(''); // no action emitted
+  // A --vars-file alongside a frozen map is rejected the same way.
+  const vf = join(root, 'extra.env');
+  writeFileSync(vf, 'PP_SERVICE=other\n');
+  const rejectedFile = spawnRejected(['--resume', '--vars-file', vf]);
+  expect(rejectedFile.status).toBe(2);
+  expect(rejectedFile.stderr).toContain('variables are frozen');
+  // The rejection changed NOTHING on disk — the run resumes normally without flags.
+  expect(readFileSync(join(root, '.runtime', run, 'next.json'), 'utf8')).toBe(before);
+  const resumed = next(root, run, ['--resume']);
+  expect(resumed.json.action).toBe('run-step');
+  expect(readState(root, run).variables.PP_SERVICE).toBe('payments');
+});
+
+test('vars: invokeNext embedder entry defensively refuses cliVars on a frozen run (state untouched)', async () => {
+  // `pipeline next`/`drive` reject at the command layer (exit 2); a direct
+  // invokeNext caller gets the same refusal as a code-1 halt-shaped result
+  // BEFORE the composition router could descend anywhere.
+  const { invokeNext } = await import('../src/commands/next');
+  const root = scaffoldVars();
+  const run = 'varembed';
+  expect(next(root, run, ['--var', 'PP_SERVICE=payments']).json.action).toBe('run-step');
+  const before = readFileSync(join(root, '.runtime', run, 'next.json'), 'utf8');
+  const res = invokeNext({ root, runId: run, cliVars: { PP_SERVICE: 'other' }, resume: true });
+  expect(res.code).toBe(1);
+  expect(res.action.action).toBe('halt');
+  expect((res.action as { reason?: string }).reason).toContain('variables are frozen');
+  expect(readFileSync(join(root, '.runtime', run, 'next.json'), 'utf8')).toBe(before);
+});
+
+test('vars: E9 — an EMPTY --vars-file on a declaration-less pipeline never freezes `variables: {}`', () => {
+  const root = scaffoldSequential(2);
+  const run = 'varemptyfile';
+  const vf = join(root, 'empty.env');
+  writeFileSync(vf, '# just comments\n\n');
+  const r = next(root, run, ['--vars-file', vf]);
+  expect(r.json.action).toBe('run-step');
+  // No declarations → no key, even though flags were technically supplied.
+  expect('variables' in readState(root, run)).toBe(false);
+  // …and a later typo'd --var is therefore the L10 error, never the
+  // confusing "variables are frozen" rejection.
+  const typo = next(root, run, ['--var', 'PP_TYPO=x', '--resume']);
+  expect(typo.status).toBe(1);
+  expect(typo.json.reason).toContain('PP_TYPO');
+  expect(typo.json.reason).toContain('not declared');
+});
+
+test('vars: a __proto__ line in a --vars-file is a malformed-line error, never silently dropped', () => {
+  const root = scaffoldVars();
+  const vf = join(root, 'proto.env');
+  writeFileSync(vf, '__proto__=x\nPP_SERVICE=payments\n');
+  const r = spawnSync(
+    process.execPath,
+    [CLI, 'next', '--root', root, '--run-id', 'varproto', '--vars-file', vf],
+    { encoding: 'utf8', cwd: root, env: { ...process.env, HOME: root, USERPROFILE: root } },
+  );
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain('line 1');
+  expect(existsSync(join(root, '.runtime'))).toBe(false);
+});
+
+test('vars: F10 legacy state (predates variables) — --var IS accepted and the one-time init writes back', () => {
+  // The run starts on a pipeline WITHOUT declarations (old CLI ≙ no key)…
+  const root = scaffoldSequential(2);
+  const run = 'varlegacy';
+  const plan = computePlan(root);
+  expect(next(root, run, []).json.action).toBe('run-step');
+  expect('variables' in readState(root, run)).toBe(false);
+
+  // …then the pipeline gains declarations + occurrences MID-RUN.
+  writeFileSync(
+    join(root, 'PIPELINE.md'),
+    '# P\n\n## End State\nx\n\n## Variables\n- PP_SERVICE (required) — svc\n',
+  );
+  writeFileSync(join(root, 'steps', '02-step.md'), '# step 02\n\nUse ${PP_SERVICE}.\n');
+
+  // A loop call WITHOUT --var (and no env value) F2-halts — but leaves the
+  // state untouched so the retry loses nothing.
+  const record = JSON.stringify({ kind: 'step', outcome: 'completed', next_iteration: plan.steps[1].path });
+  const halted = next(root, run, ['--record', record]);
+  expect(halted.status).toBe(1);
+  expect(halted.json.reason).toContain('PP_SERVICE');
+  expect('variables' in readState(root, run)).toBe(false);
+
+  // The SAME call with --var performs the one-time resolve + write-back and
+  // consumes the record normally (D11-REVISED: --var is legal here).
+  const ok = next(root, run, ['--var', 'PP_SERVICE=payments', '--record', record]);
+  expect(ok.json.action).toBe('run-step');
+  expect(ok.json.steps[0].path).toBe(plan.steps[1].path);
+  expect(readState(root, run).variables).toEqual({ PP_SERVICE: 'payments' });
+});
+
+test('vars: F2 halt before ANY action — aggregated listing with declaration line, every occurrence, per-kind remedy', () => {
+  const root = scaffoldVars();
+  // Make PP_OPT ALSO missing-hard: a bare occurrence with no inline default.
+  writeFileSync(join(root, 'steps', '02-b.md'), '# b\n\nAnnounce ${PP_SERVICE}.\nOpt is ${PP_OPT}.\n');
+  const run = 'varf2';
+  const r = next(root, run, []);
+  expect(r.status).toBe(1);
+  expect(r.json.action).toBe('halt');
+  const reason: string = r.json.reason;
+
+  // Aggregated (never first-error-only): BOTH unresolved variables listed.
+  expect(reason).toContain('Unresolved pipeline variables:');
+  expect(reason).toContain('PP_SERVICE (required) — service under release');
+  expect(reason).toContain('PP_OPT');
+
+  // Declaration line + file (09 quality bar).
+  expect(reason).toContain('PIPELINE.md:7'); // - PP_SERVICE …
+  expect(reason).toContain('PIPELINE.md:9'); // - PP_OPT …
+
+  // EVERY occurrence, file:line.
+  expect(reason).toContain('steps/01-a.md:3'); // ${PP_SERVICE} (and ${PP_OPT:-none})
+  expect(reason).toContain('steps/02-b.md:3'); // ${PP_SERVICE}
+  expect(reason).toContain('steps/02-b.md:4'); // bare ${PP_OPT}
+
+  // Per-kind remedies: required offers --var/env ONLY (a manifest/inline
+  // default never satisfies `required`, D1.2)…
+  const serviceBlock = reason.slice(reason.indexOf('PP_SERVICE (required)'), reason.indexOf('  PP_OPT'));
+  expect(serviceBlock).toContain('--var PP_SERVICE=');
+  expect(serviceBlock).toContain('PP_SERVICE environment variable');
+  expect(serviceBlock.toLowerCase()).not.toContain('default');
+  // …optional-missing additionally offers the default channels.
+  const optBlock = reason.slice(reason.indexOf('  PP_OPT'));
+  expect(optBlock).toContain('--var PP_OPT=');
+  expect(optBlock).toContain('(default: ...)');
+  expect(optBlock).toContain('${PP_OPT:-value}');
+  expect(optBlock).toContain('occurrences without an inline default: steps/02-b.md:4');
+
+  // Halt BEFORE the first action: no run state was created at all.
+  expect(existsSync(join(root, '.runtime', run, 'next.json'))).toBe(false);
+});
+
+test('vars: L10 — a typo of --var is an error, never silently dropped', () => {
+  const root = scaffoldVars();
+  const run = 'vartypo';
+  const r = next(root, run, ['--var', 'PP_SERVICE=payments', '--var', 'PP_SERVISE=oops']);
+  expect(r.status).toBe(1);
+  expect(r.json.action).toBe('halt');
+  expect(r.json.reason).toContain('PP_SERVISE');
+  expect(r.json.reason).toContain('not declared in PIPELINE.md ## Variables');
+  expect(existsSync(join(root, '.runtime', run, 'next.json'))).toBe(false);
+});
+
+test('vars: L10/T11 — --vars-file with non-PP_/undeclared entries is REJECTED and never echoes values', () => {
+  const root = scaffoldVars();
+  const run = 'varsfilereject';
+  const vf = join(root, 'project.env');
+  // A project .env pointed at by mistake: one legit entry, one undeclared PP_
+  // name, one non-PP_ secret-looking entry.
+  writeFileSync(vf, 'PP_SERVICE=payments\nPP_UNDECLARED=x\nDATABASE_URL=postgres://user:hunter2@db/prod\n');
+  const r = next(root, run, ['--vars-file', vf]);
+  expect(r.status).toBe(1);
+  expect(r.json.action).toBe('halt');
+  expect(r.json.reason).toContain('PP_UNDECLARED');
+  expect(r.json.reason).toContain('DATABASE_URL');
+  expect(r.json.reason).toContain('PP_[A-Z0-9_]+');
+  // The VALUE (a credential-bearing URL) must never appear in the error.
+  expect(JSON.stringify(r.json)).not.toContain('hunter2');
+  expect(existsSync(join(root, '.runtime', run, 'next.json'))).toBe(false);
+});
+
+test('vars: --vars-file unreadable/malformed → startup usage error naming the offending line (number only)', () => {
+  const root = scaffoldVars();
+  // Unreadable: exit 2, nothing created.
+  const missing = spawnSync(
+    process.execPath,
+    [CLI, 'next', '--root', root, '--run-id', 'vfmiss', '--vars-file', join(root, 'nope.env')],
+    { encoding: 'utf8', cwd: root, env: { ...process.env, HOME: root, USERPROFILE: root } },
+  );
+  expect(missing.status).toBe(2);
+  expect(missing.stderr).toContain('could not be read');
+
+  // Malformed: names the LINE NUMBER, never the content (it could be a secret).
+  const vf = join(root, 'bad.env');
+  writeFileSync(vf, 'PP_SERVICE=ok\nsuper-secret-blob-no-equals\n');
+  const bad = spawnSync(
+    process.execPath,
+    [CLI, 'next', '--root', root, '--run-id', 'vfbad', '--vars-file', vf],
+    { encoding: 'utf8', cwd: root, env: { ...process.env, HOME: root, USERPROFILE: root } },
+  );
+  expect(bad.status).toBe(2);
+  expect(bad.stderr).toContain('line 2');
+  expect(bad.stderr).not.toContain('super-secret-blob-no-equals');
+  expect(existsSync(join(root, '.runtime'))).toBe(false);
+});
+
+test('vars: --var beats --vars-file for the same name (D2 merge order)', () => {
+  const root = scaffoldVars();
+  const run = 'varmerge';
+  const vf = join(root, 'vars.env');
+  writeFileSync(vf, 'PP_SERVICE=from-file\nPP_OPT=file-opt\n');
+  const r = next(root, run, ['--vars-file', vf, '--var', 'PP_SERVICE=from-flag']);
+  expect(r.json.action).toBe('run-step');
+  expect(readState(root, run).variables).toEqual({ PP_SERVICE: 'from-flag', PP_MODE: 'fast', PP_OPT: 'file-opt' });
+});
+
+test('vars: a malformed --var value is a LOUD exit-2 usage error', () => {
+  const root = scaffoldVars();
+  const r = spawnSync(
+    process.execPath,
+    [CLI, 'next', '--root', root, '--run-id', 'varmal', '--var', 'PP_SERVICE'],
+    { encoding: 'utf8', cwd: root, env: { ...process.env, HOME: root, USERPROFILE: root } },
+  );
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain('--var expects NAME=value');
+});
+
+test('vars: old-reader tolerance (08 rollback) — unknown next.json keys are ignored AND preserved by the loader', () => {
+  // Proxy for "an older CLI ignores the unknown `variables` key": this CLI's
+  // own state loader is a plain JSON.parse with no schema validation — any
+  // unknown key (like `variables` is to a pre-P2 CLI, or a future key to this
+  // one) neither crashes the run nor is stripped on re-save. There is NO
+  // state-format marker in next.json to bump — "do not downgrade mid-run"
+  // goes into the release notes instead (a6).
+  const root = scaffoldVars();
+  const run = 'varoldreader';
+  const plan = computePlan(root);
+  expect(next(root, run, ['--var', 'PP_SERVICE=payments']).json.action).toBe('run-step');
+  const stateFile = join(root, '.runtime', run, 'next.json');
+  const st = JSON.parse(readFileSync(stateFile, 'utf8'));
+  st.__future_key = { from: 'a newer CLI' };
+  writeFileSync(stateFile, JSON.stringify(st, null, 2) + '\n', 'utf8');
+
+  const r = next(root, run, ['--record', JSON.stringify({ kind: 'step', outcome: 'completed', next_iteration: plan.steps[1].path })]);
+  expect(r.json.action).toBe('run-step');
+  const after = readState(root, run);
+  expect(after.__future_key).toEqual({ from: 'a newer CLI' });
+  expect(after.variables).toEqual({ PP_SERVICE: 'payments', PP_MODE: 'fast' });
+});
+
+test('vars: 07 P2 source gate — the engine and run-vars libs never read process.env; commands/next.ts injects it exactly once', () => {
+  // Comments may DOCUMENT the discipline ("never reads process.env") — the
+  // gate checks CODE, so strip line + block comments before scanning.
+  const code = (rel: string) =>
+    readFileSync(join(import.meta.dir, '..', 'src', rel), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+  expect(code('lib/substitution.ts')).not.toContain('process.env');
+  expect(code('lib/run-vars.ts')).not.toContain('process.env');
+  // The single injected read (D9): exactly one initRunVariables call site in
+  // the next command, receiving process.env as the injected env parameter.
+  const nextSrc = code('commands/next.ts');
+  const calls = nextSrc.match(/initRunVariables\(/g) ?? [];
+  expect(calls.length).toBe(1);
+  expect(nextSrc).toContain('initRunVariables(plan.variables, a.cliVars ?? {}, process.env');
 });

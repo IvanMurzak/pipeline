@@ -1,6 +1,7 @@
 // `pipeline drive --root <pipeline_root> --run-id <id> --start <iteration-path>
 //   [--default-model <m>] [--model <step_id>=<m> ...]
 //   [--default-effort <level>] [--effort <step_id>=<level> ...] [--resume]
+//   [--var NAME=value ...] [--vars-file <path>]
 //   [--answer <text> | --answer-file <path>]
 //   [--task <text> | --task-file <path>]
 //   [--executor-cmd <template>] [--json]`
@@ -90,7 +91,8 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import { invokeNext } from './next';
+import { frozenVariablesError, invokeNext } from './next';
+import { addVarFlag, loadVarsFile, mergeCliVars } from '../lib/run-vars';
 import type { ActionStep, LayerResultEntry, MergeBranch, NextRecord, StepRecord } from '../lib/next';
 import { realGit, type GitResult, type GitRunner } from '../lib/git';
 import { addUsage, emptyUsage, parseEnvelope, type ClaudeEnvelope } from '../lib/envelope';
@@ -499,6 +501,14 @@ interface DriveArgs {
   effortOverrides?: Record<string, string>;
   /** Set when an `--effort` value was malformed — loud usage error (exit 2). */
   effortError?: string;
+  /** PP_* overrides from repeated `--var NAME=value` (env-variables design):
+   *  forwarded to the `next` engine's INIT invocation, which resolves and
+   *  freezes them into next.json. undefined = no flag passed. */
+  varFlags?: Record<string, string>;
+  /** Path passed via `--vars-file <path>` (dotenv format, strict load). */
+  varsFile?: string;
+  /** Set when a `--var` value was malformed — loud usage error (exit 2). */
+  varsError?: string;
   resume: boolean;
   /** The answer to a parked needs-input question (--answer / --answer-file). */
   answer?: string;
@@ -559,6 +569,10 @@ function parseArgs(args: string[]): DriveArgs {
     else if (eq('--default-effort') !== undefined) out.defaultEffort = asModel(eq('--default-effort'));
     else if (a === '--effort') addEffortOverride(out, take(i++));
     else if (eq('--effort') !== undefined) addEffortOverride(out, eq('--effort'));
+    else if (a === '--var') addVarFlag(out, take(i++));
+    else if (eq('--var') !== undefined) addVarFlag(out, eq('--var'));
+    else if (a === '--vars-file') out.varsFile = take(i++);
+    else if (eq('--vars-file') !== undefined) out.varsFile = eq('--vars-file');
     else if (a === '--executor-cmd') out.executorCmd = take(i++);
     else if (eq('--executor-cmd') !== undefined) out.executorCmd = eq('--executor-cmd');
     else if (a === '--answer') out.answer = take(i++);
@@ -630,6 +644,36 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
   if (a.effortError !== undefined) {
     err(`pipeline drive: ${a.effortError}\n`);
     return 2;
+  }
+  // PP_* variables (env-variables design): same loud usage errors as `next`,
+  // resolved BEFORE any run-start setup so a malformed flag/file touches
+  // nothing. The merged map is forwarded to the engine's FIRST invocation
+  // only (init/resume — like --start): the engine freezes it into next.json,
+  // and re-supplying it against a frozen map is the D11 error.
+  if (a.varsError !== undefined) {
+    err(`pipeline drive: ${a.varsError}\n`);
+    return 2;
+  }
+  let fileVars: Record<string, string> | undefined;
+  if (a.varsFile !== undefined) {
+    const loaded = loadVarsFile(a.varsFile);
+    if (!loaded.ok) {
+      err(`pipeline drive: ${loaded.error}\n`);
+      return 2;
+    }
+    fileVars = loaded.vars;
+  }
+  const cliVars = mergeCliVars(fileVars, a.varFlags);
+  // D11: variables against an already-frozen run (a resume with leftover
+  // --var flags) are a USAGE error — exit 2 before any run-start setup, no
+  // phantom run.halted event, no stats write; a flag-less --resume continues
+  // the run untouched.
+  if (a.root !== undefined && a.runId !== undefined) {
+    const frozen = frozenVariablesError(a.root, a.runId, cliVars);
+    if (frozen !== null) {
+      err(`pipeline drive: ${frozen}\n`);
+      return 2;
+    }
   }
   // Resolve the one-shot answer for a parked needs-input question. Consumed by
   // the FIRST awaiting step it can be delivered to (sequential runs park on
@@ -1057,6 +1101,10 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
       modelOverrides: a.modelOverrides,
       defaultEffort: a.defaultEffort,
       effortOverrides: a.effortOverrides,
+      // --var/--vars-file belong to the init/resume call only (the engine
+      // freezes the map into next.json there; loop calls must not re-supply
+      // it or they would trip the D11 frozen-variables error).
+      ...(first && cliVars !== undefined ? { cliVars } : {}),
       record,
       resume: first && a.resume,
       manualHooks: false,

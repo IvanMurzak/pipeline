@@ -1,6 +1,7 @@
 // `pipeline next --root <pipeline_root> --run-id <id> [--start <iteration-path>]
 //   [--default-model <m>] [--model <step_id>=<m> ...]
 //   [--default-effort <level>] [--effort <step_id>=<level> ...]
+//   [--var NAME=value ...] [--vars-file <path>]
 //   [--record '<json>' | --record-file <path>] [--resume] [--manual-hooks]
 //   [--manual-scripts]`
 //
@@ -107,6 +108,15 @@ import {
   type ScriptStepSpec,
 } from '../lib/script-types';
 import { MAX_COMPOSITION_DEPTH } from '../lib/compose';
+import {
+  addVarFlag,
+  collectRunVarsFiles,
+  hasDeclarations,
+  initRunVariables,
+  loadVarsFile,
+  mergeCliVars,
+  type ResolvedVars,
+} from '../lib/run-vars';
 import { buildGateQuestion, parseGateDecision, type GateQuestion } from '../lib/gate';
 import {
   COMPOSE_EXEC_GUARD,
@@ -137,6 +147,15 @@ interface NextArgs {
   effortOverrides?: Record<string, string>;
   /** Set when an `--effort` value was malformed — same loudness as modelError. */
   effortError?: string;
+  /** PP_* overrides from repeated `--var NAME=value` flags (env-variables
+   *  design, 05 §3). undefined = no flag passed — load-bearing for the
+   *  D11 frozen-resume check (an EMPTY set still counts as "supplied"). */
+  varFlags?: Record<string, string>;
+  /** Path passed via `--vars-file <path>` (dotenv format, strict load). */
+  varsFile?: string;
+  /** Set when a `--var` value was malformed (no NAME=value shape) — the same
+   *  loud usage error as modelError; a typo'd override is never dropped. */
+  varsError?: string;
   record?: NextRecord | null;
   /**
    * Set when `--record` was PROVIDED but could not be parsed into an object.
@@ -215,6 +234,10 @@ function parseArgs(args: string[]): NextArgs {
     else if (eq('--default-effort') !== undefined) out.defaultEffort = asModel(eq('--default-effort'));
     else if (a === '--effort') addEffortOverride(out, take(i++));
     else if (eq('--effort') !== undefined) addEffortOverride(out, eq('--effort'));
+    else if (a === '--var') addVarFlag(out, take(i++));
+    else if (eq('--var') !== undefined) addVarFlag(out, eq('--var'));
+    else if (a === '--vars-file') out.varsFile = take(i++);
+    else if (eq('--vars-file') !== undefined) out.varsFile = eq('--vars-file');
     else if (a === '--record-file') out.recordFile = take(i++);
     else if (eq('--record-file') !== undefined) out.recordFile = eq('--record-file');
     else if (a === '--record') {
@@ -300,6 +323,44 @@ function loadState(root: string, runId: string): NextState | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * D11 frozen-variables rejection (env-variables design): supplying
+ * `--var`/`--vars-file` against a run whose next.json ALREADY carries a
+ * frozen `variables` map is an operator USAGE error — the run itself is
+ * intact and a flag-less resume continues it, so this must be rejected
+ * BEFORE the engine runs (never routed through a 'halt', which would emit a
+ * phantom run.halted event / terminal stats for a healthy run). Also rejects
+ * supplying variables while a COMPOSED CHILD run is active: the router would
+ * descend into the child and silently drop the flags (the L10-class
+ * invisible misconfiguration this feature forbids).
+ *
+ * Returns the error text, or null when the supply is legal (no flags, a
+ * fresh run, or the F10 legacy one-time init). Used by `pipeline next` and
+ * `pipeline drive` (exit 2) and defensively at the invokeNext entry.
+ */
+export function frozenVariablesError(
+  root: string,
+  runId: string,
+  cliVars: Record<string, string> | undefined,
+): string | null {
+  if (cliVars === undefined) return null;
+  const state = loadState(root, runId);
+  if (state === null) return null;
+  if (Object.prototype.hasOwnProperty.call(state, 'variables')) {
+    return (
+      'variables are frozen for this run (resolved and persisted in next.json at run init) — ' +
+      'start a new run to change them, or resume without --var/--vars-file'
+    );
+  }
+  if (state.active_child != null) {
+    return (
+      'a composed child pipeline run is active for this run — variables can only be supplied ' +
+      'when starting a run, not while a child run is in flight'
+    );
+  }
+  return null;
 }
 
 function saveState(root: string, runId: string, state: NextState): void {
@@ -1073,6 +1134,13 @@ export interface InvokeNextArgs {
   /** Per-run step-effort overrides — same persistence contract as
    *  modelOverrides. */
   effortOverrides?: Record<string, string | null>;
+  /** PP_* variable overrides — the merged `--var`/`--vars-file` map
+   *  (vars-file first, flags win; env-variables design D2/D11). Pass ONLY on
+   *  the init/resume invocation (like `start`): the map is resolved + FROZEN
+   *  into next.json once, and supplying it again when the state already
+   *  carries a frozen map is the D11 "variables are frozen" error. undefined
+   *  = no flags passed (an EMPTY map still counts as supplied). */
+  cliVars?: Record<string, string>;
   record?: NextRecord | null;
   resume?: boolean;
   manualHooks?: boolean;
@@ -1181,6 +1249,82 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       plan,
     };
   }
+
+  // -------------------------------------------------------------------------
+  // PP_* variables — run-init resolve → validate → freeze (env-variables
+  // design 05 §3, P2). Runs BEFORE any record consumption or action: a
+  // mis-supplied run must halt with state (and the pending record's step)
+  // untouched, so the operator's retry with corrected flags loses nothing.
+  //
+  //   frozen map in state  → reuse VERBATIM (D11; no re-resolve, no env read —
+  //                          environment drift mid-run cannot change values).
+  //                          `--var`/`--vars-file` alongside a frozen map is
+  //                          the D11 "variables are frozen" error — REJECTED
+  //                          UPSTREAM (frozenVariablesError: exit-2 usage
+  //                          error in runNext/runDrive; a defensive halt at
+  //                          the invokeNext entry for embedders), so this
+  //                          core never sees that combination.
+  //   state PREDATES vars  → (legacy state, or the first run after the
+  //                          pipeline gained declarations) `--var` IS accepted
+  //                          and a ONE-TIME resolve runs now, written back on
+  //                          the next state save (F10 migration).
+  //   fresh run            → resolve + validate; L6 missing / L10 unknown
+  //                          emit the aggregated F2 halt (exit non-zero,
+  //                          before ANY action, no state created).
+  //
+  // The `resolveVariables(..., process.env)` call inside initRunVariables is
+  // THE single environment read of the whole feature (D9): the engine itself
+  // never touches process.env, and every later consumer (script argv/env
+  // overlay, rendering — a4/a5) reads only the frozen map.
+  // -------------------------------------------------------------------------
+  let frozenVars: ResolvedVars | null = null;
+  {
+    const stateHasVars =
+      prevState !== null && Object.prototype.hasOwnProperty.call(prevState, 'variables');
+    if (stateHasVars) {
+      frozenVars = prevState!.variables ?? {};
+    } else if (hasDeclarations(plan.variables) || a.cliVars !== undefined) {
+      const { files, manifestRaw } = collectRunVarsFiles(a.root, plan.steps);
+      const init = initRunVariables(plan.variables, a.cliVars ?? {}, process.env, files, manifestRaw);
+      if (init.errors.length) {
+        const reason = init.message ?? 'variable validation failed';
+        return {
+          action: { action: 'halt', reason, status: 'halted' },
+          out: {
+            action: 'halt',
+            status: 'halted',
+            reason,
+            errors: init.errors.map((i) => i.message),
+            mode,
+          },
+          code: 1,
+          plan,
+        };
+      }
+      // Freeze ONLY when the pipeline actually declares variables: with zero
+      // declarations the resolution above exists purely to surface L10 for
+      // any supplied names — an EMPTY supplied set (e.g. a comments-only
+      // --vars-file) must not stamp `variables: {}` onto a declaration-less
+      // run (E9 zero-change; a bogus key would also make every later
+      // `--var` trip the frozen-map rejection on a pipeline that has no
+      // variables at all).
+      frozenVars = hasDeclarations(plan.variables) ? init.resolved : null;
+    }
+    // else: no declarations, no flags — the E9 zero-change path (no `variables`
+    // key is ever written; state shape is byte-identical to today).
+  }
+
+  /** Stamp the run-scoped persisted fields onto a state object — the ONE
+   *  place that knows the set (model/effort overrides + the frozen PP_*
+   *  variable map, D11). Called before every save: init stamps fresh values;
+   *  loop calls/resumes re-stamp the same ones; a legacy state gains the
+   *  `variables` key here (the F10 one-time write-back). frozenVars null =
+   *  the run has no variables — the key is never created (E9). */
+  const stampRunFields = (s: NextState): void => {
+    s.model_overrides = plan.model_overrides;
+    s.effort_overrides = plan.effort_overrides;
+    if (frozenVars !== null) s.variables = frozenVars;
+  };
 
   // T3-14 approval gates: a {kind:'gate-answer'} record delivers the decision
   // for the pending `type: gate` dispatch. The COMMAND layer (never the pure
@@ -1294,11 +1438,11 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   if (repairedStepId !== null && !(newState.repaired_steps ?? []).includes(repairedStepId)) {
     (newState.repaired_steps ??= []).push(repairedStepId);
   }
-  // Persist the run's effective step-model/effort overrides (init stamps them;
-  // later calls re-stamp the same map, or a re-passed one). The pure engine
-  // ignores the fields — they exist so loop calls / resumes recompute the SAME plan.
-  newState.model_overrides = plan.model_overrides;
-  newState.effort_overrides = plan.effort_overrides;
+  // Persist the run's effective step-model/effort overrides + frozen PP_*
+  // variables (init stamps them; later calls re-stamp the same values). The
+  // pure engine ignores the fields — they exist so loop calls / resumes
+  // recompute the SAME plan and reuse the SAME frozen map.
+  stampRunFields(newState);
 
   // Early run.started measurement on init — BEFORE any in-process hook/script
   // execution appends its own timeline lines, so the buffer stays
@@ -1326,8 +1470,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   /** Re-stamp the override maps + persist next.json (the crash-safe parking
    *  used before every in-process spawn and at the tail). */
   const persistState = (): void => {
-    newState.model_overrides = plan.model_overrides;
-    newState.effort_overrides = plan.effort_overrides;
+    stampRunFields(newState);
     saveState(a.root, a.runId, newState);
   };
 
@@ -1717,8 +1860,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   }
 
   // Re-stamp defensively — the in-process loop may have swapped the state object.
-  newState.model_overrides = plan.model_overrides;
-  newState.effort_overrides = plan.effort_overrides;
+  stampRunFields(newState);
   saveState(a.root, a.runId, newState);
 
   // Announce the outgoing action (after completions, so journal order is
@@ -1776,6 +1918,21 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
  *  drive`, and embedders call. Behaviorally identical to the core for every
  *  run without `type: pipeline` steps. */
 export function invokeNext(a: InvokeNextArgs): InvokeNextResult {
+  // D11 defensive gate for EMBEDDERS: `pipeline next`/`drive` already reject
+  // this as an exit-2 usage error before invoking (frozenVariablesError), but
+  // a direct invokeNext caller must get the same rejection — checked HERE, at
+  // the top-level entry, because the composition router below would otherwise
+  // descend into an active child run before the core ever saw the flags
+  // (silently dropping them). State is untouched: this is a refusal, not a
+  // run halt.
+  const frozen = frozenVariablesError(a.root, a.runId, a.cliVars);
+  if (frozen !== null) {
+    return {
+      action: { action: 'halt', reason: frozen, status: 'halted' },
+      out: { action: 'halt', status: 'halted', reason: frozen },
+      code: 1,
+    };
+  }
   return invokeComposed(a, 0);
 }
 
@@ -1790,7 +1947,10 @@ function remainingBudget(budget: number | undefined, entryMs: number): number {
 
 /** The passthrough knobs every nested invocation inherits from the caller's
  *  top-level call. Model/effort flags deliberately do NOT propagate — a child
- *  run resolves its own defaults from its own PIPELINE.md. */
+ *  run resolves its own defaults from its own PIPELINE.md. `cliVars` does not
+ *  propagate either (same precedent): a composed child pipeline resolves its
+ *  OWN `## Variables` declarations from the environment/manifest defaults at
+ *  its own init — the parent's `--var` overrides stay with the parent run. */
 function nestedArgs(
   a: InvokeNextArgs,
   entryMs: number,
@@ -2138,6 +2298,34 @@ export function runNext(args: string[]): number {
     process.stderr.write(`pipeline next: ${a.effortError}\n`);
     return 2;
   }
+  // Same loudness for a malformed `--var` (no NAME=value shape) — a typo'd
+  // override must never be silently dropped (L10/T11).
+  if (a.varsError !== undefined) {
+    process.stderr.write(`pipeline next: ${a.varsError}\n`);
+    return 2;
+  }
+  // `--vars-file`: strict dotenv load BEFORE any state exists — unreadable or
+  // malformed files are startup errors naming the offending line (F10). Key
+  // rejection (non-PP_/undeclared, T11) happens in run-init validation (L10).
+  let fileVars: Record<string, string> | undefined;
+  if (a.varsFile !== undefined) {
+    const loaded = loadVarsFile(a.varsFile);
+    if (!loaded.ok) {
+      process.stderr.write(`pipeline next: ${loaded.error}\n`);
+      return 2;
+    }
+    fileVars = loaded.vars;
+  }
+  const cliVars = mergeCliVars(fileVars, a.varFlags);
+  // D11: supplying variables against an already-frozen run (or while a
+  // composed child is active) is a USAGE error — the run is intact and a
+  // flag-less call continues it, so reject with exit 2 BEFORE the engine
+  // runs (no phantom halt action/event, no state or stats touched).
+  const frozen = frozenVariablesError(a.root, a.runId, cliVars);
+  if (frozen !== null) {
+    process.stderr.write(`pipeline next: ${frozen}\n`);
+    return 2;
+  }
 
   const res = invokeNext({
     root: a.root,
@@ -2147,6 +2335,7 @@ export function runNext(args: string[]): number {
     modelOverrides: a.modelOverrides,
     defaultEffort: a.defaultEffort,
     effortOverrides: a.effortOverrides,
+    ...(cliVars !== undefined ? { cliVars } : {}),
     record: a.record ?? null,
     resume: a.resume,
     manualHooks: a.manualHooks,

@@ -109,6 +109,9 @@ function stepRun(root: string, iterationRel: string, extra: string[] = []) {
   const env: NodeJS.ProcessEnv = { ...process.env, USERPROFILE: root, HOME: root };
   delete env.PIPELINE_UI_RUN_ID;
   delete env.PIPELINE_UI_PARENT_RUN_ID;
+  // Deterministic PP_* environment for the variable tests: a stray PP_* var in
+  // the developer's shell must never satisfy (or fail) a fixture resolution.
+  for (const k of Object.keys(env)) if (k.startsWith('PP_')) delete env[k];
   const args = [CLI, 'step', 'run', join(root, 'steps', iterationRel), ...extra];
   const r = spawnSync(process.execPath, args, { encoding: 'utf8', cwd: root, env });
   let json: any = null;
@@ -269,6 +272,138 @@ test('step run: usage errors — no iteration arg, missing file, not inside a pi
   });
   expect(r.status).toBe(2);
   expect(r.stderr).toContain('no PIPELINE.md');
+}, 30000);
+
+// --- PP_* variables (env-variables design a3): --var/--vars-file on step run --
+
+// Prints the argv it received — the render-parity witness for `command:`
+// substitution (a space-containing value must arrive as ONE argv element).
+const ARGV_JS = `console.log(JSON.stringify({ ok: true, output: { args: process.argv.slice(2) } }));
+`;
+
+/** A pipeline declaring variables, with a `command:` script step using
+ *  ${PP_SERVICE}, a `script:` step whose PATH uses ${PP_IMPL}, and an agent
+ *  step using ${PP_UNUSED} (so the required-but-unrelated variable has an
+ *  occurrence — just never in the script steps). */
+function scaffoldVars(): string {
+  const root = mkdtempSync(join(tmpdir(), 'steprun-vars-'));
+  created.push(root);
+  writeFileSync(
+    join(root, 'PIPELINE.md'),
+    [
+      '# P',
+      '',
+      '## End State',
+      'x',
+      '',
+      '## Variables',
+      '- PP_SERVICE (required) — service under release',
+      '- PP_IMPL (default: one) — script implementation to run',
+      '- PP_UNUSED (required) — used by the agent step only',
+      '',
+    ].join('\n'),
+  );
+  const steps = join(root, 'steps');
+  const scripts = join(root, 'scripts');
+  mkdirSync(steps, { recursive: true });
+  mkdirSync(scripts, { recursive: true });
+  writeFileSync(join(scripts, 'argv.js'), ARGV_JS);
+  writeFileSync(join(scripts, 'one.js'), ONE_JS);
+  // command: is whitespace-split at plan time, so the runner path must be
+  // space-free — true for standard bun installs (~/.bun/bin/bun[.exe]) on the
+  // dev boxes and CI this suite runs on; script-step.test.ts leans on
+  // process.execPath the same way.
+  writeFileSync(
+    join(steps, '01-cmd.md'),
+    [
+      '---',
+      'type: script',
+      `command: ${process.execPath} scripts/argv.js --service \${PP_SERVICE}`,
+      'step_id: cmd',
+      '---',
+      '# cmd',
+      '## Goal',
+      'g',
+      '## Success Criteria',
+      's',
+      '## Steps',
+      '1. run it',
+      '## Next',
+      'Pipeline complete.',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(steps, '02-impl.md'),
+    scriptStepMd({ script: 'scripts/${PP_IMPL}.js', stepId: 'impl' }),
+  );
+  writeFileSync(
+    join(steps, '03-agent.md'),
+    '---\nstep_id: agent\n---\n# agent\n## Goal\ng — mentions ${PP_UNUSED} in the body\n## Success Criteria\ns\n',
+  );
+  return root;
+}
+
+test('step run --var: command argv is substituted like a real run — a space-containing value stays ONE argv element (render parity)', () => {
+  const root = scaffoldVars();
+  const r = stepRun(root, '01-cmd.md', ['--var', 'PP_SERVICE=pay ments', '--var', 'PP_UNUSED=x', '--json']);
+  expect(r.status).toBe(0);
+  expect(r.json.ok).toBe(true);
+  // E2: exactly two argv elements — the flag, and the WHOLE value.
+  expect(r.json.output).toEqual({ args: ['--service', 'pay ments'] });
+  // The printed target shows the substituted command.
+  expect(r.json.target).toContain('--service pay ments');
+}, 30000);
+
+test('step run: the script: PATH substitutes from a manifest default with zero flags (D2 default tier)', () => {
+  const root = scaffoldVars();
+  // PP_IMPL defaults to 'one' → scripts/one.js runs. PP_SERVICE/PP_UNUSED are
+  // required but do NOT occur in this step file — a dry run of one step never
+  // demands values the step does not use.
+  const r = stepRun(root, '02-impl.md', ['--json']);
+  expect(r.status).toBe(0);
+  expect(r.json.ok).toBe(true);
+  expect(r.json.output).toEqual({ pr: 7 });
+  expect(r.json.target).toContain('one.js');
+}, 30000);
+
+test('step run: a required variable USED by the step and unresolved is a usage error with the F2 quality bar', () => {
+  const root = scaffoldVars();
+  const r = stepRun(root, '01-cmd.md');
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain('PP_SERVICE');
+  expect(r.stderr).toContain('(required)');
+  expect(r.stderr).toContain('declared in PIPELINE.md ## Variables');
+  expect(r.stderr).toContain('steps/01-cmd.md:3'); // the command: occurrence
+  expect(r.stderr).toContain('--var PP_SERVICE=');
+  // …but the step-unrelated required variable is NOT demanded.
+  expect(r.stderr).not.toContain('PP_UNUSED');
+  // Nothing executed → still no run state.
+  expect(existsSync(join(root, '.runtime'))).toBe(false);
+}, 30000);
+
+test('step run: L10 — a typo’d --var and undeclared --vars-file entries are usage errors', () => {
+  const root = scaffoldVars();
+  const typo = stepRun(root, '01-cmd.md', ['--var', 'PP_SERVICE=x', '--var', 'PP_SRVICE=y']);
+  expect(typo.status).toBe(2);
+  expect(typo.stderr).toContain('PP_SRVICE');
+  expect(typo.stderr).toContain('not declared in PIPELINE.md ## Variables');
+
+  const vf = join(root, 'stray.env');
+  writeFileSync(vf, 'PP_SERVICE=ok\nNOT_A_PIPELINE_VAR=zzz\n');
+  const rejected = stepRun(root, '01-cmd.md', ['--vars-file', vf]);
+  expect(rejected.status).toBe(2);
+  expect(rejected.stderr).toContain('NOT_A_PIPELINE_VAR');
+  expect(rejected.stderr).not.toContain('zzz'); // values are never echoed
+}, 30000);
+
+test('step run --vars-file: a well-formed file resolves the step exactly like --var', () => {
+  const root = scaffoldVars();
+  const vf = join(root, 'vars.env');
+  writeFileSync(vf, '# release settings\nPP_SERVICE=payments\n');
+  const r = stepRun(root, '01-cmd.md', ['--vars-file', vf, '--json']);
+  expect(r.status).toBe(0);
+  expect(r.json.output).toEqual({ args: ['--service', 'payments'] });
 }, 30000);
 
 test('step run: an unknown subcommand and unknown flag are exit-2 usage errors', () => {

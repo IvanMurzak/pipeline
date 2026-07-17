@@ -34,6 +34,7 @@
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { parseEnvFile } from './env-file';
 import { interpreterFor, spawnViaHookRunner, tail } from './hooks';
 import {
   normalizeNextLine,
@@ -657,28 +658,11 @@ function ledgerPath(pipelineRoot: string, runId: string, stepId: string, dispatc
   return join(pipelineRoot, '.runtime', runId, 'ledger', `${stepId}-${dispatchIndex}.json`);
 }
 
-/** Parse a worktree env file: KEY=VALUE lines, `#` comments ignored, optional
- *  `export ` prefix and surrounding quotes tolerated — NEVER shell-sourced (§4). */
-function parseEnvFile(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const raw of text.split(/\r?\n/)) {
-    let line = raw.trim();
-    if (!line || line.startsWith('#')) continue;
-    if (line.startsWith('export ')) line = line.slice('export '.length).trim();
-    const eq = line.indexOf('=');
-    if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim();
-    let val = line.slice(eq + 1).trim();
-    if (
-      (val.startsWith('"') && val.endsWith('"') && val.length >= 2) ||
-      (val.startsWith("'") && val.endsWith("'") && val.length >= 2)
-    ) {
-      val = val.slice(1, -1);
-    }
-    if (key) out[key] = val;
-  }
-  return out;
-}
+// parseEnvFile — the worktree env-file grammar (KEY=VALUE, `#` comments,
+// optional `export ` prefix, quote tolerance; NEVER shell-sourced, §4) —
+// moved verbatim to lib/env-file.ts so the `--vars-file` loader
+// (lib/run-vars.ts, env-variables design 05 §3) shares the ONE grammar.
+// Imported above; used at the env-overlay build below.
 
 // ---------------------------------------------------------------------------
 // §6.2.2 — feedback-file draft

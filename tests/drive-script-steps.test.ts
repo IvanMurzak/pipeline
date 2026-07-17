@@ -108,6 +108,7 @@ async function drive(
   startPath: string,
   records: Record<string, unknown>,
   executorGuard?: () => void,
+  extraArgs: string[] = [],
 ) {
   const calls: SpawnCall[] = [];
   const executor: ExecutorRunner = async (req) => {
@@ -133,7 +134,7 @@ async function drive(
   delete process.env.PIPELINE_UI_PARENT_RUN_ID;
   delete process.env.CLAUDE_SESSION_ID;
   try {
-    const code = await runDrive(['--root', w.root, '--run-id', runId, '--start', startPath, '--json'], {
+    const code = await runDrive(['--root', w.root, '--run-id', runId, '--start', startPath, '--json', ...extraArgs], {
       executor,
       git,
       out: (s) => (outBuf += s),
@@ -272,4 +273,80 @@ test('drive: a script failing under on-failure:agent re-dispatches as a REAL exe
     `This step's script failed; failure record at ${failurePath}; achieve the iteration's Goal per your fallback protocol.`,
   );
   expect(r.calls[1].prompt).not.toContain('fallback protocol');
+}, 30000);
+
+// --- 4. env-variables (a3): --var forwarding drive → next ---------------------
+
+test('drive: --var is forwarded to the engine INIT only — the map freezes into next.json and loop calls never re-supply it', async () => {
+  // A pipeline DECLARING a required variable, used in both agent step bodies.
+  const w = mkWorld(
+    [
+      '# P',
+      '',
+      '## End State',
+      'x',
+      '',
+      '## Variables',
+      '- PP_SERVICE (required) — service under release',
+      '',
+    ].join('\n'),
+  );
+  const bPath = join(w.steps, '02-b.md');
+  writeFileSync(join(w.steps, '01-a.md'), agentStepMd('a') + '\nDeploy ${PP_SERVICE}.\n');
+  writeFileSync(bPath, agentStepMd('b') + '\nAnnounce ${PP_SERVICE}.\n');
+
+  // Deterministic environment: the value must come from the FLAG tier.
+  const savedPP = process.env.PP_SERVICE;
+  delete process.env.PP_SERVICE;
+  try {
+    const run = 'varsfwd';
+    const r = await drive(
+      w,
+      run,
+      join(w.steps, '01-a.md'),
+      {
+        a: { kind: 'step', outcome: 'completed', next_iteration: bPath },
+        b: { kind: 'step', outcome: 'completed', next_iteration: 'PIPELINE_COMPLETE' },
+      },
+      undefined,
+      ['--var', 'PP_SERVICE=payments'],
+    );
+
+    // The run COMPLETED across multiple engine loop calls: proof that drive
+    // forwarded --var on the init call only — re-supplying it on a loop call
+    // would trip the D11 "variables are frozen" halt.
+    expect(r.code).toBe(0);
+    expect(r.json.status).toBe('completed');
+    expect(r.calls.map((c) => c.step_id)).toEqual(['a', 'b']);
+    // The forwarded map was resolved + FROZEN by the engine init (next.json).
+    const st = readJson(join(w.root, '.runtime', run, 'next.json'));
+    expect(st.variables).toEqual({ PP_SERVICE: 'payments' });
+  } finally {
+    if (savedPP === undefined) delete process.env.PP_SERVICE;
+    else process.env.PP_SERVICE = savedPP;
+  }
+}, 30000);
+
+test('drive: a missing required variable F2-halts the run before any executor spawn', async () => {
+  const w = mkWorld(
+    ['# P', '', '## End State', 'x', '', '## Variables', '- PP_SERVICE (required) — svc', ''].join('\n'),
+  );
+  writeFileSync(join(w.steps, '01-a.md'), agentStepMd('a') + '\nDeploy ${PP_SERVICE}.\n');
+
+  const savedPP = process.env.PP_SERVICE;
+  delete process.env.PP_SERVICE;
+  try {
+    let spawned = false;
+    const r = await drive(w, 'varsmiss', join(w.steps, '01-a.md'), {}, () => {
+      spawned = true;
+    });
+    expect(spawned).toBe(false); // halted BEFORE any action
+    expect(r.code).toBe(1);
+    expect(r.json.status).toBe('halted');
+    expect(r.json.reason).toContain('PP_SERVICE');
+    expect(r.json.reason).toContain('--var PP_SERVICE=');
+  } finally {
+    if (savedPP === undefined) delete process.env.PP_SERVICE;
+    else process.env.PP_SERVICE = savedPP;
+  }
 }, 30000);
