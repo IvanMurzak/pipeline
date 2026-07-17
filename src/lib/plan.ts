@@ -32,6 +32,13 @@ import {
   type PipelineStepSpec,
 } from './compose';
 import { APPROVAL_ROLES, normalizeApprovalRole, type GateStepSpec } from './gate';
+import {
+  hasDeclarations,
+  parseVariablesSection,
+  validateRun,
+  type SubstitutionIssue,
+  type VariableDecl,
+} from './substitution';
 
 export type PipelineMode = 'sequential' | 'parallel';
 export type Isolation = 'worktree' | 'manual' | 'external';
@@ -91,6 +98,14 @@ export interface Plan {
   /** Routing graph (Variant A) parsed from a `## Graph` section of PIPELINE.md,
    *  or null when the pipeline has none (legacy sequential/DAG). */
   graph: Graph | null;
+  /** Declarations parsed from PIPELINE.md's `## Variables` section
+   *  (env-variables design, doc 04 §2) — empty when the pipeline declares no
+   *  variables (E9 zero-change path). Plan-time lints L1–L5/L7/L8/L9 over
+   *  every occurrence surface (step bodies, manifest body, non-exempt
+   *  frontmatter) are already folded into `errors`/`warnings`; this field is
+   *  attached so callers (the UI editor, `pipeline plan` JSON) can render the
+   *  declarations themselves without re-parsing the manifest. */
+  variables: VariableDecl[];
   /**
    * Normalized per-run step-model overrides (from ComputePlanOptions.
    * modelOverrides). Already folded into each enumerated step's `model`; kept
@@ -538,9 +553,233 @@ function buildLayers(steps: PlanStep[]): LayerResult {
   return { layers, errors };
 }
 
+// --- PP_* variable declarations + plan-time substitution lints -------------
+//
+// Spec: env-variables design doc 04 (grammar/lints) + 05 §2 (this seam).
+// computePlan composes a1's pure substitution.ts engine; nothing here
+// re-implements grammar or lint logic — only the plumbing to (a) attach
+// `plan.variables`, (b) build the per-file `frontmatterRaw`/`body` shape
+// validateRun expects, mirroring the existing `stepRefs`/`envRefs` lint
+// pattern, and (c) fold its SubstitutionIssue[] into errors[]/warnings[]
+// with `file:line` prefixes.
+
+// Cheap pre-filter for the zero-change guard: PP_TOKEN_RE and PP_NEARMISS_RE
+// both require a `${` immediately (optional whitespace) followed by a
+// case-insensitive `pp_` — so a file failing this test cannot contain any
+// valid token OR near-miss anywhere (frontmatter or body), and scanning it
+// would be pure overhead. A pipeline that never mentions PP_-shaped text
+// anywhere therefore adds NO new files to the sweep and NO new
+// errors/warnings (E9): the only per-file work that still always happens is
+// the O(1) test itself against text already read into memory (no new I/O).
+const PP_ISH_RE = /\$\{\s*[Pp][Pp]_/;
+function mayContainPPText(text: string): boolean {
+  return PP_ISH_RE.test(text);
+}
+
+// Frontmatter block delimiter — same shape as frontmatter.ts's own
+// FRONTMATTER_RE, duplicated locally (frontmatter.ts discards the raw block
+// once parsed into `fields`, and this feature needs the raw text back for
+// scanFrontmatter/scanning purposes).
+const FRONTMATTER_BLOCK_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+
+/** The frontmatter block's raw text, prefixed with one blank placeholder line
+ *  so line numbers computed against this string (substitution.ts's `lineOf`
+ *  counts from index 0) line up with the ORIGINAL file's line numbers — line
+ *  1 (the opening `---`) becomes the blank placeholder, line 2 is the first
+ *  real frontmatter line, exactly as in the source file. Returns '' when the
+ *  file has no frontmatter block (nothing to scan there). */
+function frontmatterBlockAligned(raw: string): string {
+  const m = FRONTMATTER_BLOCK_RE.exec(raw);
+  return m ? '\n' + m[1] : '';
+}
+
+// D5(c): `command:`/`script:` are declared substitution surfaces ONLY on a
+// `type: script` STEP (plan.ts reads them at ~fields.command/fields.script) —
+// PIPELINE.md's own frontmatter has no such fields, so this exemption is
+// step-scoped; the manifest gets the full, unexempted L3 ban (see the
+// `exemptFrontmatterKeys` parameter of `registerSubstitutionFile` below).
+// Captures the rest-of-line so the caller can tell an EMPTY inline value
+// (`command:` alone, expecting a following block list) from a non-empty one.
+const EXEMPT_FRONTMATTER_KEY_RE = /^(command|script)\s*:(.*)$/i;
+// Block-list continuation item — mirrors frontmatter.ts's OWN rule
+// (`/^\s*-\s+/`, frontmatter.ts:58) exactly, including that it matches a
+// ZERO-indent `- item` bullet (frontmatter.ts does not require indentation
+// for block-list items, only that the owning `key:` line itself is
+// top-level).
+const BLOCK_LIST_ITEM_RE = /^\s*-\s+/;
+
+/** Blank out the `command:`/`script:` key lines — and, when that key's
+ *  inline value is EMPTY (mirroring frontmatter.ts's own "possible block
+ *  list" condition, frontmatter.ts:54), any immediately-following block-list
+ *  continuation lines — from an ALIGNED frontmatter block (see
+ *  `frontmatterBlockAligned`), so `scanFrontmatter` never reports L3 on them.
+ *  Blanking — never deleting — keeps every OTHER line's number stable, so
+ *  L3 issues on the remaining (banned) keys still carry the correct original
+ *  file line. */
+function stripExemptFrontmatterLines(fmBlock: string): string {
+  if (!fmBlock) return fmBlock;
+  const lines = fmBlock.split('\n');
+  let skipContinuation = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (skipContinuation && BLOCK_LIST_ITEM_RE.test(line)) {
+      lines[i] = '';
+      continue;
+    }
+    skipContinuation = false;
+    const m = EXEMPT_FRONTMATTER_KEY_RE.exec(line);
+    if (m) {
+      lines[i] = '';
+      skipContinuation = (m[2] ?? '').trim() === '';
+    }
+  }
+  return lines.join('\n');
+}
+
+/** Number of lines consumed by `raw` before `body` starts (i.e. the
+ *  frontmatter block, delimiters included) — added to a BODY-relative line
+ *  number (as `scanOccurrences`/`scanNearMisses` compute it, always counting
+ *  from index 0 of whatever text they were given) to recover the TRUE file
+ *  line. Zero when the file has no frontmatter (body === the whole file). */
+function lineOffsetOf(raw: string, body: string): number {
+  const headerLen = raw.length - body.length;
+  if (headerLen <= 0) return 0;
+  let n = 0;
+  for (let i = 0; i < headerLen; i++) if (raw.charCodeAt(i) === 10) n++;
+  return n;
+}
+
+const VARIABLES_H2_RE = /^##\s+Variables\s*$/;
+const ANY_H2_RE = /^##\s+/;
+const CODE_FENCE_LINE_RE = /^\s*(?:```|~~~)/;
+
+/**
+ * D8 (REVISED): the `## Variables` section is excluded from the
+ * `MANIFEST_TOKEN_CAP` count (precedent: the family-HUB exemption) — a
+ * pipeline's variable documentation shouldn't compete with its ~300-token
+ * manifest budget. Finds the section's CHARACTER span (heading line through
+ * the line before the next H2 heading, or EOF; fence-aware — closely
+ * mirrors `parseVariablesSection`'s boundary rule, 04 §2 — exact declaration
+ * parsing stays that function's job) and returns its exact UTF-8 byte length
+ * via ONE `Buffer.byteLength` call over the real substring — never a
+ * per-line "+1" approximation, which would under-count a CRLF-terminated
+ * file by a byte per line relative to `estimateTokens`'s whole-text
+ * `Buffer.byteLength` (a real \r\n is 2 bytes, not 1). A cheap substring
+ * pre-check skips the whole scan for the common case (no such section).
+ * Returns 0 when the body has no `## Variables` section.
+ */
+function variablesSectionByteLength(body: string): number {
+  if (!body.includes('## Variables')) return 0;
+  let start = -1;
+  let end = body.length;
+  let inFence = false;
+  let pos = 0;
+  while (pos <= body.length) {
+    const nl = body.indexOf('\n', pos);
+    const lineEnd = nl === -1 ? body.length : nl;
+    const line = body.slice(pos, lineEnd);
+    if (CODE_FENCE_LINE_RE.test(line)) {
+      inFence = !inFence;
+    } else if (!inFence) {
+      if (start === -1 && VARIABLES_H2_RE.test(line)) {
+        start = pos;
+      } else if (start !== -1 && ANY_H2_RE.test(line)) {
+        end = pos;
+        break;
+      }
+    }
+    if (nl === -1) break;
+    pos = nl + 1;
+  }
+  if (start === -1) return 0;
+  return Buffer.byteLength(body.slice(start, end), 'utf8');
+}
+
+/** Fold a `SubstitutionIssue[]` (from `parseVariablesSection` or
+ *  `validateRun`) into the plan's flat `errors`/`warnings` string arrays,
+ *  prefixing every message with `file:line` (or just `file` when the issue is
+ *  decl-level and carries no line) for a uniform, greppable shape regardless
+ *  of whether the underlying message already happens to mention a location.
+ *
+ *  Line numbers from `parseVariablesSection` and from validateRun's
+ *  `scanOccurrences`/`scanNearMisses` calls are BODY-relative (04 §3's
+ *  scanning primitives always count from index 0 of the text they were
+ *  given) and need `lineOffsets` added back to recover the true file line.
+ *  `scanFrontmatter`-sourced issues (kind `'frontmatter'`) are the one
+ *  exception: we feed it a `frontmatterBlockAligned` text whose line numbers
+ *  are ALREADY file-true, so `alwaysOffset=false` skips the correction for
+ *  those; `alwaysOffset=true` (the `parseVariablesSection` caller) offsets
+ *  unconditionally since that call only ever sees body-relative declarations. */
+function foldSubstitutionIssues(
+  issues: SubstitutionIssue[],
+  lineOffsets: Map<string, number>,
+  alwaysOffset: boolean,
+  errors: string[],
+  warnings: string[],
+): void {
+  for (const issue of issues) {
+    let line = issue.line;
+    if (line !== undefined && (alwaysOffset || issue.kind !== 'frontmatter')) {
+      line += lineOffsets.get(issue.file) ?? 0;
+    }
+    // Decl-level issues (L7/L8) carry validateRun's `fallbackFile` (the
+    // first scanned file's name) rather than a real occurrence location;
+    // fall back to 'PIPELINE.md' (declarations always live there) so a run
+    // with declarations but nothing else in the sweep never emits a
+    // location-less, leading-colon message.
+    const file = issue.file || 'PIPELINE.md';
+    const loc = line !== undefined ? `${file}:${line}` : file;
+    (issue.severity === 'error' ? errors : warnings).push(`${loc}: ${issue.message}`);
+  }
+}
+
+/** Register one file (PIPELINE.md or a step) for the plan-time substitution
+ *  lint sweep — mirrors the stepRefs/envRefs lint pattern of collecting
+ *  candidates during enumeration, then linting them all at once via
+ *  validateRun. Gated by the zero-change pre-filter (`mayContainPPText`)
+ *  UNLESS `force` is set: a file that cannot contain a PP_-shaped token
+ *  contributes nothing to validateRun's occurrence/frontmatter scan either
+ *  way, so both the aligned-frontmatter computation and the line-offset
+ *  bookkeeping are skipped entirely for it — no wasted work on the hot path.
+ *  `force` is set for PIPELINE.md whenever the manifest declares ANY
+ *  variables, so `substitutionFiles[0]` (validateRun's `fallbackFile`) is
+ *  never empty for the decl-level L7/L8 issues even when no file's text
+ *  happens to contain PP_-shaped text at all.
+ *  `exemptFrontmatterKeys` applies the D5(c) `command:`/`script:` carve-out —
+ *  true for step files (which may legitimately declare those keys), false
+ *  for PIPELINE.md (which has no such fields; its frontmatter gets the full,
+ *  unexempted L3 ban). */
+function registerSubstitutionFile(
+  file: string,
+  raw: string,
+  body: string,
+  exemptFrontmatterKeys: boolean,
+  lineOffsets: Map<string, number>,
+  files: Array<{ file: string; frontmatterRaw: string; body: string }>,
+  force = false,
+): void {
+  if (!force && !mayContainPPText(raw)) return;
+  lineOffsets.set(file, lineOffsetOf(raw, body));
+  const aligned = frontmatterBlockAligned(raw);
+  files.push({
+    file,
+    frontmatterRaw: exemptFrontmatterKeys ? stripExemptFrontmatterLines(aligned) : aligned,
+    body,
+  });
+}
+
 export function computePlan(pipelineRoot: string, options: ComputePlanOptions = {}): Plan {
   const errors: string[] = [];
   const warnings: string[] = [];
+
+  // PP_* variable declarations + the plan-time substitution lint sweep
+  // (env-variables design). Populated below as PIPELINE.md and each step
+  // file are parsed; a declaration-less, PP_-text-less pipeline leaves
+  // `variableDecls`/`substitutionFiles` empty and the final sweep (§2b,
+  // after the step-enumeration loop) is skipped entirely — E9 zero-change.
+  let variableDecls: VariableDecl[] = [];
+  const substitutionLineOffsets = new Map<string, number>();
+  const substitutionFiles: Array<{ file: string; frontmatterRaw: string; body: string }> = [];
 
   // 1. PIPELINE.md frontmatter (execution / isolation / default model).
   let execution = 'sequential';
@@ -559,6 +798,34 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
     const manifestRaw = readFileSync(manifestPath, 'utf8');
     const { fields, body } = parseFrontmatter(manifestRaw);
     manifestBody = body;
+
+    // `## Variables` declarations (04 §2) — always parsed (cheap, single pass)
+    // so `plan.variables` is attached and L4 malformed-decl/L5 duplicate-decl
+    // issues surface even for a pipeline with no occurrences anywhere. Line
+    // numbers from parseVariablesSection are relative to `manifestBody`, so
+    // fold with the manifest's own header-line offset (`alwaysOffset: true`).
+    const parsedVariables = parseVariablesSection(manifestBody, 'PIPELINE.md');
+    variableDecls = parsedVariables.decls;
+    substitutionLineOffsets.set('PIPELINE.md', lineOffsetOf(manifestRaw, manifestBody));
+    foldSubstitutionIssues(parsedVariables.issues, substitutionLineOffsets, true, errors, warnings);
+    // Register PIPELINE.md for the plan-time occurrence/frontmatter sweep.
+    // `false` (no command:/script: exemption): those keys don't exist on the
+    // manifest, only on `type: script` steps (D5(c) is step-scoped). `force`
+    // whenever the manifest declares ANY variables — even one referenced
+    // nowhere — so validateRun always has at least PIPELINE.md as its
+    // `fallbackFile` for the decl-level L7/L8 issues (never an empty file,
+    // never a location-less message) instead of relying on some OTHER file
+    // happening to also contain PP_-shaped text.
+    registerSubstitutionFile(
+      'PIPELINE.md',
+      manifestRaw,
+      manifestBody,
+      false,
+      substitutionLineOffsets,
+      substitutionFiles,
+      hasDeclarations(variableDecls),
+    );
+
     const exec = typeof fields.execution === 'string' ? fields.execution.toLowerCase() : '';
     if (exec === 'parallel') execution = 'parallel';
     else if (exec && exec !== 'sequential')
@@ -582,7 +849,13 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
     // carries per-target submodule/context routing and gets the higher cap.
     const isFamilyHub = existsSync(join(pipelineRoot, 'targets'));
     const isFamilyTarget = /[\\/]targets[\\/]/.test(pipelineRoot.replace(/\\/g, '/') + '/');
-    const manifestTokens = estimateTokens(manifestRaw);
+    // D8 (REVISED): the `## Variables` section is excluded from the cap count
+    // (precedent: the family-HUB exemption) — variable documentation
+    // shouldn't compete with the manifest's ~300-token budget.
+    const manifestTokens = Math.max(
+      0,
+      estimateTokens(manifestRaw) - Math.round(variablesSectionByteLength(manifestBody) / 4),
+    );
     if (!isFamilyHub) {
       const cap = isFamilyTarget ? FAMILY_TARGET_TOKEN_CAP : MANIFEST_TOKEN_CAP;
       if (manifestTokens > cap)
@@ -682,6 +955,17 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
     const raw = readFileSync(file, 'utf8');
     const { fields, body } = parseFrontmatter(raw);
     const rel = relative(stepsDir, file).split(sep).join('/');
+
+    // Plan-time substitution lint bookkeeping (env-variables design): mirror
+    // the stepRefs/envRefs lint pattern — every step file already loaded here
+    // gets its body + non-exempt frontmatter registered for the sweep
+    // (command:/script: keys exempted from L3 — D5(c), they are declared
+    // substitution surfaces on a `type: script` step), gated by the
+    // zero-change pre-filter (mayContainPPText) with no `force` — a step
+    // with no PP_-shaped text anywhere contributes nothing either way.
+    const stepFileLabel = `steps/${rel}`;
+    registerSubstitutionFile(stepFileLabel, raw, body, true, substitutionLineOffsets, substitutionFiles);
+
     const stem = basename(file).replace(/\.md$/, '');
     const stepId =
       typeof fields.step_id === 'string' && fields.step_id.trim() ? fields.step_id.trim() : stem;
@@ -943,6 +1227,23 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
     }
   });
 
+  // 2b. Plan-time substitution lint sweep (L1–L5, L7, L8, L9 — env-variables
+  // design, doc 04 §4). Composes a1's validateRun over every step file +
+  // PIPELINE.md the pass above already loaded (`substitutionFiles`), plus
+  // the manifest declarations (`variableDecls`). `resolved`/`unresolvedNames`/
+  // `unknownNames` are left empty here on purpose: resolving `--var`/env/
+  // manifest defaults is a run-init concern (`commands/next.ts`, a3) that
+  // computePlan has no CLI flags or environment to perform — passing []
+  // means L6 `missing` and L10 `unknown-cli-var` never fire from this call
+  // (by construction, since both loops iterate their respective name lists),
+  // leaving exactly the plan-time set. Skipped entirely when there is
+  // nothing to check (no declarations AND no file passed the PP_-ish
+  // pre-filter) — the E9 zero-change guarantee.
+  if (hasDeclarations(variableDecls) || substitutionFiles.length > 0) {
+    const substitutionIssues = validateRun(variableDecls, {}, [], substitutionFiles, []);
+    foldSubstitutionIssues(substitutionIssues, substitutionLineOffsets, false, errors, warnings);
+  }
+
   // Surface probable typos: an override key matching no enumerated step. Kept
   // in model_overrides regardless — a run entered via a target/hub family can
   // legitimately reach off-plan steps that the override targets.
@@ -1132,6 +1433,7 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
     steps,
     layers,
     graph,
+    variables: variableDecls,
     model_overrides: modelOverrides,
     effort_overrides: effortOverrides,
     errors,

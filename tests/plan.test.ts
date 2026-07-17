@@ -1,5 +1,6 @@
 import { test, expect, afterEach } from 'bun:test';
 import { computePlan } from '../src/lib/plan';
+import { invokeNext } from '../src/commands/next';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -424,4 +425,242 @@ test('lint: a family TARGET (under targets/) gets the ~1500-token cap instead of
   const loud = computePlan(root);
   const hit = loud.warnings.filter((w) => w.includes('cap ~1500 for a family target'));
   expect(hit.length).toBe(1);
+});
+
+// --- env-variables design (a2): `## Variables` parse + plan-time lints -----
+//
+// Spec: .claude/design/env-variables/{04-substitution-engine-spec,
+// 05-integration-spec,02-target-architecture}.md. computePlan composes a1's
+// pure src/lib/substitution.ts engine (parseVariablesSection + validateRun) —
+// these tests exercise the plan.ts SEAM (attaching plan.variables, folding
+// issues into errors/warnings with file:line, the manifest-cap exemption, the
+// zero-change guard), not the grammar/lint rules themselves (covered
+// exhaustively by tests/substitution.test.ts).
+
+test('`## Variables` section parses into plan.variables (all three bullet forms + backticks + prose ignored)', () => {
+  const manifest =
+    '---\n---\n# Pipeline\n\n## Variables\n' +
+    'Some prose line that is not a bullet.\n' +
+    '- `PP_NAME` (required) — the service name\n' +
+    '- PP_REGION (default: us-east-1) — deploy region\n' +
+    '- PP_NOTES — free text, optional\n' +
+    '\n## End State\nDone.\n';
+  const plan = computePlan(scaffold(manifest, { '01-a.md': '# A\n' }));
+  expect(plan.errors).toEqual([]);
+  expect(plan.variables).toEqual([
+    { name: 'PP_NAME', description: 'the service name', required: true },
+    { name: 'PP_REGION', description: 'deploy region', required: false, default: 'us-east-1' },
+    { name: 'PP_NOTES', description: 'free text, optional', required: false },
+  ]);
+});
+
+test('lint: L5 duplicate-decl is a PIPELINE.md error; the FIRST declaration wins in plan.variables', () => {
+  const manifest = '---\n---\n## Variables\n- PP_X (default: a) — first\n- PP_X (default: b) — second\n';
+  const plan = computePlan(scaffold(manifest, { '01-a.md': '# A\n' }));
+  const hit = plan.errors.find((e) => e.includes('declared more than once'));
+  expect(hit).toBeDefined();
+  expect(hit).toMatch(/^PIPELINE\.md:\d+: /);
+  expect(plan.variables).toEqual([{ name: 'PP_X', description: 'first', required: false, default: 'a' }]);
+});
+
+test('lint: L4 malformed-decl — (required) and (default: ...) together', () => {
+  const manifest = '---\n---\n## Variables\n- PP_X (required) (default: a) — bad\n';
+  const plan = computePlan(scaffold(manifest, { '01-a.md': '# A\n' }));
+  const hit = plan.errors.find((e) => e.includes('mutually exclusive'));
+  expect(hit).toBeDefined();
+  expect(hit).toMatch(/^PIPELINE\.md:\d+: /);
+});
+
+test('lint: L4 malformed-decl — a non-uppercase declared name', () => {
+  const manifest = '---\n---\n## Variables\n- PP_lower_name — bad case\n';
+  const plan = computePlan(scaffold(manifest, { '01-a.md': '# A\n' }));
+  const hit = plan.errors.find((e) => e.includes('not a valid variable name'));
+  expect(hit).toBeDefined();
+  expect(hit).toMatch(/^PIPELINE\.md:\d+: /);
+});
+
+test('lint: L1 undeclared — a valid ${PP_X} occurrence in a step body with no declarations at all', () => {
+  const plan = computePlan(scaffold(null, { '01-a.md': '# A\n\nUse ${PP_SERVICE} here.\n' }));
+  expect(plan.variables).toEqual([]);
+  const hit = plan.errors.find((e) => e.includes('PP_SERVICE'));
+  expect(hit).toBeDefined();
+  expect(hit).toMatch(/^steps\/01-a\.md:3: /);
+  expect(hit).toContain('not declared in PIPELINE.md ## Variables');
+});
+
+test('lint: L2 bad-name — a lowercase near-miss token in a step body', () => {
+  const plan = computePlan(scaffold('---\n---\n', { '01-a.md': '# A\n\nDocument ${pp_x} here.\n' }));
+  const hit = plan.errors.find((e) => e.includes('pp_x'));
+  expect(hit).toBeDefined();
+  expect(hit).toMatch(/^steps\/01-a\.md:3: /);
+  expect(hit).toContain('not a valid variable token');
+});
+
+test('lint: L3 frontmatter — a PP_ token inside a NON-exempt step frontmatter field is banned', () => {
+  const plan = computePlan(
+    scaffold('---\n---\n', { '01-a.md': '---\nstep_id: ${PP_X}\n---\n# A\n' }),
+  );
+  const hit = plan.errors.find((e) => e.includes('not supported in frontmatter'));
+  expect(hit).toBeDefined();
+  expect(hit).toMatch(/^steps\/01-a\.md:2: /);
+});
+
+test('lint: L3 exemption — PP_ tokens inside command:/script: frontmatter keys are NOT banned (D5(c))', () => {
+  const manifest = '---\n---\n## Variables\n- PP_SERVICE (required) — svc name\n';
+  const plan = computePlan(
+    scaffold(manifest, {
+      '01-a.md':
+        '---\ntype: script\nstep_id: a\ncommand: python notify.py --service ${PP_SERVICE}\n---\n' +
+        '# A\n\n## Next\nPipeline complete.\n',
+    }),
+  );
+  // No L3 (frontmatter-ban) error for the exempted command: key — and since
+  // the token isn't in body text either, no error at all here.
+  expect(plan.errors).toEqual([]);
+  // Known v1 scope boundary (a2, deviation flagged in the PR): command:/
+  // script: VALUES are exempt from the L3 ban but are NOT themselves swept
+  // for L1/undeclared or counted as "usage" — only step/manifest BODIES and
+  // `## Params` from: templates are (05 §2). A var referenced ONLY inside
+  // command:/script: therefore still surfaces as unused here.
+  expect(
+    plan.warnings.some((w) => w.includes('PP_SERVICE') && w.includes('declared') && w.includes('never used')),
+  ).toBe(true);
+});
+
+test('lint: L7 unused-decl warning for a declared-but-unreferenced variable', () => {
+  // Regression: when NEITHER the manifest NOR any step file contains any
+  // PP_-shaped text at all (the declaration bullet itself doesn't count —
+  // it has no `${`), validateRun's fallbackFile must still resolve to
+  // 'PIPELINE.md', never an empty string (which would render as a bare
+  // leading-colon message with no location).
+  const manifest = '---\n---\n## Variables\n- PP_UNUSED — never referenced\n';
+  const plan = computePlan(scaffold(manifest, { '01-a.md': '# A\n' }));
+  const hit = plan.warnings.find((w) => w.includes('PP_UNUSED') && w.includes('never used'));
+  expect(hit).toBeDefined();
+  expect(hit).toMatch(/^PIPELINE\.md: /);
+  expect(plan.errors).toEqual([]);
+});
+
+test('lint regression: a CRLF-encoded manifest gets the SAME cap-exemption byte accounting as an LF one', () => {
+  const varsBody =
+    '## Variables\n' +
+    Array.from(
+      { length: 60 },
+      (_, i) => `- PP_VAR_${i} — padding description text to bulk up the section considerably`,
+    ).join('\n') +
+    '\n';
+  const lfManifest = '---\n---\n# Pipeline\n\n' + varsBody + '\n## End State\nSmall.\n';
+  const crlfManifest = lfManifest.replace(/\n/g, '\r\n');
+  const lfPlan = computePlan(scaffold(lfManifest, { '01-a.md': '# A\n' }));
+  const crlfPlan = computePlan(scaffold(crlfManifest, { '01-a.md': '# A\n' }));
+  expect(lfPlan.warnings.filter((w) => w.includes('cap ~'))).toEqual([]);
+  expect(crlfPlan.warnings.filter((w) => w.includes('cap ~'))).toEqual([]);
+});
+
+test('lint regression: a zero-indent `command:` block-list (array form) is still exempt from L3 (D5(c))', () => {
+  const manifest = '---\n---\n## Variables\n- PP_SERVICE (required) — svc name\n';
+  const plan = computePlan(
+    scaffold(manifest, {
+      '01-a.md':
+        '---\ntype: script\nstep_id: a\ncommand:\n- notify.py\n- --service\n- ${PP_SERVICE}\n---\n' +
+        '# A\n\n## Next\nPipeline complete.\n',
+    }),
+  );
+  expect(plan.errors).toEqual([]);
+});
+
+test('lint regression: command:/script: keys inside PIPELINE.md itself are NOT exempt (D5(c) is step-scoped)', () => {
+  const manifest = '---\ncommand: ${PP_X}\n---\n## Variables\n- PP_X — a var\n';
+  const plan = computePlan(scaffold(manifest, { '01-a.md': '# A\n' }));
+  const hit = plan.errors.find((e) => e.includes('not supported in frontmatter'));
+  expect(hit).toBeDefined();
+  expect(hit).toMatch(/^PIPELINE\.md:\d+: /);
+});
+
+test('lint: L8 secretish-name warning for a declared name matching the D14 pattern', () => {
+  const manifest = '---\n---\n## Variables\n- PP_API_TOKEN (required) — auth token\n';
+  const plan = computePlan(scaffold(manifest, { '01-a.md': '# A\n\nUse ${PP_API_TOKEN} here.\n' }));
+  expect(plan.warnings.some((w) => w.includes('PP_API_TOKEN') && w.includes('secret-like'))).toBe(true);
+});
+
+test('lint: L9 ineffective-default warning — an inline default on a required variable occurrence', () => {
+  const manifest = '---\n---\n## Variables\n- PP_REQ (required) — must supply\n';
+  const plan = computePlan(scaffold(manifest, { '01-a.md': '# A\n\nUse ${PP_REQ:-fallback} here.\n' }));
+  const hit = plan.warnings.find((w) => w.includes('PP_REQ') && w.includes('ignored'));
+  expect(hit).toBeDefined();
+  expect(hit).toMatch(/^steps\/01-a\.md:3: /);
+  // L6 (missing) is run-init-time, not plan.ts's job — no error here despite
+  // PP_REQ never resolving to a value at plan time.
+  expect(plan.errors).toEqual([]);
+});
+
+test('Params `from:` template accepts the PP_* root; an undeclared PP_ name there is an L1 error', () => {
+  const manifest = '---\n---\n## Variables\n- PP_KNOWN — known var\n';
+  const plan = computePlan(
+    scaffold(manifest, {
+      '01-a.md':
+        '---\ntype: script\nstep_id: a\nscript: scripts/notify.py\n---\n# A\n\n## Params\n\n' +
+        '```json\n{"target": {"type": "string", "from": "${PP_UNKNOWN}"}}\n```\n\n## Next\nPipeline complete.\n',
+    }),
+  );
+  const hit = plan.errors.find((e) => e.includes('PP_UNKNOWN'));
+  expect(hit).toBeDefined();
+  expect(hit).toContain('not declared in PIPELINE.md ## Variables');
+});
+
+test('lint: D8 (REVISED) cap exemption — a large ## Variables section does NOT trip the manifest trim warning', () => {
+  const bigVariablesSection =
+    '## Variables\n' +
+    Array.from(
+      { length: 60 },
+      (_, i) => `- PP_VAR_${i} — padding description text to bulk up the section considerably`,
+    ).join('\n') +
+    '\n';
+  const manifest = '---\n---\n# Pipeline\n\n' + bigVariablesSection + '\n## End State\nSmall.\n';
+  const plan = computePlan(scaffold(manifest, { '01-a.md': '# A\n' }));
+  expect(plan.warnings.filter((w) => w.includes('cap ~'))).toEqual([]);
+  expect(plan.variables.length).toBe(60);
+});
+
+test('zero-change: no ## Variables section and no PP_-shaped text anywhere → plan.variables empty, baseline untouched', () => {
+  const plan = computePlan(
+    scaffold('---\nexecution: parallel\nmodel: sonnet\n---\n# Pipeline\n\n## End State\nSmall.\n', {
+      '01-build.md': '---\nstep_id: build\n---\n# Build\n\n## Steps\n- do one thing\n',
+      '02-test.md': '---\nstep_id: test\ndepends-on: [build]\n---\n# Test\n\n## Steps\n- run tests\n',
+    }),
+  );
+  expect(plan.variables).toEqual([]);
+  expect(plan.warnings).toEqual([]);
+  expect(plan.errors).toEqual([]);
+});
+
+test('zero-change caveat (principle 4): a PP_-shaped token with ZERO declarations is still an L1 error', () => {
+  const plan = computePlan(scaffold(null, { '01-a.md': '# A\n\nMentions ${PP_ANYTHING} here.\n' }));
+  expect(plan.variables).toEqual([]);
+  expect(plan.errors.some((e) => e.includes('PP_ANYTHING') && e.includes('not declared'))).toBe(true);
+});
+
+// --- 07 P1 gate: lints halt runs end-to-end through commands/next.ts:1135 ---
+
+test('07 P1 gate: an undeclared PP_ occurrence halts `pipeline next` before any action (end-to-end)', () => {
+  const root = scaffold(null, { '01-a.md': '# A\n\nRun with ${PP_SERVICE}.\n' });
+  const res = invokeNext({ root, runId: 'gate-undeclared' });
+  expect(res.code).toBe(1);
+  expect(res.action.action).toBe('halt');
+  if (res.action.action !== 'halt') throw new Error('expected a halt action');
+  expect(res.action.reason).toContain('plan errors');
+  expect(res.action.reason).toContain('PP_SERVICE');
+  expect(res.action.reason).toContain('not declared');
+});
+
+test('07 P1 gate: a PP_ token inside banned (non-exempt) frontmatter halts `pipeline next` (end-to-end)', () => {
+  const root = scaffold('---\n---\n## Variables\n- PP_X — a var\n', {
+    '01-a.md': '---\nstep_id: ${PP_X}\n---\n# A\n',
+  });
+  const res = invokeNext({ root, runId: 'gate-frontmatter' });
+  expect(res.code).toBe(1);
+  expect(res.action.action).toBe('halt');
+  if (res.action.action !== 'halt') throw new Error('expected a halt action');
+  expect(res.action.reason).toContain('plan errors');
+  expect(res.action.reason).toContain('not supported in frontmatter');
 });
