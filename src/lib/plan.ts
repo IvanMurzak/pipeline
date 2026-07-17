@@ -602,7 +602,18 @@ function frontmatterBlockAligned(raw: string): string {
 // `exemptFrontmatterKeys` parameter of `registerSubstitutionFile` below).
 // Captures the rest-of-line so the caller can tell an EMPTY inline value
 // (`command:` alone, expecting a following block list) from a non-empty one.
-const EXEMPT_FRONTMATTER_KEY_RE = /^(command|script)\s*:(.*)$/i;
+// Trailing `\r?` (NOT just relying on `$`): `frontmatterBlockAligned` returns
+// the raw block text verbatim, and `stripExemptFrontmatterLines` below splits
+// it on `\n` ONLY (not `\r?\n`) so it can rejoin without disturbing any OTHER
+// line's original terminator — so on a CRLF file every split line here still
+// carries its own trailing `\r`. JS regex `.` excludes line-terminator
+// characters (which include `\r`) and a non-multiline `$` requires the true
+// end of the string, so `(.*)$` alone can never consume that trailing `\r`
+// and the match fails outright on every CRLF frontmatter line — silently
+// disabling the whole D5(c) exemption (the command:/script: value then falls
+// through to the L3 frontmatter ban unblanked). An explicit optional `\r`
+// before `$` consumes it on CRLF while staying a no-op on LF.
+const EXEMPT_FRONTMATTER_KEY_RE = /^(command|script)\s*:(.*)\r?$/i;
 // Block-list continuation item — mirrors frontmatter.ts's OWN rule
 // (`/^\s*-\s+/`, frontmatter.ts:58) exactly, including that it matches a
 // ZERO-indent `- item` bullet (frontmatter.ts does not require indentation

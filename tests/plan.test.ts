@@ -651,6 +651,148 @@ test('lint regression: command:/script: keys inside PIPELINE.md itself are NOT e
   expect(hit).toMatch(/^PIPELINE\.md:\d+: /);
 });
 
+// --- CRLF parity: the D5(c) exemption + a4 surface sweep must behave -------
+// IDENTICALLY on a CRLF-encoded step file as on the byte-identical LF one.
+// Regression for the bug where `EXEMPT_FRONTMATTER_KEY_RE` (`/^(command|
+// script)\s*:(.*)$/i`) failed to match a `command:`/`script:` key line once
+// `stripExemptFrontmatterLines` split the aligned frontmatter block on `\n`
+// alone and left every line's trailing `\r` intact: JS `.` excludes line
+// terminators (incl. `\r`) and a non-multiline `$` demands the true end of
+// the string, so `(.*)$` could never reach past a trailing `\r` — the
+// exemption silently stopped matching on any CRLF file (as produced by
+// `git core.autocrlf=true` checkouts) and the command:/script: VALUE fell
+// through to the L3 frontmatter ban, producing false plan errors that never
+// fired on the LF form of the exact same file.
+const toCRLF = (s: string): string => s.replace(/\n/g, '\r\n');
+
+test('CRLF parity: string-form command: with ${PP_*} plans identically on LF and CRLF (exact live repro)', () => {
+  const manifest =
+    '---\n---\n## Variables\n- PP_SERVICE (required) — svc name\n- PP_GREETING (required) — greeting text\n';
+  const stepLF =
+    '---\ntype: script\ncommand: python .claude/pipeline/e2e-vars/scripts/echo_vars.py ${PP_SERVICE} ${PP_GREETING}\nstep_id: echo-vars\n---\n' +
+    '# echo-vars\n\n## Next\nPipeline complete.\n';
+  const lfPlan = computePlan(scaffold(manifest, { '01-echo.md': stepLF }));
+  const crlfPlan = computePlan(
+    scaffold(toCRLF(manifest), { '01-echo.md': toCRLF(stepLF) }),
+  );
+  expect(lfPlan.errors).toEqual([]);
+  expect(crlfPlan.errors).toEqual([]);
+  expect(crlfPlan.errors).toEqual(lfPlan.errors);
+  expect(crlfPlan.warnings).toEqual(lfPlan.warnings);
+  expect(crlfPlan.variables).toEqual(lfPlan.variables);
+});
+
+test('CRLF parity: script: (string form) with a ${PP_*} value plans identically on LF and CRLF', () => {
+  // `step_id:` deliberately comes AFTER `script:` (not before) so the
+  // `script:` key line is NOT the frontmatter block's last line: when it IS
+  // last, `FRONTMATTER_BLOCK_RE`'s own `\r?\n---` closing-delimiter match
+  // already eats that one line's trailing `\r` for free, and the old buggy
+  // `EXEMPT_FRONTMATTER_KEY_RE` (missing `\r?` before `$`) would happen to
+  // match anyway — silently failing to exercise the bug this suite guards.
+  const manifest = '---\n---\n## Variables\n- PP_IMPL (required) — impl name\n';
+  const stepLF =
+    '---\ntype: script\nscript: scripts/${PP_IMPL}.py\nstep_id: a\n---\n' +
+    '# A\n\n## Next\nPipeline complete.\n';
+  const lfPlan = computePlan(scaffold(manifest, { '01-a.md': stepLF }));
+  const crlfPlan = computePlan(scaffold(toCRLF(manifest), { '01-a.md': toCRLF(stepLF) }));
+  expect(lfPlan.errors).toEqual([]);
+  expect(crlfPlan.errors).toEqual([]);
+  expect(crlfPlan.errors).toEqual(lfPlan.errors);
+  expect(crlfPlan.warnings).toEqual(lfPlan.warnings);
+});
+
+test('CRLF parity: array-form command: block list with a ${PP_*} item plans identically on LF and CRLF', () => {
+  const manifest = '---\n---\n## Variables\n- PP_SERVICE (required) — svc name\n';
+  const stepLF =
+    '---\ntype: script\nstep_id: a\ncommand:\n- notify.py\n- --service\n- ${PP_SERVICE}\n---\n' +
+    '# A\n\n## Next\nPipeline complete.\n';
+  const lfPlan = computePlan(scaffold(manifest, { '01-a.md': stepLF }));
+  const crlfPlan = computePlan(scaffold(toCRLF(manifest), { '01-a.md': toCRLF(stepLF) }));
+  expect(lfPlan.errors).toEqual([]);
+  expect(crlfPlan.errors).toEqual([]);
+  expect(crlfPlan.errors).toEqual(lfPlan.errors);
+  expect(crlfPlan.warnings).toEqual(lfPlan.warnings);
+});
+
+test('CRLF parity: a4 L1 sweep — an UNDECLARED ${PP_X} inside command: is the SAME plan error on LF and CRLF', () => {
+  // `command:` before `step_id:` (not last frontmatter line) — see the note
+  // on the 'script: (string form)' CRLF-parity test above.
+  const stepLF =
+    '---\ntype: script\ncommand: python notify.py --service ${PP_NOPE}\nstep_id: a\n---\n' +
+    '# A\n\n## Next\nPipeline complete.\n';
+  const lfPlan = computePlan(scaffold('---\n---\n', { '01-a.md': stepLF }));
+  const crlfPlan = computePlan(scaffold('---\n---\n', { '01-a.md': toCRLF(stepLF) }));
+  const lfHit = lfPlan.errors.find((e) => e.includes('PP_NOPE'));
+  const crlfHit = crlfPlan.errors.find((e) => e.includes('PP_NOPE'));
+  expect(lfHit).toBeDefined();
+  expect(crlfHit).toBeDefined();
+  expect(crlfHit).toBe(lfHit);
+  // Full-array equality (not just the one found message): a broken D5(c)
+  // exemption would leave the L1 error intact (lintScriptSurfaces reads
+  // `fields.command` straight off frontmatter.ts, which is already CRLF-safe)
+  // while ALSO adding a spurious extra L3 "not supported in frontmatter"
+  // error for the same token — a `.find()`-only assertion would miss that.
+  expect(crlfPlan.errors).toEqual(lfPlan.errors);
+});
+
+test('CRLF parity: a4 L7 usage — a declared var referenced ONLY inside command: suppresses "never used" on LF and CRLF alike', () => {
+  // `command:` before `step_id:` (not last frontmatter line) — see the note
+  // on the 'script: (string form)' CRLF-parity test above.
+  const manifest = '---\n---\n## Variables\n- PP_SERVICE (required) — svc name\n';
+  const stepLF =
+    '---\ntype: script\ncommand: python notify.py --service ${PP_SERVICE}\nstep_id: a\n---\n' +
+    '# A\n\n## Next\nPipeline complete.\n';
+  const lfPlan = computePlan(scaffold(manifest, { '01-a.md': stepLF }));
+  const crlfPlan = computePlan(scaffold(toCRLF(manifest), { '01-a.md': toCRLF(stepLF) }));
+  expect(lfPlan.warnings.filter((w) => w.includes('never used'))).toEqual([]);
+  expect(crlfPlan.warnings.filter((w) => w.includes('never used'))).toEqual([]);
+  expect(crlfPlan.errors).toEqual(lfPlan.errors);
+  expect(crlfPlan.warnings).toEqual(lfPlan.warnings);
+});
+
+test('CRLF parity: array-form command: surface L1/L7 (undeclared + used) match on LF and CRLF', () => {
+  const manifest = '---\n---\n## Variables\n- PP_SERVICE — svc\n';
+  const stepLF =
+    '---\ntype: script\nstep_id: a\ncommand:\n- notify.py\n- --service\n- ${PP_SERVICE}\n- ${PP_ELSE}\n---\n' +
+    '# A\n\n## Next\nPipeline complete.\n';
+  const lfPlan = computePlan(scaffold(manifest, { '01-a.md': stepLF }));
+  const crlfPlan = computePlan(scaffold(toCRLF(manifest), { '01-a.md': toCRLF(stepLF) }));
+  expect(lfPlan.errors.some((e) => e.includes('PP_ELSE') && e.includes('not declared'))).toBe(true);
+  expect(crlfPlan.errors.some((e) => e.includes('PP_ELSE') && e.includes('not declared'))).toBe(true);
+  expect(crlfPlan.errors).toEqual(lfPlan.errors);
+  expect(crlfPlan.warnings.filter((w) => w.includes('never used'))).toEqual([]);
+});
+
+test('CRLF parity: a near-miss (lowercase pp_) inside a script: value is the SAME L2 plan error on LF and CRLF', () => {
+  // `script:` before `step_id:` (not last frontmatter line) — see the note
+  // on the 'script: (string form)' CRLF-parity test above.
+  const stepLF =
+    '---\ntype: script\nscript: scripts/${pp_near}.py\nstep_id: b\n---\n' +
+    '# B\n\n## Next\nPipeline complete.\n';
+  const lfPlan = computePlan(scaffold('---\n---\n', { '01-b.md': stepLF }));
+  const crlfPlan = computePlan(scaffold('---\n---\n', { '01-b.md': toCRLF(stepLF) }));
+  const lfHit = lfPlan.errors.find((e) => e.includes('pp_near') && e.includes('not a valid variable token'));
+  const crlfHit = crlfPlan.errors.find((e) => e.includes('pp_near') && e.includes('not a valid variable token'));
+  expect(lfHit).toBeDefined();
+  expect(crlfHit).toBeDefined();
+  expect(crlfHit).toBe(lfHit);
+  // Full-array equality — see the note on the 'a4 L1 sweep' CRLF-parity test:
+  // a broken exemption would ADD a duplicate L3-tagged near-miss error
+  // alongside the surface-sweep one, which a `.find()`-only check would miss.
+  expect(crlfPlan.errors).toEqual(lfPlan.errors);
+});
+
+test('CRLF parity: L3 ban still fires (same error) on a CRLF file for a NON-exempt frontmatter field', () => {
+  const stepLF = '---\nstep_id: ${PP_X}\n---\n# A\n';
+  const lfPlan = computePlan(scaffold('---\n---\n', { '01-a.md': stepLF }));
+  const crlfPlan = computePlan(scaffold('---\n---\n', { '01-a.md': toCRLF(stepLF) }));
+  const lfHit = lfPlan.errors.find((e) => e.includes('not supported in frontmatter'));
+  const crlfHit = crlfPlan.errors.find((e) => e.includes('not supported in frontmatter'));
+  expect(lfHit).toBeDefined();
+  expect(crlfHit).toBeDefined();
+  expect(crlfHit).toBe(lfHit);
+});
+
 test('lint: L8 secretish-name warning for a declared name matching the D14 pattern', () => {
   const manifest = '---\n---\n## Variables\n- PP_API_TOKEN (required) — auth token\n';
   const plan = computePlan(scaffold(manifest, { '01-a.md': '# A\n\nUse ${PP_API_TOKEN} here.\n' }));
