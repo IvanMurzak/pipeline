@@ -20,6 +20,7 @@ import { runLogs } from './commands/logs';
 import { runSubmodule } from './commands/submodule';
 import { runRelease } from './commands/release';
 import { runStep } from './commands/step-run';
+import { runHash } from './commands/hash';
 
 /**
  * Single-sourced from package.json — resolved relative to THIS file's own
@@ -53,6 +54,11 @@ function usage(): string {
     'Usage: pipeline <command> [options]',
     '',
     'Commands:',
+    '  hash --root <pipeline_root> [--json]',
+    '      Compute the pipeline content hash (SHA-256 over PIPELINE.md + steps/** +',
+    '      scripts/**) and output it as sha256:<hex> (plain) or {"content_hash":"sha256:<hex>"}',
+    '      (--json). Exit 0 on success, 2 on missing/invalid root.',
+    '',
     '  plan --root <pipeline_root> [--default-model <m>] [--model <step_id>=<m> ...]',
     '       [--default-effort <level>] [--effort <step_id>=<level> ...]',
     '      Compute the execution plan (mode, isolation, ordered steps with',
@@ -238,6 +244,8 @@ async function main(argv: string[]): Promise<number> {
   const command = argv[2];
   const rest = argv.slice(3);
   switch (command) {
+    case 'hash':
+      return runHash(rest);
     case 'plan':
       return runPlan(rest);
     case 'match':

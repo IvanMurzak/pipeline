@@ -208,8 +208,10 @@ export function collectPipelineFiles(
  *     (a relpath can hold neither) ⇒ no boundary ambiguity can collide two
  *     different file sets.
  *   - paths are POSIX-normalized ⇒ the same tree hashes identically on any OS.
+ *
+ * Exported for use by the CLI hash command and other tools.
  */
-function hashFileSet(
+export function hashFileSet(
   pipelineRoot: string,
   absFiles: string[],
   options: ContentHashOptions = {},
