@@ -44,6 +44,45 @@ declares `execution: parallel`. Steps that declare `depends-on` without that fla
 run sequentially and emit a warning. This keeps the common (sequential) case at
 O(1) reads on a run start.
 
+### `drive` — run an entire pipeline headless (EXPERIMENTAL)
+
+```bash
+bun src/cli.ts drive --root <pipeline_root> --run-id <id> --start <iteration-path>
+  [--default-model <m>] [--model <step_id>=<m> ...]
+  [--default-effort <level>] [--effort <step_id>=<level> ...]
+  [--var NAME=value ...] [--vars-file <path>]
+  [--answer <text> | --answer-file <path>]
+  [--task <text> | --task-file <path>]
+  [--executor-cmd <template>] [--json] [--resume]
+```
+
+The **headless executor**: an EXPERIMENTAL single-process runner that replaces the
+pipeline-manager LLM. It executes an entire pipeline run using deterministic
+control flow (no agent spawns), ideal for automation and testing.
+
+**Executor retry environment (08.4):**
+- Sets `CLAUDE_CODE_RETRY_WATCHDOG=1` (lifts retry cap for transient errors)
+- Sets `CLAUDE_CODE_MAX_RETRIES=15` (hard cap for transient retries)
+- Overridable by explicitly setting these env vars before the spawn
+- Documented mechanism for unattended sessions (Claude Code 2.1.199+)
+
+**Exit codes:**
+- `0` completed
+- `1` halted (includes provider-limit error info when present)
+- `2` usage/argument error
+- `3` blocked (awaiting nested blocker resolution)
+- `4` awaiting-input (parked on a needs-input question)
+
+**Needs-input (park/resume):**
+- Each question carries a correlatable `question_id` (06.2.1) for cloud-dispatcher alignment
+- Parks with `exit 4` and includes the question in the final JSON
+- Resume with `--resume --answer <text>` to deliver the answer and continue the SAME session
+
+**Provider limits (06.7):**
+- Detects usage/rate-limit errors from the executor envelope
+- Includes `provider_limit: {reason, retry_after_ms?}` in the exit-1 (halted) JSON
+- Reason: `rate_limit_exceeded` | `overloaded`
+
 ### Library use
 
 ```ts

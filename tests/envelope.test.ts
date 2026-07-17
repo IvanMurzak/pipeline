@@ -3,7 +3,7 @@
 // 2.1.205 during the headless spike (trimmed to the fields we consume).
 
 import { test, expect } from 'bun:test';
-import { addUsage, emptyUsage, parseEnvelope } from '../src/lib/envelope';
+import { addUsage, emptyUsage, parseEnvelope, detectProviderLimit } from '../src/lib/envelope';
 
 /** A real-shaped envelope (Claude Code 2.1.205). */
 function fixture(overrides: Record<string, unknown> = {}): string {
@@ -96,4 +96,33 @@ test('emptyUsage/addUsage: accumulate usage and cost across envelopes', () => {
   addUsage(acc, parseEnvelope(JSON.stringify({ type: 'result' }))!);
   expect(acc.input).toBe(18);
   expect(acc.cost_usd).toBeCloseTo(0.123252);
+});
+
+test('detectProviderLimit: success envelope → null', () => {
+  const env = parseEnvelope(fixture())!;
+  expect(detectProviderLimit(env)).toBeNull();
+});
+
+test('detectProviderLimit: error_rate_limited → rate_limit_exceeded', () => {
+  const env = parseEnvelope(fixture({ is_error: true, subtype: 'error_rate_limited' }))!;
+  const limit = detectProviderLimit(env);
+  expect(limit).not.toBeNull();
+  expect(limit!.reason).toBe('rate_limit_exceeded');
+});
+
+test('detectProviderLimit: error_overloaded → overloaded', () => {
+  const env = parseEnvelope(fixture({ is_error: true, subtype: 'error_overloaded' }))!;
+  const limit = detectProviderLimit(env);
+  expect(limit).not.toBeNull();
+  expect(limit!.reason).toBe('overloaded');
+});
+
+test('detectProviderLimit: other error subtype → null', () => {
+  const env = parseEnvelope(fixture({ is_error: true, subtype: 'error_max_turns' }))!;
+  expect(detectProviderLimit(env)).toBeNull();
+});
+
+test('detectProviderLimit: error with null subtype → null', () => {
+  const env = parseEnvelope(fixture({ is_error: true, subtype: null }))!;
+  expect(detectProviderLimit(env)).toBeNull();
 });

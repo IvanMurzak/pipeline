@@ -73,6 +73,9 @@ export interface StepQuestion {
   text: string;
   context: string | null;
   options: string[] | null;
+  /** Correlatable id minted at park time — used by runner to match cloud
+   *  answers on the bridge (06.2.1). Additive; older CLI versions omit this. */
+  question_id?: string;
 }
 
 /** Extract the needs-input question from a step record, defensively. Lives

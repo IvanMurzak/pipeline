@@ -37,6 +37,15 @@ export interface ClaudeEnvelope {
   num_turns: number | null;
 }
 
+export interface ProviderLimit {
+  /** Classification reason: "rate_limit_exceeded" | "overloaded" — maps the
+   *  claude envelope error subtype (error_rate_limited → rate_limit_exceeded;
+   *  error_overloaded → overloaded). */
+  reason: 'rate_limit_exceeded' | 'overloaded';
+  /** Optional retry delay in milliseconds when available in the error. */
+  retry_after_ms?: number;
+}
+
 function str(v: unknown): string | null {
   return typeof v === 'string' ? v : null;
 }
@@ -123,4 +132,19 @@ export function addUsage(
   }
   if (env.total_cost_usd !== null) acc.cost_usd += env.total_cost_usd;
   return acc;
+}
+
+/** Detect a provider-limit error from an envelope's subtype. The envelope's
+ *  error subtype maps to a structured ProviderLimit — rate_limited /
+ *  overloaded (06.7 / D11). Null when the error is some other category or
+ *  when the envelope reports success. */
+export function detectProviderLimit(env: ClaudeEnvelope): ProviderLimit | null {
+  if (!env.is_error || !env.subtype) return null;
+  if (env.subtype === 'error_rate_limited') {
+    return { reason: 'rate_limit_exceeded' };
+  }
+  if (env.subtype === 'error_overloaded') {
+    return { reason: 'overloaded' };
+  }
+  return null;
 }

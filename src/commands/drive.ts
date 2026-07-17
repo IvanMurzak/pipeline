@@ -95,7 +95,7 @@ import { frozenVariablesError, invokeNext } from './next';
 import { addVarFlag, loadVarsFile, mergeCliVars } from '../lib/run-vars';
 import type { ActionStep, LayerResultEntry, MergeBranch, NextRecord, StepRecord } from '../lib/next';
 import { realGit, type GitResult, type GitRunner } from '../lib/git';
-import { addUsage, emptyUsage, parseEnvelope, type ClaudeEnvelope } from '../lib/envelope';
+import { addUsage, emptyUsage, parseEnvelope, detectProviderLimit, type ClaudeEnvelope, type ProviderLimit } from '../lib/envelope';
 import {
   RECORD_OUTCOMES as RECORD_OUTCOME_LIST,
   extractQuestion,
@@ -285,16 +285,25 @@ function subprocessExecutor(template: string, schema: string | null, err: (s: st
         // Shell path: build ONE pre-quoted command line — node's shell:true
         // joins an args array with bare spaces, which would break the schema
         // JSON's quotes inside cmd.exe.
+        // Executor retry environment (08.4): set defaults that may be overridden
+        // via template/env (only override absent values).
+        const env = {
+          ...process.env,
+          CLAUDE_CODE_RETRY_WATCHDOG: process.env.CLAUDE_CODE_RETRY_WATCHDOG ?? '1',
+          CLAUDE_CODE_MAX_RETRIES: process.env.CLAUDE_CODE_MAX_RETRIES ?? '15',
+        };
         const child = useShell
           ? spawn(argv.map(quoteForShell).join(' '), {
               stdio: ['pipe', 'pipe', 'pipe'],
               shell: true,
               windowsHide: true,
+              env,
             })
           : spawn(argv[0], argv.slice(1), {
               stdio: ['pipe', 'pipe', 'pipe'],
               shell: false,
               windowsHide: true,
+              env,
             });
         child.stdout?.on('data', (d: unknown) => {
           outBuf += String(d);
@@ -715,6 +724,11 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     }
   };
 
+  // Track provider-limit errors for the final JSON (06.7 / D11). Any step may
+  // hit a limit; the first one is captured so the caller can implement retry
+  // policy. Null unless a provider-limit envelope was seen.
+  let detectedLimit: ProviderLimit | null = null;
+
   progress('run.started', { run_id: runId, pipeline_root: rootAbs, experimental: true });
 
   // Run-start setup — mirrors the pipeline-manager's "Set up the Tier-2 feedback
@@ -847,6 +861,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     iteration_path: string;
     session_id: string;
     question: StepQuestion;
+    question_id: string;
   }
 
   /** Spawn ONE step-executor and fold its record into a LayerResultEntry
@@ -893,8 +908,8 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     };
     /** Park this step on a question — the run exits 4 and the caller resumes
      *  the SAME session with the user's answer. */
-    const park = (question: StepQuestion, sessionId: string, repeat: boolean) => {
-      progress('step.awaiting_input', { step_id: step.step_id, question: question.text, ...(repeat ? { repeat: true } : {}) });
+    const park = (question: StepQuestion, questionId: string, sessionId: string, repeat: boolean) => {
+      progress('step.awaiting_input', { step_id: step.step_id, question: question.text, question_id: questionId, ...(repeat ? { repeat: true } : {}) });
       return {
         entry: { step_id: step.step_id, outcome: 'halted' as const, halt_reason: 'awaiting input' },
         raw: null,
@@ -905,7 +920,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         // rendered `.runtime/<run>/rendered/` path there would make the engine
         // synthesize an off-plan step on the answer resume instead of resuming
         // the parked plan step. Identical to step.path on non-rendered runs.
-        awaiting: { step_id: step.step_id, iteration_path: step.source_path, session_id: sessionId, question },
+        awaiting: { step_id: step.step_id, iteration_path: step.source_path, session_id: sessionId, question, question_id: questionId },
       };
     };
 
@@ -932,7 +947,8 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
           context: null,
           options: null,
         };
-        return park(question, prior.session_id, true);
+        const questionId = question.question_id ?? randomUUID();
+        return park(question, questionId, prior.session_id, true);
       }
       sess = { ...prior, status: 'running' };
       warnCwd(sess);
@@ -989,6 +1005,12 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
       });
       const envelope = typeof exit.stdout === 'string' ? parseEnvelope(exit.stdout) : null;
       noteUsage(envelope);
+      // Detect provider-limit errors (06.7) — capture the first one encountered
+      // for the final JSON so the caller can implement retry policy.
+      if (!detectedLimit && envelope) {
+        const limit = detectProviderLimit(envelope);
+        if (limit) detectedLimit = limit;
+      }
       let attemptRaw: Record<string, unknown> | null;
       const structured = envelope?.structured_output ?? null;
       if (validRecord(structured)) {
@@ -1043,7 +1065,9 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     // needs-input — intercepted BEFORE the engine ever sees the record.
     if (raw !== null && raw.outcome === 'needs-input') {
       const question = extractQuestion(raw);
-      sess.questions.push(question);
+      const questionId = randomUUID();
+      const questionWithId = { ...question, question_id: questionId };
+      sess.questions.push(questionWithId);
       if (sess.questions.length > MAX_QUESTIONS_PER_STEP) {
         return halted(
           `question limit exhausted (${MAX_QUESTIONS_PER_STEP} answered, then asked again): ` +
@@ -1057,7 +1081,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
       }
       sess.status = 'awaiting-input';
       writeStepSession(sessionsDir, stepKey, sess);
-      return park(question, sess.session_id, false);
+      return park(questionWithId, questionId, sess.session_id, false);
     }
 
     if (!validRecord(raw)) {
@@ -1195,6 +1219,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
               step_id: r.awaiting.step_id,
               session_id: r.awaiting.session_id,
               question: r.awaiting.question.text,
+              question_id: r.awaiting.question_id,
             });
             enrichStats(false);
             return finalJson(
@@ -1203,6 +1228,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
                 step_id: r.awaiting.step_id,
                 iteration_path: r.awaiting.iteration_path,
                 session_id: r.awaiting.session_id,
+                question_id: r.awaiting.question_id,
                 question: r.awaiting.question,
                 detail:
                   'the step asked a question; answer it, then re-run pipeline drive with ' +
@@ -1279,7 +1305,14 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         }
         progress('run.halted', { status: action.status, reason: action.reason });
         enrichStats(true);
-        return finalJson({ status: action.status, reason: action.reason }, 1);
+        return finalJson(
+          {
+            status: action.status,
+            reason: action.reason,
+            ...(detectedLimit ? { provider_limit: detectedLimit } : {}),
+          },
+          1,
+        );
       }
       case 'continue': {
         // §7 call-budget hand-off. Even under drive's infinite budget, a
@@ -1297,11 +1330,25 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         // provision/finalize/teardown never surface here (manualHooks:false makes
         // invokeNext execute them in-process). Defensive: never loop on an
         // unactuatable action.
-        return finalJson({ status: 'halted', reason: `pipeline drive cannot actuate action '${action.action}'` }, 1);
+        return finalJson(
+          {
+            status: 'halted',
+            reason: `pipeline drive cannot actuate action '${action.action}'`,
+            ...(detectedLimit ? { provider_limit: detectedLimit } : {}),
+          },
+          1,
+        );
       }
     }
   }
-  return finalJson({ status: 'halted', reason: 'drive loop guard exceeded (10000 engine calls)' }, 1);
+  return finalJson(
+    {
+      status: 'halted',
+      reason: 'drive loop guard exceeded (10000 engine calls)',
+      ...(detectedLimit ? { provider_limit: detectedLimit } : {}),
+    },
+    1,
+  );
 }
 
 /** `branch @ worktree-path, …` — the unmerged/leaked enumeration format shared

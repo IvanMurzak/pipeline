@@ -521,10 +521,17 @@ test('drive: needs-input parks the run (exit 4) and --answer resumes the SAME se
   expect(first.status).toBe(4);
   expect(first.json.status).toBe('awaiting-input');
   expect(first.json.step_id).toBe(step0);
+  // question_id is at top-level (06.2.1 contract for runner correlation)
+  expect(typeof first.json.question_id).toBe('string');
+  expect(first.json.question_id).toMatch(/^[0-9a-f-]{36}$/);
+  // question_id is also nested inside question object
+  expect(typeof first.json.question.question_id).toBe('string');
+  expect(first.json.question.question_id).toMatch(/^[0-9a-f-]{36}$/);
   expect(first.json.question).toEqual({
     text: 'Which deployment target?',
     context: 'checked infra/, found none',
     options: ['aws', 'gcp'],
+    question_id: first.json.question.question_id,
   });
   expect(first.json.detail).toContain('--answer');
   const sessFile = join(root, '.runtime', run, 'sessions', `${step0}.json`);
@@ -532,6 +539,8 @@ test('drive: needs-input parks the run (exit 4) and --answer resumes the SAME se
   expect(sess.status).toBe('awaiting-input');
   expect(sess.questions.length).toBe(1);
   expect(first.json.session_id).toBe(sess.session_id);
+  // Top-level and nested question_ids must match for runner correlation
+  expect(first.json.question_id).toBe(first.json.question.question_id);
 
   // Answer: the SAME session id is resumed (--resume <id>), the answer prompt
   // carries the text, and the run completes.
@@ -1161,4 +1170,74 @@ test('drive: usage errors — missing --start (without --resume) and missing --r
   const noRoot = spawnSync(process.execPath, [CLI, 'drive'], { encoding: 'utf8', cwd: root, env });
   expect(noRoot.status).toBe(2);
   expect(noRoot.stderr).toContain('--root and --run-id are required');
+}, 30000);
+
+test('drive: question_id is minted at park time and included in exit-4 JSON and session', () => {
+  const root = scaffold(2);
+  const plan = computePlan(root);
+  cannedEnvelope(root, plan.steps[0].step_id, { outcome: 'needs-input', question: { text: 'what color?', context: 'was blue', options: ['red', 'blue'] } });
+  cannedEnvelope(root, plan.steps[1].step_id, { outcome: 'completed', next_iteration: 'PIPELINE_COMPLETE' });
+  const template = envelopeTemplate(root);
+
+  const r = drive(root, 'q1', ['--start', plan.steps[0].path], { template });
+  expect(r.status).toBe(4);
+  expect(r.json.status).toBe('awaiting-input');
+  // question_id is present in the exit-4 JSON
+  expect(typeof r.json.question_id).toBe('string');
+  expect(r.json.question_id).toMatch(/^[0-9a-f-]{36}$/); // UUID format
+  // Same question_id is persisted in the session file
+  const sesFile = join(root, '.runtime', 'q1', 'sessions', plan.steps[0].step_id + '.json');
+  const sess = JSON.parse(readFileSync(sesFile, 'utf8'));
+  expect(sess.questions.length).toBe(1);
+  expect(sess.questions[0].question_id).toBe(r.json.question_id);
+}, 30000);
+
+test('drive: provider_limit is detected from error_rate_limited and included in halt JSON', () => {
+  const root = scaffold(1);
+  const plan = computePlan(root);
+  cannedEnvelope(root, plan.steps[0].step_id, undefined, { is_error: true, subtype: 'error_rate_limited' });
+  const template = envelopeTemplate(root);
+
+  const r = drive(root, 'limit', ['--start', plan.steps[0].path], { template });
+  expect(r.status).toBe(1);
+  expect(r.json.status).toBe('halted');
+  // provider_limit is present with the correct reason
+  expect(r.json.provider_limit).toBeDefined();
+  expect((r.json.provider_limit as Record<string, unknown>).reason).toBe('rate_limit_exceeded');
+}, 30000);
+
+test('drive: executor env includes CLAUDE_CODE_RETRY_WATCHDOG=1 and CLAUDE_CODE_MAX_RETRIES=15 by default', () => {
+  const root = scaffold(1);
+  const plan = computePlan(root);
+  // Prescribe an executor that captures its environment and writes it to a file
+  const capEnv = `// FakeExecutorRunner: captures spawn environment.
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
+const prompt = await Bun.stdin.text();
+const m = /^step_record_file = (.+)$/m.exec(prompt);
+if (!m) process.exit(9);
+const recordFile = m[1].trim();
+const root = dirname(dirname(dirname(dirname(recordFile))));
+const canned = join(root, 'canned');
+mkdirSync(canned, { recursive: true });
+
+// Write the env vars to a file for inspection
+writeFileSync(join(canned, 'executor-env.json'), JSON.stringify({
+  CLAUDE_CODE_RETRY_WATCHDOG: process.env.CLAUDE_CODE_RETRY_WATCHDOG,
+  CLAUDE_CODE_MAX_RETRIES: process.env.CLAUDE_CODE_MAX_RETRIES,
+}), 'utf8');
+
+// Write a minimal valid record
+writeFileSync(recordFile, JSON.stringify({ outcome: 'completed' }), 'utf8');
+process.exit(0);
+`;
+  writeFileSync(join(root, 'capture-env.ts'), capEnv, 'utf8');
+  const template = `bun ${join(root, 'capture-env.ts')}`;
+
+  const r = drive(root, 'envtest', ['--start', plan.steps[0].path], { template });
+  expect(r.status).toBe(0);
+  const captured = JSON.parse(readFileSync(join(root, 'canned', 'executor-env.json'), 'utf8'));
+  expect(captured.CLAUDE_CODE_RETRY_WATCHDOG).toBe('1');
+  expect(captured.CLAUDE_CODE_MAX_RETRIES).toBe('15');
 }, 30000);
