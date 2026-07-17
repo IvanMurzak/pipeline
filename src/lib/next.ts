@@ -223,11 +223,14 @@ export interface ActionStep {
   step_id: string;
   path: string;
   /**
-   * The step's SOURCE iteration file (env-variables design, D6): always set,
-   * and `=== path` until rendered shadow copies land (P4/a5) — from then on,
-   * a variable-declaring run's `path` points at the rendered copy under
+   * The step's SOURCE iteration file (env-variables design, D6): always set.
+   * The pure engine always emits `source_path === path`; on a variable-
+   * declaring run the COMMAND layer (commands/next.ts, P4/a5) re-points an
+   * AGENT step's `path` at its lazily rendered copy under
    * `.runtime/<run>/rendered/` while `source_path` keeps the author-owned
-   * original for the improver/script-creator briefs.
+   * original for the improver/script-creator briefs and every path-keyed
+   * consumer (events, stats, awaiting/--start round-trips). Script, gate,
+   * pipeline, and §6.3 fallback dispatches keep `path === source_path` (E11).
    */
   source_path: string;
   model: string | null;
@@ -1044,8 +1047,9 @@ function makeActionStep(
   const actionStep: ActionStep = {
     step_id: step.step_id,
     path: step.path,
-    // Always set; identical to `path` until rendering (P4/a5) points `path`
-    // at a `.runtime/<run>/rendered/` shadow copy (see the field doc).
+    // Always set; identical to `path` here — the command layer re-points an
+    // agent step's `path` at its rendered shadow copy on variable-declaring
+    // runs (P4/a5; see the field doc).
     source_path: step.path,
     model: step.model,
     effort: step.effort ?? null,

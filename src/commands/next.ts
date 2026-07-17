@@ -117,6 +117,7 @@ import {
   mergeCliVars,
   type ResolvedVars,
 } from '../lib/run-vars';
+import { renderActionSteps } from '../lib/render';
 import { buildGateQuestion, parseGateDecision, type GateQuestion } from '../lib/gate';
 import {
   COMPOSE_EXEC_GUARD,
@@ -609,7 +610,13 @@ function statsNoteAction(root: string, runId: string, action: NextAction): void 
     for (const step of action.steps) {
       statsAppend(root, runId, {
         k: 'step.started',
-        path: step.path,
+        // SOURCE path label (env-variables a5): completion lines are keyed off
+        // engine state (prev.current_path — always the source), so a rendered
+        // `.runtime/<run>/rendered/` dispatch path would de-pair the
+        // started/completed lines and put volatile run-scoped paths in .stats.
+        // Identical to step.path on every non-rendered dispatch (the engine
+        // always sets source_path).
+        path: step.source_path,
         step_id: step.step_id,
         model: step.model,
         effort: step.effort,
@@ -655,7 +662,13 @@ function emitStartedEvents(action: NextAction, runId: string): void {
     for (const step of action.steps) {
       const argv = [
         kv('run_id', runId),
-        kv('iteration_path', step.path),
+        // SOURCE path label (env-variables a5): iteration.completed is labeled
+        // from engine state (prev.current_path — always the source), and the
+        // v4 sequential fold pairs started/completed by consecutive paths — a
+        // rendered dispatch path would break the pairing and surface volatile
+        // `.runtime/<run>/rendered/` paths in the UI. Identical to step.path
+        // on every non-rendered dispatch (the engine always sets source_path).
+        kv('iteration_path', step.source_path),
         kv('index', step.index),
         kv('resolved_model', step.model),
         kv('resolved_effort', step.effort),
@@ -990,6 +1003,61 @@ function planStepFor(plan: Plan, path: string, stepId?: string | null): PlanStep
   return plan.steps.find((s) => samePath(s.path, path)) ?? (stepId ? plan.steps.find((s) => s.step_id === stepId) : undefined);
 }
 
+/** Which dispatches get rendered shadow copies (env-variables a5; E11 v1
+ *  LOCKED): AGENT steps only. Script, gate, and pipeline dispatches — and the
+ *  §6.3 agent FALLBACK of a failed script step (its file IS a script step's
+ *  file) — keep `path === source_path`, because their path-keyed consumers
+ *  (planStepFor, the script/gate `## Next` parse, `active.step_path` at
+ *  composition pop) key back to plan steps by path equality. */
+function isRenderedDispatch(s: ActionStep): boolean {
+  return (s.type ?? 'agent') === 'agent' && s.fallback === undefined;
+}
+
+/** Actuate a mid-run FORCE-HALT through the engine's terminal seam (haltRun):
+ *  an external run still gets its destroy hook executed in-process (state
+ *  crash-safe parked first), `--manual-hooks` goes straight terminal (the
+ *  worktree is the caller's to reap), the final state is saved, and the run's
+ *  stats are finalized as 'halted'. ONE implementation shared by the mid-run
+ *  plan-error halt and the render-failure halt (env-variables a5) so the two
+ *  flows can never drift. `stamp` (when provided) re-stamps the run-scoped
+ *  persisted fields before each save — the render path passes its
+ *  stampRunFields closure; the plan-error path runs before that closure
+ *  exists and passes nothing (its historical behavior). */
+function executeForceHalt(
+  plan: Plan,
+  state: NextState,
+  reason: string,
+  opts: NextOpts,
+  a: { root: string; runId: string; manualHooks?: boolean },
+  stamp?: (s: NextState) => void,
+): { state: NextState; teardown: TeardownInfo | null } {
+  let { action, state: cur } = haltRun(plan, state, reason, opts);
+  let teardown: TeardownInfo | null = null;
+  if (action.action === 'teardown-worktree') {
+    if (a.manualHooks !== true) {
+      // Crash-safe parking (mirrors the main hook loop), then run the destroy
+      // hook in-process and consume its record.
+      stamp?.(cur);
+      saveState(a.root, a.runId, cur);
+      const projectRoot = action.project_root ?? process.cwd();
+      const hookDirAbs = isAbsolute(action.hook_dir) ? action.hook_dir : join(projectRoot, action.hook_dir);
+      const res = execDestroyHook(action, hookDirAbs, projectRoot, resolve(action.pipeline_root ?? a.root));
+      cur = computeNext(plan, cur, res.record, { ...opts, resume: false }).state;
+      teardown = res.teardown;
+    } else {
+      // --manual-hooks cannot actuate a hook here, and parking in
+      // await-teardown would wedge — go terminal; the worktree is the
+      // caller's to reap.
+      cur.phase = 'terminal';
+    }
+  }
+  stamp?.(cur);
+  saveState(a.root, a.runId, cur);
+  // A mid-run force-halt is a real terminal outcome — measure it too.
+  statsFinalizeRun(a.root, a.runId, 'halted', reason);
+  return { state: cur, teardown };
+}
+
 /** §10 outputs store: `<pipeline_root>/.runtime/<run-id>/outputs/<step_id>.json`. */
 function outputsFile(root: string, runId: string, stepId: string): string {
   return join(root, '.runtime', runId, 'outputs', `${stepId}.json`);
@@ -1204,43 +1272,23 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
     const reason = `plan errors: ${plan.errors.join('; ')}`;
     const out: Record<string, unknown> = { action: 'halt', status: 'halted', reason, errors: plan.errors, mode };
     // A MID-RUN plan error (persisted, non-terminal state) must not bypass
-    // teardown: route the halt through the engine's terminal seam (haltRun) so
-    // an external run that already provisioned a worktree still runs its
-    // destroy hook (PIPELINE_WT_OUTCOME=halted, worktree.destroyed emitted)
-    // and the state parks TERMINAL `halted` with the plan-error reason —
-    // otherwise the worktree leaks forever and the run stays non-terminal.
-    // A FRESH run (no persisted state) keeps the stateless early-return
-    // exactly as before.
+    // teardown: route the halt through the engine's terminal seam
+    // (executeForceHalt → haltRun) so an external run that already provisioned
+    // a worktree still runs its destroy hook (PIPELINE_WT_OUTCOME=halted,
+    // worktree.destroyed emitted) and the state parks TERMINAL `halted` with
+    // the plan-error reason — otherwise the worktree leaks forever and the
+    // run stays non-terminal. A FRESH run (no persisted state) keeps the
+    // stateless early-return exactly as before.
     const planErrState = prevState;
     if (planErrState !== null && planErrState.phase !== 'terminal') {
-      const opts: NextOpts = {
+      const haltOpts: NextOpts = {
         feedbackCount: 0,
         runId: a.runId,
         projectRoot: process.cwd(),
         pipelineRoot: a.root,
       };
-      let { action, state } = haltRun(plan, planErrState, reason, opts);
-      if (action.action === 'teardown-worktree') {
-        if (a.manualHooks !== true) {
-          // Crash-safe parking (mirrors the main hook loop), then run the
-          // destroy hook in-process and consume its record.
-          saveState(a.root, a.runId, state);
-          const projectRoot = action.project_root ?? process.cwd();
-          const hookDirAbs = isAbsolute(action.hook_dir) ? action.hook_dir : join(projectRoot, action.hook_dir);
-          const res = execDestroyHook(action, hookDirAbs, projectRoot, resolve(action.pipeline_root ?? a.root));
-          state = computeNext(plan, state, res.record, { ...opts, resume: false }).state;
-          out.teardown = res.teardown;
-        } else {
-          // --manual-hooks cannot actuate a hook here, and parking in
-          // await-teardown would wedge (plan errors preempt record consumption
-          // on every later call) — go terminal; the worktree is the caller's
-          // to reap.
-          state.phase = 'terminal';
-        }
-      }
-      saveState(a.root, a.runId, state);
-      // A mid-run plan error is a real terminal outcome — measure it too.
-      statsFinalizeRun(a.root, a.runId, 'halted', reason);
+      const halted = executeForceHalt(plan, planErrState, reason, haltOpts, a);
+      if (halted.teardown) out.teardown = halted.teardown;
     }
     return {
       action: { action: 'halt', reason, status: 'halted' },
@@ -1869,10 +1917,70 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   stampRunFields(newState);
   saveState(a.root, a.runId, newState);
 
+  // -------------------------------------------------------------------------
+  // Rendered shadow copies (env-variables design 05 §5, D6 — P4/a5): when the
+  // run carries a frozen PP_* map AND the pipeline declares variables, each
+  // surfaced AGENT step is re-rendered LAZILY from its CURRENT source (plus
+  // PIPELINE.md) into `.runtime/<run>/rendered/<slug>/…` and the action's
+  // `path` is pointed at the rendered copy (`source_path` keeps the original).
+  // Lazy-per-action ⇒ mid-run improver edits are honored (F5) and a deleted
+  // rendered tree self-heals on resume (F4). E9 zero-change: no declarations
+  // ⇒ this whole block is a no-op and `path === source_path` byte-identically.
+  //
+  // ONLY agent steps are rendered (isRenderedDispatch — E11, v1 LOCKED):
+  // script steps keep `path === source_path` — executeScriptStep parses
+  // `## Next` from that path and planStepFor/the §8 ledger key dispatches
+  // back to plan steps — and the same exclusion covers gate steps
+  // (parseNextSection at answer time), `type: pipeline` steps
+  // (startChild/popChild key `active.step_path` by plan-path equality), and
+  // the §6.3 agent FALLBACK of a failed script step.
+  //
+  // A render failure (an occurrence added mid-run for a variable that was
+  // unresolved at init — the 04 §3 re-check — or an I/O failure, F10) halts
+  // the run through the shared terminal seam exactly like a mid-run plan
+  // error: an F2-style reason, external teardown still runs, stats finalize,
+  // exit 1 — never a substituteText throw (07 P4 gate).
+  // -------------------------------------------------------------------------
+  if (action.action === 'run-step' && frozenVars !== null && hasDeclarations(plan.variables)) {
+    const renderable = action.steps.filter(isRenderedDispatch);
+    if (renderable.length) {
+      const rendered = renderActionSteps({
+        pipelineRootAbs: rootAbs,
+        runId: a.runId,
+        stepSources: renderable.map((s) => s.source_path),
+        vars: frozenVars,
+      });
+      if (!rendered.ok) {
+        const reason = rendered.reason;
+        const halted = executeForceHalt(plan, newState, reason, opts, a, stampRunFields);
+        const haltOut: Record<string, unknown> = { action: 'halt', status: 'halted', reason, mode };
+        if (halted.teardown) haltOut.teardown = halted.teardown;
+        return { action: { action: 'halt', reason, status: 'halted' }, out: haltOut, code: 1, plan };
+      }
+      renderable.forEach((s, i) => {
+        const renderedPath = rendered.rendered[i];
+        if (renderedPath != null) {
+          s.path = renderedPath;
+          return;
+        }
+        // Outside the pipeline root (off-plan family/hub hand-off): stays
+        // unrendered with `path === source_path` — a documented v1
+        // limitation, but never a SILENT one: the executor is about to read
+        // raw `${PP_*}` tokens.
+        warnNote(
+          `step ${s.step_id}: source ${s.source_path} lies outside the pipeline root — ` +
+            'dispatched unrendered (pipeline variables are not substituted for out-of-root steps)',
+        );
+      });
+    }
+  }
+
   // Announce the outgoing action (after completions, so journal order is
   // completed(N) → started(N+1)). In-process script executions already emitted
   // their own started/completed pairs inline; `continue` announces nothing.
-  // run.started was measured early (isInit false here).
+  // run.started was measured early (isInit false here). Event/stats labels use
+  // steps[].source_path, so rendering above never leaks `.runtime/rendered/`
+  // paths into the journal.
   emitStartedEvents(action, a.runId);
   statsNoteAction(a.root, a.runId, action);
   statsNoteTerminal(a.root, a.runId, action);

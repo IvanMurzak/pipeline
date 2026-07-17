@@ -899,7 +899,13 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         entry: { step_id: step.step_id, outcome: 'halted' as const, halt_reason: 'awaiting input' },
         raw: null,
         recordFile,
-        awaiting: { step_id: step.step_id, iteration_path: step.path, session_id: sessionId, question },
+        // SOURCE path (env-variables a5, E11): this iteration_path is surfaced
+        // in the exit-4 JSON, echoed in the `--resume --start <path>` hint, and
+        // machine-fed back as `--start` by pipeline-ui's answer flow — a
+        // rendered `.runtime/<run>/rendered/` path there would make the engine
+        // synthesize an off-plan step on the answer resume instead of resuming
+        // the parked plan step. Identical to step.path on non-rendered runs.
+        awaiting: { step_id: step.step_id, iteration_path: step.source_path, session_id: sessionId, question },
       };
     };
 
@@ -1005,7 +1011,10 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     progress('step.started', {
       step_id: step.step_id,
       index: step.index,
-      path: step.path,
+      // SOURCE path label (env-variables a5): keep the drive journal keyed on
+      // the stable source identity like every other observability surface;
+      // the executor still receives the rendered step.path via its prompt.
+      path: step.source_path,
       model: step.model,
       effort: step.effort ?? null,
       session_id: sess.session_id,

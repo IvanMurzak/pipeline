@@ -3,7 +3,7 @@ import { computeNext, type NextState, type NextRecord, type NextAction, type Nex
 import { computePlan, type Plan } from '../src/lib/plan';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const created: string[] = [];
@@ -1375,8 +1375,13 @@ test('vars: run init resolves --var > env > manifest default and FREEZES the map
   const r = next(root, run, ['--var', 'PP_SERVICE=payments', '--var', 'PP_OPT='], { PP_SERVICE: 'env-loses' });
   expect(r.status).toBe(0);
   expect(r.json.action).toBe('run-step');
-  // ActionStep.source_path: always present, === path until rendering (a5).
-  expect(r.json.steps[0].source_path).toBe(r.json.steps[0].path);
+  // ActionStep.source_path: always present. This pipeline declares variables,
+  // so the agent dispatch is RENDERED (a5): source_path keeps the source plan
+  // path while path points into the run's rendered shadow tree.
+  expect(r.json.steps[0].source_path).toBe(join(root, 'steps', '01-a.md'));
+  expect(r.json.steps[0].path).toBe(
+    join(root, '.runtime', run, 'rendered', basename(root), 'steps', '01-a.md'),
+  );
   expect(readState(root, run).variables).toEqual({ PP_SERVICE: 'payments', PP_MODE: 'fast', PP_OPT: '' });
 });
 
@@ -1504,10 +1509,17 @@ test('vars: F10 legacy state (predates variables) — --var IS accepted and the 
   expect('variables' in readState(root, run)).toBe(false);
 
   // The SAME call with --var performs the one-time resolve + write-back and
-  // consumes the record normally (D11-REVISED: --var is legal here).
+  // consumes the record normally (D11-REVISED: --var is legal here). The
+  // pipeline now declares variables, so the dispatched agent step is RENDERED
+  // (a5): source_path keeps the plan path, path points into the run's
+  // rendered shadow tree.
   const ok = next(root, run, ['--var', 'PP_SERVICE=payments', '--record', record]);
   expect(ok.json.action).toBe('run-step');
-  expect(ok.json.steps[0].path).toBe(plan.steps[1].path);
+  expect(ok.json.steps[0].source_path).toBe(plan.steps[1].path);
+  expect(ok.json.steps[0].path).toBe(
+    join(root, '.runtime', run, 'rendered', basename(root), 'steps', '02-step.md'),
+  );
+  expect(readFileSync(ok.json.steps[0].path, 'utf8')).toContain('Use payments.');
   expect(readState(root, run).variables).toEqual({ PP_SERVICE: 'payments' });
 });
 
