@@ -5,6 +5,9 @@
 //   * a LIVE-owner throwaway worktree is NOT reaped (concurrency safety);
 //   * the shared checkout is only ever `fetch` + `merge --ff-only` — asserted
 //     from the git call log; never checkout/reset/switch.
+//
+// @serial: real git sandbox suite — flaky under N-way parallel CPU contention;
+// held out of the parallel pool and run in the serial phase (scripts/parallel-tests.ts).
 
 import { test, expect, afterEach } from 'bun:test';
 import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';

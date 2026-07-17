@@ -9,6 +9,10 @@
 // HOME isolation: every case points USERPROFILE/HOME at a per-test temp dir so
 // the lib resolves the home dir from process.env first (matching
 // analytics_relay.ts).
+//
+// @serial: real git + temp-dir lifecycle suite — flaky under N-way parallel CPU
+// contention; held out of the parallel pool and run in the serial phase
+// (scripts/parallel-tests.ts).
 
 import { test, expect, afterEach, describe } from 'bun:test';
 import { emitEvent, parseKvArgs } from '../src/lib/event';
@@ -29,12 +33,27 @@ function mkTmp(prefix: string): string {
   return d;
 }
 
+/** Canonical git-reported top-level path for an existing worktree/repo dir —
+ *  NOT realpathSync, which does not reliably expand Windows 8.3 short-name
+ *  path segments (e.g. a CI runner whose profile resolves to `RUNNER~1` while
+ *  git always reports the long `runneradmin` form via `--show-toplevel`, same
+ *  as `worktree list --porcelain`). Use wherever a test-constructed path is
+ *  compared against a value the library derived from git. */
+function gitTopLevel(dir: string): string {
+  const r = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: dir, encoding: 'utf8' });
+  if (r.status !== 0 || !r.stdout.trim()) {
+    throw new Error(`git rev-parse --show-toplevel failed at ${dir}: ${r.stderr}`);
+  }
+  const tl = r.stdout.trim();
+  return process.platform === 'win32' ? tl.replace(/\//g, '\\') : tl;
+}
+
 /** A real git repo so resolveProjectRoot resolves to it. */
 function mkGitRepo(): string {
   const root = mkTmp('evt-');
   const r = spawnSync('git', ['init', '-q'], { cwd: root });
   if (r.status !== 0) throw new Error(`git init failed: ${r.stderr}`);
-  return root;
+  return gitTopLevel(root);
 }
 
 afterEach(() => {
@@ -305,6 +324,12 @@ describe('golden — worktree detection', () => {
     runTs(() => emitEvent('iteration.started', ['index=1', 'run_id=wt']), wtPath, controlledEnv(home));
     // Event lands in the MAIN repo's journal (worktree events route to main).
     const ev = JSON.parse(readFileSync(join(main, EVENTS_REL), 'utf-8').trim());
+    // project_root is read back from git's own gitdir/commondir FILE CONTENT
+    // (always git's long-canonical form) — compare against the git-resolved
+    // `main`. worktree is `resolve(process.cwd())` verbatim inside the lib
+    // (never touches git's own path resolution), so it stays in whatever form
+    // the caller's cwd was (here, the raw un-canonicalized wtPath) — compare
+    // against that directly rather than a git-canonicalized value.
     expect(resolve(ev.project_root as string)).toBe(resolve(main));
     expect(resolve(ev.worktree as string)).toBe(resolve(wtPath));
   });

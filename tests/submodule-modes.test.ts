@@ -4,6 +4,9 @@
 //   * an in-sync submodule is a noop (no landing, gh never called);
 //   * usage/env errors exit 2;
 //   * the real runSubmoduleBump CLI shell end-to-end (in-sync dry-run JSON).
+//
+// @serial: real git sandbox suite — flaky under N-way parallel CPU contention;
+// held out of the parallel pool and run in the serial phase (scripts/parallel-tests.ts).
 
 import { test, expect, afterEach } from 'bun:test';
 import { join } from 'node:path';

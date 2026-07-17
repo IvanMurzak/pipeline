@@ -683,6 +683,19 @@ export function runGc(args: string[], git: GitRunner = realGit): number {
     process.stderr.write(`pipeline gc: not a git repository: ${root}\n`);
     return 2;
   }
+  // realpathSync doesn't reliably expand Windows 8.3 short-name path segments
+  // (e.g. a CI runner whose profile resolves to `RUNNER~1` while every other
+  // API reports `runneradmin`) — git's OWN path resolution always does, and
+  // `git worktree list --porcelain` (iterWorktrees, below) prints that long
+  // canonical form. Re-anchor root on git's view so `wtDir`-prefix comparisons
+  // (isUnder) match what iterWorktrees reports instead of silently missing
+  // every registered worktree. Falls back to the realpathSync'd value when git
+  // can't answer (defensive; isGitRepo above already confirmed root is a repo).
+  const topLevel = git(['rev-parse', '--show-toplevel'], root);
+  if (topLevel.code === 0 && topLevel.stdout.trim()) {
+    const tl = topLevel.stdout.trim();
+    root = process.platform === 'win32' ? tl.replace(/\//g, '\\') : tl;
+  }
 
   const wtDir = join(root, '.claude', 'worktrees');
   const def = resolveDefaultBranch(git, root);
