@@ -7,7 +7,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { foldStepSessionTranscripts, readStepSessionRefs } from '../src/lib/step-transcripts';
-import { encodeClaudeProjectDir } from '../../pipeline-ui/transcripts';
+import { encodeClaudeProjectDir } from '../src/lib/vendor/transcript-walk';
 
 let sandbox: string;
 let home: string;

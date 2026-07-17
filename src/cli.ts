@@ -8,6 +8,8 @@
 // terminal tail of the event journal, and `gc` a git worktree/branch janitor,
 // rather than pure computations.)
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { runPlan } from './commands/plan';
 import { runMatch } from './commands/match';
 import { runEvent } from './commands/event';
@@ -19,7 +21,30 @@ import { runSubmodule } from './commands/submodule';
 import { runRelease } from './commands/release';
 import { runStep } from './commands/step-run';
 
-const VERSION = '0.1.0';
+/**
+ * Single-sourced from package.json — resolved relative to THIS file's own
+ * directory (`import.meta.dir`, the same idiom `commands/release.ts` and
+ * `commands/ui.ts` already use to locate files relative to themselves) so it
+ * reads the SAME package.json whether `pipeline` runs from a repo checkout
+ * (`apps/pipeline-cli/src/cli.ts` -> `apps/pipeline-cli/package.json`) or an
+ * npm/bun global install: the published `bin` entry points at `src/cli.ts`
+ * verbatim (no build/bundle step ships), so `src/` and `package.json` sit
+ * exactly one directory apart in BOTH layouts. A hardcoded literal here is
+ * what let the published 0.2.0 CLI report `0.1.0` — never reintroduce one;
+ * tests/packed-artifact.test.ts packs + extracts the tarball and asserts
+ * `pipeline --version` matches package.json's version.
+ */
+function readVersion(): string {
+  try {
+    const raw = readFileSync(join(import.meta.dir, '..', 'package.json'), 'utf8');
+    const v = (JSON.parse(raw) as { version?: unknown }).version;
+    return typeof v === 'string' && v.length > 0 ? v : '0.0.0-unknown';
+  } catch {
+    return '0.0.0-unknown';
+  }
+}
+
+const VERSION = readVersion();
 
 function usage(): string {
   return [

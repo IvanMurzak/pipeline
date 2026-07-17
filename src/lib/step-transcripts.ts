@@ -14,11 +14,17 @@
 // file's `previous_session_ids` so the fold covers every execution, not just
 // the last.
 //
-// Reuses the dashboard's composed run walkers (apps/pipeline-ui/
-// transcript-stats — the validated fold both the FAIL tile and the stats
-// relay run on; each walks the session file + its in-window subagents) rather
-// than re-composing the walk here. Best-effort like all stats code: every
-// entry point swallows failures and returns what it could read.
+// Uses the SAME validated fold the dashboard's FAIL tile and stats relay run
+// on (apps/pipeline-ui/transcript-stats — each walks the session file + its
+// in-window subagents), but via a VENDORED copy (lib/vendor/transcript-walk.ts)
+// rather than a relative import into the sibling pipeline-ui app: this module
+// is reachable from `pipeline drive`, which ships standalone as the published
+// npm package @baizor/pipeline — a package that contains only apps/pipeline-cli,
+// so an import reaching out to `../../../pipeline-ui/*` resolves in this
+// monorepo checkout but 404s (crashing the whole CLI at import time) for every
+// npm-installed user. See lib/vendor/transcript-walk.ts's header for the full
+// lockstep note. Best-effort like all stats code: every entry point swallows
+// failures and returns what it could read.
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -26,8 +32,9 @@ import {
   RUN_FAILURES_COLLECT_MAX,
   collectRunToolFailures,
   foldRunStatsFromTranscript,
-} from '../../../pipeline-ui/transcript-stats';
-import { claudeProjectsDir, encodeClaudeProjectDir } from '../../../pipeline-ui/transcripts';
+  claudeProjectsDir,
+  encodeClaudeProjectDir,
+} from './vendor/transcript-walk';
 import type { RunFailureDetail } from './stats';
 import type { StepQuestion } from './step-schema';
 
