@@ -517,14 +517,88 @@ test('lint: L3 exemption — PP_ tokens inside command:/script: frontmatter keys
   // No L3 (frontmatter-ban) error for the exempted command: key — and since
   // the token isn't in body text either, no error at all here.
   expect(plan.errors).toEqual([]);
-  // Known v1 scope boundary (a2, deviation flagged in the PR): command:/
-  // script: VALUES are exempt from the L3 ban but are NOT themselves swept
-  // for L1/undeclared or counted as "usage" — only step/manifest BODIES and
-  // `## Params` from: templates are (05 §2). A var referenced ONLY inside
-  // command:/script: therefore still surfaces as unused here.
-  expect(
-    plan.warnings.some((w) => w.includes('PP_SERVICE') && w.includes('declared') && w.includes('never used')),
-  ).toBe(true);
+  // a4 D5(c) surface sweep: command:/script: VALUES are swept like body text,
+  // so a variable referenced ONLY there counts as USED — the a2-era false
+  // "unused" warning is gone.
+  expect(plan.warnings.filter((w) => w.includes('never used'))).toEqual([]);
+});
+
+// --- a4 D5(c) surface sweep: command:/script: values are lint surfaces ------
+
+test('a4 surface sweep: an UNDECLARED ${PP_X} inside a command: value is an L1 plan ERROR (was run-init-only)', () => {
+  const plan = computePlan(
+    scaffold('---\n---\n', {
+      '01-a.md':
+        '---\ntype: script\nstep_id: a\ncommand: python notify.py --service ${PP_NOPE}\n---\n' +
+        '# A\n\n## Next\nPipeline complete.\n',
+    }),
+  );
+  const hit = plan.errors.find((e) => e.includes('PP_NOPE'));
+  expect(hit).toBeDefined();
+  // The issue carries the command: key's own file line (line 4 of the step).
+  expect(hit).toMatch(/^steps\/01-a\.md:4: /);
+  expect(hit).toContain('not declared in PIPELINE.md ## Variables');
+});
+
+test('a4 surface sweep: an undeclared token in a script: value and a near-miss are plan ERRORS', () => {
+  const plan = computePlan(
+    scaffold('---\n---\n', {
+      '01-a.md':
+        '---\ntype: script\nstep_id: a\nscript: scripts/${PP_MISSING_IMPL}.py\n---\n' +
+        '# A\n\n## Next\nPipeline complete.\n',
+      '02-b.md':
+        '---\ntype: script\nstep_id: b\nscript: scripts/${pp_near}.py\n---\n' +
+        '# B\n\n## Next\nPipeline complete.\n',
+    }),
+  );
+  expect(plan.errors.some((e) => e.includes('PP_MISSING_IMPL') && e.includes('not declared'))).toBe(true);
+  expect(plan.errors.some((e) => e.includes('pp_near') && e.includes('not a valid variable token'))).toBe(true);
+});
+
+test('a4 surface sweep: a token in command argv[0] is a plan ERROR — argv[0] is never a substitution surface (T3b)', () => {
+  const manifest = '---\n---\n## Variables\n- PP_TOOL — tool to run\n';
+  const plan = computePlan(
+    scaffold(manifest, {
+      '01-a.md':
+        '---\ntype: script\nstep_id: a\ncommand: ${PP_TOOL} --version\n---\n' +
+        '# A\n\n## Next\nPipeline complete.\n',
+    }),
+  );
+  const hit = plan.errors.find((e) => e.includes('argv[0]'));
+  expect(hit).toBeDefined();
+  expect(hit).toContain('not allowed in the command program');
+  // Exactly ONE argv[0] error, and the reference still counts as usage — no
+  // contradictory L7 'never used' alongside it.
+  expect(plan.errors.filter((e) => e.includes('argv[0]')).length).toBe(1);
+  expect(plan.warnings.filter((w) => w.includes('never used'))).toEqual([]);
+});
+
+test('a4 surface sweep: an inline default with whitespace in a string-form command: warns (destroyed by tokenization, E2)', () => {
+  const manifest = '---\n---\n## Variables\n- PP_X — a knob\n';
+  const plan = computePlan(
+    scaffold(manifest, {
+      '01-a.md':
+        '---\ntype: script\nstep_id: a\ncommand: tool --flag ${PP_X:-a b}\n---\n' +
+        '# A\n\n## Next\nPipeline complete.\n',
+    }),
+  );
+  const hit = plan.warnings.find((w) => w.includes('split apart by whitespace'));
+  expect(hit).toBeDefined();
+  expect(hit).toMatch(/^steps\/01-a\.md:4: /);
+});
+
+test('a4 surface sweep: array-form command values are swept too (usage + L1)', () => {
+  const manifest = '---\n---\n## Variables\n- PP_SERVICE — svc\n';
+  const plan = computePlan(
+    scaffold(manifest, {
+      '01-a.md':
+        '---\ntype: script\nstep_id: a\ncommand:\n- notify.py\n- --service\n- ${PP_SERVICE}\n- ${PP_ELSE}\n---\n' +
+        '# A\n\n## Next\nPipeline complete.\n',
+    }),
+  );
+  // Undeclared PP_ELSE errors; declared PP_SERVICE counts as usage (no L7).
+  expect(plan.errors.some((e) => e.includes('PP_ELSE') && e.includes('not declared'))).toBe(true);
+  expect(plan.warnings.filter((w) => w.includes('never used'))).toEqual([]);
 });
 
 test('lint: L7 unused-decl warning for a declared-but-unreferenced variable', () => {

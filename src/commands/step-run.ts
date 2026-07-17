@@ -12,11 +12,11 @@
 // It NEVER touches any run state: no `.runtime/` and no `.feedback/` under the
 // pipeline are created or modified. executeScriptStep writes its params/ledger/
 // failures under `<ctx.pipelineRoot>/.runtime/<run-id>/…`, so we hand it a
-// THROWAWAY pipeline root under the system temp dir and pre-resolve `script:`
-// to an absolute path (against the REAL pipeline root) so the interpreter
-// ladder still finds it. Consequence (documented dry-run limitation): the
-// `${pipeline.root}` binding and PIPELINE_STEP_PIPELINE_ROOT env var point at
-// the throwaway dir, not the real pipeline root.
+// THROWAWAY pipeline root under the system temp dir and pass the REAL pipeline
+// root as `ctx.scriptRoot` so a relative `script:` still resolves (and T3b
+// containment-checks) against the real tree. Consequence (documented dry-run
+// limitation): the `${pipeline.root}` binding and PIPELINE_STEP_PIPELINE_ROOT
+// env var point at the throwaway dir, not the real pipeline root.
 //
 // `--param <name>=<value>` is the override seam (resolveParams' `overrides`
 // argument): a value parses as JSON when it can, else it is kept as a string.
@@ -287,23 +287,36 @@ export function runStepRun(args: string[]): number {
     }
   }
 
-  // Substitute the declared script surfaces EXACTLY as a real run will
-  // (05 §4): `command:` argv PER ELEMENT (after tokenization — a value with
-  // spaces stays one argument, E2) and the `script:` value before the
-  // interpreter ladder / absolute-path resolution. Skipped entirely when the
-  // pipeline declares no variables and no flags were passed (E9 zero-change).
-  // NOTE (a4 seam): when lib/script-step.ts gains ctx.variables and performs
-  // this substitution itself at command build, step-run must switch to
-  // passing ctx.variables INSTEAD of pre-substituting — never both (values
-  // are inert only under a single pass, T4).
-  const substSpec: ScriptStepSpec =
-    vars !== null
-      ? {
-          ...spec,
-          command: spec.command !== null ? substituteArgv(spec.command, vars) : null,
-          script: spec.script !== null ? substituteText(spec.script, vars) : null,
-        }
-      : spec;
+  // The a4 seam (05 §4): lib/script-step.ts performs the ONE substitution
+  // pass itself at command build — `command:` argv per element (after
+  // tokenization, E2), the `script:` value before the interpreter ladder +
+  // the T3b containment gate, the Params PP_* root, and the D10 env overlay —
+  // reading ctx.variables. Step run passes the resolved map INSTEAD of
+  // pre-substituting: values are inert only under a single pass (T4), so the
+  // spec below stays RAW. The `target` shown to the author is a DISPLAY-ONLY
+  // render of the same substitution (safe post-validation; argv[0] is never
+  // substituted, mirroring the runtime's T3b hardening).
+  // Display never crashes the dry run: an unresolvable token here is an
+  // engine edge validation did not mirror — fall back to the authored text
+  // (the execution path reports the same condition as a clean class-'binding'
+  // failure).
+  const renderForDisplay = <T>(render: () => T, authored: T): T => {
+    try {
+      return render();
+    } catch {
+      return authored;
+    }
+  };
+  const rawScript = spec.script;
+  const rawCommand = spec.command;
+  const displayScript =
+    rawScript !== null && vars !== null
+      ? renderForDisplay(() => substituteText(rawScript, vars), rawScript)
+      : rawScript;
+  const displayCommand =
+    rawCommand !== null && vars !== null
+      ? renderForDisplay(() => [rawCommand[0]!, ...substituteArgv(rawCommand.slice(1), vars)], rawCommand)
+      : rawCommand;
 
   // §13 — every `${steps.*}` / `${run.task}` binding is unresolvable in a dry
   // run and REQUIRES a `--param` override. List every missing one at once.
@@ -321,8 +334,8 @@ export function runStepRun(args: string[]): number {
   }
 
   // Throwaway pipeline root: redirects executeScriptStep's params/ledger/
-  // failures writes away from the real `.runtime/`. `script:` is pre-resolved
-  // to an absolute path so the interpreter ladder still finds it.
+  // failures writes away from the real `.runtime/`; `ctx.scriptRoot` keeps
+  // `script:` resolution (and T3b containment) on the REAL pipeline root.
   const tmpRoot = mkdtempSync(join(tmpdir(), 'pipeline-step-run-'));
   try {
     const ctx: ScriptStepContext = {
@@ -339,6 +352,12 @@ export function runStepRun(args: string[]): number {
       worktreeEnvFile: null,
       taskText: null,
       readOutput: () => null,
+      scriptRoot: pipelineRoot,
+      // The EPHEMERAL variables map (never frozen — a dry run has no state):
+      // executeScriptStep substitutes command/script surfaces, resolves
+      // Params PP_* refs, and overlays PP_* onto the child env from it —
+      // render parity with a real run (05 §3).
+      ...(vars !== null ? { variables: vars } : {}),
       // The --param seam: executeScriptStep threads these into its own
       // resolveParams call.
       overrides: a.overrides,
@@ -349,13 +368,15 @@ export function runStepRun(args: string[]): number {
     // executeScriptStep re-resolves identically via ctx.overrides.
     const resolved = resolveParams(spec.params, ctx, a.overrides);
 
+    // Display-only target (see the a4-seam note above — never fed to the
+    // execution path).
     const scriptAbs =
-      substSpec.script !== null
-        ? isAbsolute(substSpec.script)
-          ? substSpec.script
-          : join(pipelineRoot, substSpec.script)
+      displayScript !== null
+        ? isAbsolute(displayScript)
+          ? displayScript
+          : join(pipelineRoot, displayScript)
         : null;
-    const target = scriptAbs ?? (substSpec.command ? substSpec.command.join(' ') : '<none>');
+    const target = scriptAbs ?? (displayCommand ? displayCommand.join(' ') : '<none>');
 
     if (!resolved.ok) {
       // A binding-class failure BEFORE any spawn (a bad --param type, an unset
@@ -393,13 +414,11 @@ export function runStepRun(args: string[]): number {
       return 1;
     }
 
-    // Same spec the plan produced (PP_* surfaces substituted above), with
-    // `script:` pre-resolved to an absolute path (ctx.pipelineRoot is the
-    // throwaway dir — see the header comment).
-    const execSpec: ScriptStepSpec = { ...substSpec, script: scriptAbs };
-
+    // The RAW spec the plan produced — executeScriptStep owns the single
+    // substitution pass (ctx.variables) and resolves a relative `script:`
+    // against ctx.scriptRoot (the real pipeline root).
     const started = Date.now();
-    const res = executeScriptStep(execSpec, iterationAbs, ctx);
+    const res = executeScriptStep(spec, iterationAbs, ctx);
     const durationS = Math.round((Date.now() - started)) / 1000;
 
     const out: StepRunResult = {

@@ -35,6 +35,8 @@ import { APPROVAL_ROLES, normalizeApprovalRole, type GateStepSpec } from './gate
 import {
   hasDeclarations,
   parseVariablesSection,
+  scanNearMisses,
+  scanOccurrences,
   validateRun,
   type SubstitutionIssue,
   type VariableDecl,
@@ -768,6 +770,119 @@ function registerSubstitutionFile(
   });
 }
 
+/** 1-based FILE line of the first `command:`/`script:` key line in the raw
+ *  file's frontmatter block — the location the D5(c) surface lints report
+ *  (line 1 is the opening `---`, so block line i is file line i+2). undefined
+ *  when the file has no frontmatter block or no such key. */
+function frontmatterKeyLine(raw: string, key: 'command' | 'script'): number | undefined {
+  const m = FRONTMATTER_BLOCK_RE.exec(raw);
+  if (!m) return undefined;
+  const lines = m[1]!.split(/\r?\n/);
+  const re = new RegExp(String.raw`^${key}\s*:`, 'i');
+  for (let i = 0; i < lines.length; i++) {
+    if (re.test(lines[i]!)) return i + 2;
+  }
+  return undefined;
+}
+
+/** D5(c) surface sweep (env-variables design, a4 extension of the 05 §2
+ *  lints): a `type: script` step's `command:`/`script:` VALUES are declared
+ *  substitution surfaces, but they live in frontmatter — exempted from the L3
+ *  ban as surfaces, and invisible to the body sweep. Sweeping them here
+ *  closes both 05 §2 literal-text gaps: an undeclared `${PP_X}` inside a
+ *  command is an L1 plan ERROR (was: first caught at run init), and a
+ *  variable used ONLY in a command counts as USAGE for L7 (was: a false
+ *  "unused" warning). Near-misses are L2 errors like anywhere else.
+ *
+ *  `command:` is scanned PER ARGV ELEMENT — exactly what the runtime
+ *  substitutes (E2, scan/substitute parity) — with two extra rules:
+ *    - argv[0] is NEVER substituted at runtime (T3b hardening: a variable
+ *      must not choose the executable), so a token there is a plan ERROR now
+ *      instead of a run-time binding failure;
+ *    - a token visible in the RAW string form but in no post-split element
+ *      (an inline default carrying whitespace, destroyed by tokenization)
+ *      gets a dedicated warning — it would otherwise silently never
+ *      substitute.
+ *  All issues carry the KEY line (per-token line bookkeeping inside a
+ *  frontmatter value isn't worth it). Zero-change: every scan is gated on the
+ *  PP_-ish pre-filter. */
+function lintScriptSurfaces(
+  fileLabel: string,
+  raw: string,
+  script: string | null,
+  command: string[] | null,
+  commandRawValue: string | null,
+  declared: Set<string>,
+  usedNames: Set<string>,
+  errors: string[],
+  warnings: string[],
+): void {
+  // One frontmatter re-parse per key, computed lazily (the common case — no
+  // PP_-ish text anywhere — never derives a location at all).
+  const locCache = new Map<string, string>();
+  const locFor = (key: 'command' | 'script'): string => {
+    let loc = locCache.get(key);
+    if (loc === undefined) {
+      const line = frontmatterKeyLine(raw, key);
+      loc = line !== undefined ? `${fileLabel}:${line}` : fileLabel;
+      locCache.set(key, loc);
+    }
+    return loc;
+  };
+  /** Scan ONE surface value: usage + L1 + L2; returns its occurrence count. */
+  const sweep = (text: string, key: 'command' | 'script'): number => {
+    if (!mayContainPPText(text)) return 0;
+    const occs = scanOccurrences(text, fileLabel);
+    for (const occ of occs) {
+      usedNames.add(occ.name);
+      if (!declared.has(occ.name)) {
+        errors.push(
+          `${locFor(key)}: \`${occ.raw}\` used in the ${key}: value but not declared in PIPELINE.md ## Variables`,
+        );
+      }
+    }
+    for (const near of scanNearMisses(text, fileLabel)) {
+      errors.push(`${locFor(key)}: ${near.message}`);
+    }
+    return occs.length;
+  };
+  if (script !== null) sweep(script, 'script');
+  if (command !== null && command.length > 0) {
+    // argv[0] — the PROGRAM — is never substituted at runtime (T3b): ONE
+    // error regardless of how many tokens it carries. Its names still count
+    // as usage (the variable IS referenced — this error already flags the
+    // reference; a contradictory L7 'unused' would only confuse) and its
+    // near-misses lint like any other surface.
+    let zeroCount = 0;
+    if (mayContainPPText(command[0])) {
+      const zeroOccs = scanOccurrences(command[0], fileLabel);
+      zeroCount = zeroOccs.length;
+      for (const occ of zeroOccs) usedNames.add(occ.name);
+      if (zeroCount > 0) {
+        errors.push(
+          `${locFor('command')}: variable substitution is not allowed in the command program ` +
+            `(argv[0] '${command[0]}') — write the executable literally and pass variables as arguments (T3b)`,
+        );
+      }
+      for (const near of scanNearMisses(command[0], fileLabel)) {
+        errors.push(`${locFor('command')}: ${near.message}`);
+      }
+    }
+    let elCount = zeroCount;
+    for (const el of command.slice(1)) elCount += sweep(el, 'command');
+    if (commandRawValue !== null && mayContainPPText(commandRawValue)) {
+      const rawCount = scanOccurrences(commandRawValue, fileLabel).length;
+      if (rawCount > elCount) {
+        warnings.push(
+          `${locFor('command')}: a \${PP_*} token in the command: value is split apart by whitespace ` +
+            `tokenization (an inline default containing spaces?) and will NOT substitute — ` +
+            `use the array form or a manifest (default: ...) instead (E2)`,
+        );
+      }
+    }
+  }
+}
+
 export function computePlan(pipelineRoot: string, options: ComputePlanOptions = {}): Plan {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -780,6 +895,9 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
   let variableDecls: VariableDecl[] = [];
   const substitutionLineOffsets = new Map<string, number>();
   const substitutionFiles: Array<{ file: string; frontmatterRaw: string; body: string }> = [];
+  /** Names referenced inside `command:`/`script:` values (the D5(c) surface
+   *  sweep, lintScriptSurfaces) — they count as USAGE for L7. */
+  const commandSurfaceUsed = new Set<string>();
 
   // 1. PIPELINE.md frontmatter (execution / isolation / default model).
   let execution = 'sequential';
@@ -951,6 +1069,9 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
     kind: 'script' | 'pipeline' | 'gate';
     params: Record<string, ScriptParamSpec> | null;
   }[] = [];
+  // Declared-name lookup for the D5(c) surface sweep (variableDecls is final
+  // here — the manifest was parsed above).
+  const declaredVarNames = new Set(variableDecls.map((d) => d.name));
   files.forEach((file, i) => {
     const raw = readFileSync(file, 'utf8');
     const { fields, body } = parseFrontmatter(raw);
@@ -1192,6 +1313,21 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
       const params = extractSpecBlock(body, 'Params', `steps/${rel}`, errors);
       const output = extractSpecBlock(body, 'Output', `steps/${rel}`, errors);
 
+      // D5(c) surface sweep (env-variables design, a4): command:/script:
+      // values are substitution surfaces — L1/L2 lint them and count their
+      // occurrences as usage for L7 (see lintScriptSurfaces).
+      lintScriptSurfaces(
+        stepFileLabel,
+        raw,
+        script,
+        command,
+        typeof fields.command === 'string' ? fields.command : null,
+        declaredVarNames,
+        commandSurfaceUsed,
+        errors,
+        warnings,
+      );
+
       scriptSpec = { script, command, timeoutS, retries, onFailure, params, output };
       boundSteps.push({ rel, step_id: stepId, body, kind: 'script', params });
     }
@@ -1240,7 +1376,13 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
   // nothing to check (no declarations AND no file passed the PP_-ish
   // pre-filter) — the E9 zero-change guarantee.
   if (hasDeclarations(variableDecls) || substitutionFiles.length > 0) {
-    const substitutionIssues = validateRun(variableDecls, {}, [], substitutionFiles, []);
+    const substitutionIssues = validateRun(variableDecls, {}, [], substitutionFiles, []).filter(
+      // D5(c) surface sweep: a variable referenced ONLY inside a
+      // command:/script: value IS used — validateRun cannot see those
+      // surfaces (they live in frontmatter), so its L7 verdict is corrected
+      // here from lintScriptSurfaces' usage set.
+      (i) => !(i.kind === 'unused-decl' && i.name !== undefined && commandSurfaceUsed.has(i.name)),
+    );
     foldSubstitutionIssues(substitutionIssues, substitutionLineOffsets, false, errors, warnings);
   }
 

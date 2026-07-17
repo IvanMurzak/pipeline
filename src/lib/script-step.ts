@@ -11,9 +11,9 @@
 // only performs the mechanical `retries:` loop for class 'transient'.
 //
 // Import discipline (acceptance criterion): only script-types.ts, hooks.ts
-// (read-only import) and node builtins — NEVER next.ts / plan.ts / commands/*,
-// so T31 (invokeNext) and T33 (`pipeline step run`) can both reuse it without
-// cycles.
+// (read-only import), the pure lib peers env-file.ts + substitution.ts, and
+// node builtins — NEVER next.ts / plan.ts / commands/*, so T31 (invokeNext)
+// and T33 (`pipeline step run`) can both reuse it without cycles.
 //
 // Documented interpretations of DESIGN.md gaps (flagged in the T12 report):
 //   - Bindings are validated STRICTLY, no type coercion: `${env.X}` is always
@@ -32,10 +32,17 @@
 //     min(spec.timeoutS, remaining deadline) and retries stop early when the
 //     budget is gone — the CLI must kill + record before the outer ceiling.
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseEnvFile } from './env-file';
 import { interpreterFor, spawnViaHookRunner, tail } from './hooks';
+import {
+  PP_TOKEN_RE,
+  scanOccurrences,
+  substituteArgv,
+  substituteText,
+  type ResolvedVars,
+} from './substitution';
 import {
   normalizeNextLine,
   OUTPUT_PERSIST_CAP_BYTES,
@@ -140,6 +147,16 @@ export interface BindingSources {
   readOutput: (stepId: string) => Record<string, unknown> | null;
   /** `${env.NAME}` source; defaults to process.env. */
   env?: Record<string, string | undefined>;
+  /** The run's FROZEN `PP_*` variable map (env-variables design D7/D9/D10) —
+   *  the ONLY source `${PP_*}` Params refs and `command:`/`script:` tokens
+   *  resolve from; NEVER `process.env` (the single environment read happened
+   *  at run-init freeze, and every later expansion is auditable from
+   *  next.json). ABSENT (undefined) = the E9 zero-change path: no
+   *  command/script substitution (not even `$$` collapse), no PP_* child-env
+   *  overlay, and a `${PP_*}` Params ref is a hard 'binding' failure (plan
+   *  lint + run-init validation reject that state up front — reaching it
+   *  means the map was not plumbed). */
+  variables?: ResolvedVars;
 }
 
 export interface ScriptStepContext extends BindingSources {
@@ -168,6 +185,11 @@ export interface ScriptStepContext extends BindingSources {
    *  parseable' warning, record.next_iteration null. Callers in graph/DAG
    *  mode (where routing never reads next_iteration) pass false. */
   parseNext?: boolean;
+  /** Base dir a RELATIVE `script:` value resolves against; defaults to
+   *  `pipelineRoot`. Seam for `pipeline step run`, which redirects the
+   *  `.runtime/` writes to a THROWAWAY pipelineRoot but must still resolve
+   *  (and T3b containment-check) scripts against the REAL pipeline root. */
+  scriptRoot?: string;
 }
 
 /** Engine-shaped step record synthesized by this module (§5.1). Structurally
@@ -233,12 +255,42 @@ type RefResult =
   | { kind: 'unavailable'; why: string }
   | { kind: 'invalid'; why: string };
 
+// D7 — the `PP_*` binding root (env-variables design): the EXACT a1 token
+// grammar (name + optional POSIX `:-`/`-` inline default), derived from
+// substitution.ts PP_TOKEN_RE so the two grammars can never drift. A bare ref
+// is tested by re-wrapping it as `${ref}` — refs cannot contain `}` (REF_RE
+// is `[^}]*`), so the wrapping is lossless.
+const PP_REF_RE = new RegExp(`^${PP_TOKEN_RE.source}$`);
+
 /** Resolve one `${…}` reference against the binding sources (§3.2). */
 function resolveRef(ref: string, ctx: BindingSources): RefResult {
   const invalid = (why: string): RefResult => ({ kind: 'invalid', why });
   const unavailable = (why: string): RefResult => ({ kind: 'unavailable', why });
   const value = (v: unknown): RefResult =>
     v === null || v === undefined ? unavailable(`\${${ref}} resolved to null`) : { kind: 'value', value: v };
+
+  // D7: `${PP_X}` / `${PP_X:-d}` / `${PP_X-d}` resolve from the run's FROZEN
+  // variables map (never process.env, D9) — tested BEFORE the dotted-root
+  // switch (a PP ref is not dot-structured; its inline default may contain
+  // dots). The resolved value is a JSON STRING even in single-ref position
+  // (E6). NOTE: `$$` escaping is body-only — REF_RE has no `$$` awareness, so
+  // `$${PP_X}` inside a Params template is NOT an escape (03 F3, documented
+  // limitation).
+  if (ref.startsWith('PP_') && PP_REF_RE.test(`\${${ref}}`)) {
+    // The resolution itself is delegated to the ONE engine (substituteText):
+    // a grammar-valid single token in, its resolved value out — so the POSIX
+    // `:-`/`-` colon semantics (OQ5=a) live in exactly one place and can
+    // never drift between body rendering, argv substitution, and this root.
+    try {
+      return { kind: 'value', value: substituteText(`\${${ref}}`, ctx.variables ?? {}) };
+    } catch (e) {
+      // Unresolved with no inline default: run-init validation (L6) rejects
+      // this state before any execution — reaching it means the variables map
+      // was not plumbed or the tree drifted mid-run. A wiring bug ⇒ hard
+      // 'binding' failure, never a silent fall-through to a param default.
+      return invalid((e as Error).message);
+    }
+  }
 
   const tokens = ref.split('.');
   switch (tokens[0]) {
@@ -732,6 +784,71 @@ function feedbackDraft(
 }
 
 // ---------------------------------------------------------------------------
+// T3b/T3c — post-substitution spawn-target hardening (env-variables design 07)
+// ---------------------------------------------------------------------------
+//
+// PP_* values are non-secret config but UNTRUSTED input to the spawn layer:
+// they must never steer execution outside the operator's trusted trees or
+// gain shell interpretation. The gates below fire ONLY when substitution
+// actually CHANGED the authored text — an authored path is the author's own
+// pre-existing capability (zero-change guarantee; a hostile local author is
+// out of scope, threat T7).
+
+/** Canonicalize for containment: lexical resolve (normalizes `.`/`..`
+ *  segments, win32 separators and drive-relative forms) + realpath when the
+ *  path exists (resolves symlinks and win32 8.3 short names — a symlink
+ *  inside the root pointing outside must compare OUTSIDE). A not-yet-existing
+ *  path keeps the lexical resolution: its spawn would fail anyway, and the
+ *  lexical form still rejects `..` traversal. */
+function canonicalizePath(p: string): string {
+  const lex = resolve(p);
+  try {
+    return realpathSync(lex);
+  } catch {
+    return lex;
+  }
+}
+
+/** True iff `childCanon` is `rootCanon` or inside it. Case-insensitive on
+ *  win32 (NTFS); the verdict comes from path.relative's `..`-segment shape —
+ *  NEVER a startsWith prefix compare, which win32 defeats (`\` vs `/`
+ *  separators, drive letters `C:` vs `D:`, and sibling dirs sharing a prefix
+ *  like `proj-evil` vs `proj`). */
+function isInsideRoot(childCanon: string, rootCanon: string): boolean {
+  const fold = (s: string): string => (process.platform === 'win32' ? s.toLowerCase() : s);
+  const rel = relative(fold(rootCanon), fold(childCanon));
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/** The T3b gate: a SUBSTITUTED path must canonicalize inside one of the
+ *  operator-trusted roots (the project root, plus the script-resolution root
+ *  — the pipeline root, itself normally inside the project; `pipeline step
+ *  run` passes the real pipeline root there). Returns the violation message
+ *  (paths only — PP_* values are non-secret, D4) or null when contained. */
+function scriptContainmentViolation(candidateAbs: string, roots: string[]): string | null {
+  const canon = canonicalizePath(candidateAbs);
+  for (const root of roots) {
+    if (isInsideRoot(canon, canonicalizePath(root))) return null;
+  }
+  return (
+    `substituted path '${candidateAbs}' resolves to '${canon}', outside the project root — ` +
+    `variable-substituted script paths must stay inside the project (T3b)`
+  );
+}
+
+/** T3c / the `.bat`/`.cmd` carve-out: cmd.exe RE-PARSES its command line
+ *  (metacharacters, `%VAR%` expansion) — anything executed through it is
+ *  shell-REACHABLE, not argv-safe. That is exactly a `.bat`/`.cmd` target
+ *  (interpreterFor routes those via `cmd /c`, lib/hooks.ts) and an authored
+ *  argv[0] of cmd/cmd.exe itself. Deliberately platform-INDEPENDENT: a
+ *  pipeline authored for win32 must fail identically when linted or dry-run
+ *  on another OS instead of passing there and detonating on Windows. */
+function isCmdShellTarget(argv0: string): boolean {
+  const base = argv0.split(/[\\/]/).pop()!.toLowerCase();
+  return base === 'cmd' || base === 'cmd.exe' || base.endsWith('.bat') || base.endsWith('.cmd');
+}
+
+// ---------------------------------------------------------------------------
 // executeScriptStep — the whole §3→§8 pipeline for ONE step execution
 // ---------------------------------------------------------------------------
 
@@ -835,13 +952,98 @@ export function executeScriptStep(
   if (!resolved.ok) return preSpawnFailure('binding', resolved.detail, null);
 
   // argv: script (interpreter ladder via lib/hooks.ts) XOR command (§2.1/§2.2).
+  //
+  // PP_* substitution (env-variables design 05 §4) happens HERE — per argv
+  // element for `command:` and on the `script:` value BEFORE the interpreter
+  // ladder — always AFTER plan-time tokenization (E2: a value containing
+  // spaces or metacharacters stays exactly ONE argument; there is no shell in
+  // the spawn path). Reads ONLY the frozen ctx.variables map. ctx.variables
+  // ABSENT = the E9 zero-change path: the authored text is used
+  // byte-identically (no `$$` collapse either). substituteText throws only on
+  // a token run-init validation should have rejected (e.g. a mid-run source
+  // edit) — caught into the pre-spawn 'binding' failure shape, never a crash.
+  const vars = ctx.variables;
   let argv: string[];
   if (spec.script) {
-    const scriptAbs = isAbsPath(spec.script) ? spec.script : join(ctx.pipelineRoot, spec.script);
+    let scriptValue = spec.script;
+    let scriptHasVarData = false;
+    if (vars !== undefined) {
+      // The T3b/T3c gates key off VARIABLE DATA actually reaching the value —
+      // a real token occurrence — NOT off a text diff: a `$$`→`$` escape
+      // collapse changes the text without any variable steering it (authored
+      // text, pre-existing capability), while a value equal to its own token
+      // text would make a diff-based check miss real variable data.
+      scriptHasVarData = scanOccurrences(spec.script, '').length > 0;
+      try {
+        scriptValue = substituteText(spec.script, vars);
+      } catch (e) {
+        return preSpawnFailure('binding', `script: ${(e as Error).message}`, null);
+      }
+    }
+    const scriptBase = ctx.scriptRoot ?? ctx.pipelineRoot;
+    const scriptAbs = isAbsPath(scriptValue) ? scriptValue : join(scriptBase, scriptValue);
+    if (scriptHasVarData) {
+      // T3b — a variable-steered path must still land inside the operator's
+      // trusted trees: canonicalized containment (resolve + realpath), never
+      // a string-prefix compare. Failure = step error, nothing spawns.
+      const violation = scriptContainmentViolation(scriptAbs, [ctx.projectRoot, scriptBase]);
+      if (violation) return preSpawnFailure('binding', `script: ${violation}`, null);
+      // T3c carve-out — a substituted path landing on `.bat`/`.cmd` would
+      // spawn through `cmd /c` (interpreterFor), where cmd.exe re-parses
+      // text: shell-reachable, not argv-safe. Refuse to spawn.
+      if (isCmdShellTarget(scriptAbs)) {
+        return preSpawnFailure(
+          'binding',
+          `script: substituted path '${scriptValue}' targets a .bat/.cmd script — those run through cmd.exe, ` +
+            `which re-parses its command line (shell-reachable); variable-substituted .bat/.cmd targets are not supported (T3c)`,
+          null,
+        );
+      }
+    }
     const interp = interpreterFor(scriptAbs);
     argv = interp.args.length > 0 ? [interp.cmd, ...interp.args] : [interp.cmd];
   } else if (spec.command && spec.command.length > 0) {
-    argv = [...spec.command];
+    const authored = spec.command;
+    argv = [...authored];
+    if (vars !== undefined) {
+      // T3b hardening decision (07 leaves the choice to the implementation):
+      // argv[0] — the PROGRAM — is NEVER a substitution surface. A variable
+      // choosing the executable is arbitrary program execution however well
+      // contained, so it is forbidden OUTRIGHT (the stricter of 07's two
+      // options; the plan lint mirrors this at design time). argv[0] passes
+      // through UNTOUCHED — no substitution, no `$$` collapse.
+      if (scanOccurrences(authored[0], '').length > 0) {
+        return preSpawnFailure(
+          'binding',
+          `command: variable substitution is not allowed in the program name (argv[0] '${authored[0]}') — ` +
+            `write the executable literally and pass variables as arguments (T3b)`,
+          null,
+        );
+      }
+      let rest: string[];
+      try {
+        rest = substituteArgv(authored.slice(1), vars);
+      } catch (e) {
+        return preSpawnFailure('binding', `command: ${(e as Error).message}`, null);
+      }
+      // Occurrence-based, not a text diff — see the script: gate above (a
+      // `$$` escape collapse is authored text, not variable data).
+      const argsHaveVarData = authored.slice(1).some((el) => scanOccurrences(el, '').length > 0);
+      // T3c carve-out: substituted text handed to cmd.exe (an authored
+      // cmd/cmd.exe or `.bat`/`.cmd` argv[0]) is RE-PARSED by its parser —
+      // shell-reachable, not argv-safe. Refuse to spawn when variable data
+      // reached any argument; an all-literal cmd.exe command stays untouched
+      // (authored, pre-existing capability).
+      if (argsHaveVarData && isCmdShellTarget(authored[0])) {
+        return preSpawnFailure(
+          'binding',
+          `command: '${authored[0]}' runs through cmd.exe, which re-parses its command line — ` +
+            `variable-substituted arguments are shell-reachable there and are not supported (T3c)`,
+          null,
+        );
+      }
+      argv = [authored[0], ...rest];
+    }
   } else {
     return preSpawnFailure('binding', 'script step declares neither script: nor command:', null);
   }
@@ -860,6 +1062,14 @@ export function executeScriptStep(
       return preSpawnFailure('env', `cannot read worktree env file ${ctx.worktreeEnvFile}: ${(e as Error).message}`, paramsFile);
     }
   }
+  // D10 — every frozen PP_* entry rides the child env: added AFTER the
+  // worktree env-file entries (the frozen map is authoritative for PP names
+  // over machine/worktree values — CLI freeze wins) and BEFORE the
+  // PIPELINE_STEP_* contract vars below (most-authoritative for their own
+  // namespace; the two namespaces cannot collide by grammar). mergeChildEnv
+  // (realProcessRunner) makes the whole overlay beat any INHERITED same-name
+  // process env, win32 case collisions dedup'd.
+  if (vars !== undefined) Object.assign(overlay, vars);
   overlay.PIPELINE_STEP_RUN_ID = ctx.runId;
   overlay.PIPELINE_STEP_ID = ctx.stepId;
   overlay.PIPELINE_STEP_INDEX = String(ctx.dispatchIndex);

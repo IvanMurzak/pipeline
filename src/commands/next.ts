@@ -1549,6 +1549,12 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       // flags, DAG off layers) — outside sequential mode the lib skips the
       // ## Next parse entirely, so no 'not mechanically parseable' noise.
       parseNext: mode === 'sequential',
+      // The run's FROZEN PP_* map (env-variables design a4, 05 §4): script
+      // argv/`script:` substitution + T3b containment, the Params PP_* root,
+      // and the D10 child-env overlay all read this map inside
+      // executeScriptStep — the frozen state is the ONLY source (never a
+      // fresh env read, D9). null = the E9 zero-change path (key omitted).
+      ...(frozenVars !== null ? { variables: frozenVars } : {}),
       ...(a.scriptRunner ? { runner: a.scriptRunner } : {}),
     };
     const res = executeScriptStep(spec, step.path, ctx);
@@ -2197,6 +2203,11 @@ function startChild(
     worktreeEnvFile: step.worktree_env_file ?? parentState?.worktree_env_file ?? null,
     taskText: readTaskText(a.root, a.runId),
     readOutput: (id) => readPersistedOutput(rootAbs, a.runId, id),
+    // The PARENT run's frozen PP_* map (env-variables design a4): resolveRef's
+    // PP_* root reads it, so a pipeline-step `## Params` `from: ${PP_X}`
+    // template resolves exactly like a script step's (the "EXACT script-step
+    // resolver" contract above). Absent key = the E9 zero-change path.
+    ...(parentState?.variables !== undefined ? { variables: parentState.variables } : {}),
   };
   const resolved = resolveParams(spec.params, sources);
   if (!resolved.ok) return bindingHalt(resolved.detail);

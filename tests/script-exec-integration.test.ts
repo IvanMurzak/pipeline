@@ -1000,3 +1000,163 @@ test('pipeline drive completes an all-script pipeline without spawning any execu
   expect(st.phase).toBe('terminal');
   expect(st.status).toBe('completed');
 });
+
+// ---------------------------------------------------------------------------
+// 13. PP_* variables end-to-end (env-variables design a4, 05 §4): frozen-map
+//     argv substitution (T3/E2), script-path substitution, the D10 child-env
+//     overlay winning over inherited env, substituted params files, and the
+//     T3b containment halt — REAL spawns through the hook-runner supervisor.
+// ---------------------------------------------------------------------------
+
+/** The variables manifest for section 13 worlds. */
+const VARS_MANIFEST = [
+  '# P',
+  '',
+  '## End State',
+  'x',
+  '',
+  '## Variables',
+  '- PP_SERVICE (required) — service under release',
+  '- PP_FLAG (default: ) — empty-default knob',
+  '- PP_IMPL (default: probe2) — script impl to run',
+  '- PP_URL — optional url',
+  '',
+].join('\n');
+
+// Echoes its argv and the PP_* env it sees.
+const PROBE_JS = `console.log(JSON.stringify({ ok: true, output: {
+  args: process.argv.slice(2),
+  env_service: process.env.PP_SERVICE ?? null,
+  env_url: process.env.PP_URL ?? null,
+} }));
+`;
+// Echoes the WHOLE resolved params object.
+const PROBE2_JS = `const fs = require('node:fs');
+const p = JSON.parse(fs.readFileSync(process.env.PIPELINE_STEP_PARAMS_FILE, 'utf8'));
+console.log(JSON.stringify({ ok: true, output: { got: p } }));
+`;
+
+/** Save + clear every PP_* process-env var (deterministic resolution tiers —
+ *  a stray shell PP_* must never satisfy a fixture), then plant the given
+ *  INHERITED values (e.g. a same-name var the D10 overlay must beat). */
+function withPPEnv<T>(plant: Record<string, string>, fn: () => T): T {
+  const saved: Record<string, string | undefined> = {};
+  for (const k of Object.keys(process.env)) {
+    if (k.startsWith('PP_')) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+  }
+  for (const [k, v] of Object.entries(plant)) process.env[k] = v;
+  try {
+    return fn();
+  } finally {
+    for (const k of Object.keys(process.env)) if (k.startsWith('PP_')) delete process.env[k];
+    for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v;
+  }
+}
+
+test('vars e2e: argv substituted per element (metachar value = ONE element, empty keeps slot); env overlay beats inherited; params file substituted', () => {
+  const w = mkWorld(VARS_MANIFEST);
+  writeFileSync(join(w.scripts, 'probe.js'), PROBE_JS);
+  writeFileSync(join(w.scripts, 'probe2.js'), PROBE2_JS);
+  const twoAbs = join(w.steps, '02-two.md');
+  writeFileSync(
+    join(w.steps, '01-one.md'),
+    [
+      '---',
+      'type: script',
+      // command: runs with cwd = the PROJECT root (§4 cwd rule) — reference
+      // the probe by absolute path (whitespace-split argv: tmp paths here are
+      // space-free, same reliance as the other fixtures on process.execPath).
+      `command: ${process.execPath} ${join(w.scripts, 'probe.js')} --service \${PP_SERVICE} \${PP_FLAG} --url \${PP_URL:-http://localhost}`,
+      'step_id: s1',
+      '---',
+      '# s1',
+      '## Goal',
+      'g',
+      '## Success Criteria',
+      's',
+      '## Steps',
+      '1. run it',
+      '## Next',
+      twoAbs,
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    twoAbs,
+    scriptStepMd({
+      script: 'scripts/${PP_IMPL}.js',
+      stepId: 's2',
+      next: 'Pipeline complete.',
+      params:
+        '{ "svc": { "type": "string", "required": true, "from": "${PP_SERVICE}" }, "chan": { "type": "string", "from": "${PP_URL:-#rel}" } }',
+    }),
+  );
+
+  inProject(w, () =>
+    withPPEnv({ PP_SERVICE: 'inherited-should-lose' }, () => {
+      const res = invokeNext({ root: w.root, runId: 'rv1', cliVars: { PP_SERVICE: '; rm -rf /' } });
+      expect(res.action.action).toBe('done');
+      expect(res.code).toBe(0);
+
+      // T3/E2: the metacharacter value landed as exactly ONE argv element (no
+      // shell anywhere), the resolved-EMPTY PP_FLAG kept its argv slot, and
+      // the unresolved PP_URL took its inline default.
+      const s1 = readJson(join(w.root, '.runtime', 'rv1', 'outputs', 's1.json'));
+      expect(s1.args).toEqual(['--service', '; rm -rf /', '', '--url', 'http://localhost']);
+      // D10: the frozen value beats the INHERITED same-name process env…
+      expect(s1.env_service).toBe('; rm -rf /');
+      // …and an unresolved variable is NOT exported at all.
+      expect(s1.env_url).toBeNull();
+
+      // script: path substituted from the manifest-default tier (PP_IMPL).
+      const s2 = readJson(join(w.root, '.runtime', 'rv1', 'outputs', 's2.json'));
+      expect(s2.got).toEqual({ svc: '; rm -rf /', chan: '#rel' });
+      // The params FILE itself was written post-substitution (plain strings).
+      expect(readJson(join(w.root, '.runtime', 'rv1', 'params', 's2.json'))).toEqual({
+        svc: '; rm -rf /',
+        chan: '#rel',
+      });
+
+      // The frozen map: CLI > env > default; unresolved optional NOT frozen.
+      const st = stateOf(w, 'rv1');
+      expect(st.variables).toEqual({ PP_SERVICE: '; rm -rf /', PP_FLAG: '', PP_IMPL: 'probe2' });
+    }),
+  );
+}, 30_000);
+
+test('vars e2e (T3b): a traversal value steering script: halts the run as a binding step error — nothing spawns', () => {
+  const w = mkWorld(
+    ['# P', '', '## End State', 'x', '', '## Variables', '- PP_EVIL (required) — path under test', ''].join('\n'),
+  );
+  writeFileSync(
+    join(w.steps, '01-evil.md'),
+    scriptStepMd({ script: '${PP_EVIL}', stepId: 'evil', next: 'Pipeline complete.' }),
+  );
+
+  inProject(w, () =>
+    withPPEnv({}, () => {
+      const res = invokeNext({
+        root: w.root,
+        runId: 'rv2',
+        cliVars: { PP_EVIL: '../../../../evil.js' },
+      });
+      // Halt path idiom (see the §6.3 ladder tests above): the freshly-written
+      // feedback file gates the retrospective NOW; the state is already parked
+      // halted underneath it.
+      expect(res.action.action).toBe('retrospective');
+      const st = stateOf(w, 'rv2');
+      expect(st.phase).toBe('await-retro');
+      expect(st.status).toBe('halted');
+      // The T3b refusal is a pre-spawn 'binding' failure — record on disk.
+      const failure = readJson(join(w.root, '.runtime', 'rv2', 'failures', 'evil-1-1.json'));
+      expect(failure.class).toBe('binding');
+      expect(failure.detail).toContain('outside the project root');
+      expect(failure.exit_code).toBeNull(); // nothing ever spawned
+      // Nothing executed: no outputs persisted.
+      expect(existsSync(join(w.root, '.runtime', 'rv2', 'outputs', 'evil.json'))).toBe(false);
+    }),
+  );
+}, 30_000);

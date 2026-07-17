@@ -1033,3 +1033,369 @@ test('parseNext: false skips the ## Next parse — no warning on a file whose Ne
   expect(res.record.next_iteration).toBeNull();
   expect(res.warnings.some((w) => w.includes('## Next'))).toBe(false);
 });
+
+// ---------------------------------------------------------------------------
+// PP_* variables (env-variables design a4): the Params PP_* binding root (D7),
+// argv/`script:` substitution (05 §4), T3b containment, the T3c .bat/.cmd
+// carve-out, and the D10 child-env overlay.
+// ---------------------------------------------------------------------------
+
+const winOnly = process.platform === 'win32' ? test : test.skip;
+
+// --- resolveParams: the PP_* root (D7/E6) -----------------------------------
+
+test('PP root: a ${PP_X} Params ref resolves from ctx.variables — never the environment', () => {
+  const prev = process.env.PP_HIT_TEST;
+  process.env.PP_HIT_TEST = 'from-real-env';
+  try {
+    const r = resolveParams(
+      { svc: { type: 'string', from: '${PP_HIT_TEST}' } },
+      bindCtx({ variables: { PP_HIT_TEST: 'from-frozen-map' } }),
+    );
+    expect(r).toEqual({ ok: true, params: { svc: 'from-frozen-map' } });
+  } finally {
+    if (prev === undefined) delete process.env.PP_HIT_TEST;
+    else process.env.PP_HIT_TEST = prev;
+  }
+});
+
+test('PP root: inline defaults follow POSIX colon semantics (unset; set-but-empty)', () => {
+  // Unset: both forms fall back.
+  const unset = resolveParams(
+    {
+      a: { type: 'string', from: '${PP_C:-#releases}' },
+      b: { type: 'string', from: '${PP_C-plain}' },
+    },
+    bindCtx({ variables: {} }),
+  );
+  expect(unset).toEqual({ ok: true, params: { a: '#releases', b: 'plain' } });
+  // Set-but-empty: `:-` swaps the default in, plain `-` keeps the empty.
+  const empty = resolveParams(
+    {
+      a: { type: 'string', from: '${PP_C:-d}' },
+      b: { type: 'string', from: '${PP_C-d}' },
+      c: { type: 'string', from: '${PP_C}' },
+    },
+    bindCtx({ variables: { PP_C: '' } }),
+  );
+  expect(empty).toEqual({ ok: true, params: { a: 'd', b: '', c: '' } });
+});
+
+test('PP root: E6 — single-ref position yields a JSON STRING (a numeric-looking value does not become a number)', () => {
+  const ctx = bindCtx({ variables: { PP_PORT: '8080' } });
+  const asString = resolveParams({ port: { type: 'string', from: '${PP_PORT}' } }, ctx);
+  expect(asString).toEqual({ ok: true, params: { port: '8080' } });
+  const asNumber = resolveParams({ port: { type: 'number', from: '${PP_PORT}' } }, ctx);
+  expect(asNumber.ok).toBe(false);
+  if (!asNumber.ok) expect(asNumber.detail).toContain('expected number');
+});
+
+test('PP root: a mixed template interpolates PP values alongside other roots', () => {
+  const r = resolveParams(
+    { msg: { type: 'string', from: 'deploy ${PP_SVC} in ${run.id}' } },
+    bindCtx({ variables: { PP_SVC: 'payments' } }),
+  );
+  expect(r).toEqual({ ok: true, params: { msg: 'deploy payments in run-9' } });
+});
+
+test('PP root: unresolved (no frozen value, no inline default) is a HARD binding failure — even with a param default', () => {
+  // Invariant post-validateRun: reaching this means the map was not plumbed
+  // or the tree drifted — never a silent fall-through to the param default.
+  const r = resolveParams(
+    { x: { type: 'string', from: '${PP_MISSING}', default: 'd' } },
+    bindCtx({ variables: {} }),
+  );
+  expect(r.ok).toBe(false);
+  if (!r.ok) {
+    expect(r.detail).toContain('PP_MISSING');
+    expect(r.detail).toContain('no value and no inline default');
+  }
+  // ctx WITHOUT a variables map at all (E9 zero-change path): same failure.
+  const noMap = resolveParams({ x: { type: 'string', from: '${PP_MISSING}' } }, bindCtx());
+  expect(noMap.ok).toBe(false);
+});
+
+test('PP root: documented F3 limitation — `$$` is NOT an escape inside a Params template (REF_RE has no `$$` awareness)', () => {
+  const r = resolveParams(
+    { doc: { type: 'string', from: '$${PP_X}' } },
+    bindCtx({ variables: { PP_X: 'v' } }),
+  );
+  // REF_RE matches the inner ${PP_X}; the leading `$` stays literal text.
+  expect(r).toEqual({ ok: true, params: { doc: '$v' } });
+});
+
+// --- executeScriptStep: command argv substitution (E2/T3) --------------------
+
+test('T3: a metacharacter value lands as exactly ONE argv element — and an empty value keeps its slot', () => {
+  const world = mkWorld();
+  const fake = fakeRunner([okRun()]);
+  const spec = mkSpec({ script: null, command: ['mytool', '--svc', '${PP_SVC}', '${PP_EMPTY}', 'tail'] });
+  const res = executeScriptStep(
+    spec,
+    world.iterationPath,
+    mkCtx(world, { runner: fake.runner, variables: { PP_SVC: '; rm -rf /', PP_EMPTY: '' } }),
+  );
+  expect(res.failure).toBeNull();
+  expect(fake.calls.length).toBe(1);
+  // Per-element substitution AFTER tokenization: the value is one argument
+  // regardless of metacharacters; the empty value keeps its argv slot.
+  expect(fake.calls[0].argv).toEqual(['mytool', '--svc', '; rm -rf /', '', 'tail']);
+});
+
+test('command: a mixed literal+token element substitutes in place (still one element)', () => {
+  const world = mkWorld();
+  const fake = fakeRunner([okRun()]);
+  const spec = mkSpec({ script: null, command: ['mytool', '--url=${PP_HOST}:8080'] });
+  executeScriptStep(spec, world.iterationPath, mkCtx(world, { runner: fake.runner, variables: { PP_HOST: 'db host' } }));
+  expect(fake.calls[0].argv).toEqual(['mytool', '--url=db host:8080']);
+});
+
+test('T3b: argv[0] is NEVER a substitution surface — a token there is a binding failure, nothing spawns', () => {
+  const world = mkWorld();
+  const fake = fakeRunner([okRun()]);
+  const spec = mkSpec({ script: null, command: ['${PP_TOOL}', '--version'] });
+  const res = executeScriptStep(
+    spec,
+    world.iterationPath,
+    mkCtx(world, { runner: fake.runner, variables: { PP_TOOL: 'evil' } }),
+  );
+  expect(fake.calls.length).toBe(0);
+  expect(res.failure?.class).toBe('binding');
+  expect(res.failure?.detail).toContain('argv[0]');
+  expect(res.record.outcome).toBe('halted');
+});
+
+test('command: an unresolvable token is a binding failure (caught, never a throw), nothing spawns', () => {
+  const world = mkWorld();
+  const fake = fakeRunner([okRun()]);
+  const spec = mkSpec({ script: null, command: ['mytool', '${PP_NOPE}'] });
+  const res = executeScriptStep(spec, world.iterationPath, mkCtx(world, { runner: fake.runner, variables: {} }));
+  expect(fake.calls.length).toBe(0);
+  expect(res.failure?.class).toBe('binding');
+  expect(res.failure?.detail).toContain('PP_NOPE');
+});
+
+test('E9 zero-change: WITHOUT ctx.variables the authored argv passes through byte-identically (no `$$` collapse)', () => {
+  const world = mkWorld();
+  const fake = fakeRunner([okRun()]);
+  const spec = mkSpec({ script: null, command: ['mytool', 'a$$b', 'plain'] });
+  const res = executeScriptStep(spec, world.iterationPath, mkCtx(world, { runner: fake.runner }));
+  expect(res.failure).toBeNull();
+  expect(fake.calls[0].argv).toEqual(['mytool', 'a$$b', 'plain']);
+  // WITH a variables map, the same element takes the compose-style collapse.
+  const fake2 = fakeRunner([okRun()]);
+  executeScriptStep(spec, world.iterationPath, mkCtx(world, { runner: fake2.runner, variables: {}, dispatchIndex: 2 }));
+  expect(fake2.calls[0].argv).toEqual(['mytool', 'a$b', 'plain']);
+});
+
+// --- executeScriptStep: script: substitution + T3b containment ---------------
+
+test('script: the path substitutes from the frozen map before the interpreter ladder', () => {
+  const world = mkWorld();
+  writeScript(world, 'step.js', 'console.log(JSON.stringify({ok:true}))');
+  const fake = fakeRunner([okRun()]);
+  const spec = mkSpec({ script: 'scripts/${PP_IMPL}.js' });
+  const res = executeScriptStep(
+    spec,
+    world.iterationPath,
+    mkCtx(world, { runner: fake.runner, variables: { PP_IMPL: 'step' } }),
+  );
+  expect(res.failure).toBeNull();
+  expect(fake.calls.length).toBe(1);
+  // .js → the running bun/node binary + the substituted absolute path.
+  expect(fake.calls[0].argv[0]).toBe(process.execPath);
+  expect(fake.calls[0].argv[1]).toBe(join(world.pipelineRoot, 'scripts', 'step.js'));
+});
+
+test('T3b: a traversal value in script: is rejected as a binding step error — nothing spawns', () => {
+  const world = mkWorld();
+  const fake = fakeRunner([okRun()]);
+  const spec = mkSpec({ script: '${PP_X}' });
+  const res = executeScriptStep(
+    spec,
+    world.iterationPath,
+    mkCtx(world, { runner: fake.runner, variables: { PP_X: '../../evil.py' } }),
+  );
+  expect(fake.calls.length).toBe(0);
+  expect(res.failure?.class).toBe('binding');
+  expect(res.failure?.detail).toContain('outside the project root');
+  expect(res.record.outcome).toBe('halted');
+});
+
+test('T3b: an out-of-root ABSOLUTE substituted path (drive-letter form) is rejected', () => {
+  const world = mkWorld();
+  const fake = fakeRunner([okRun()]);
+  const spec = mkSpec({ script: '${PP_X}' });
+  // isAbsPath accepts the drive-letter form on every platform; the canonical
+  // containment compare rejects it against the tmp roots either way.
+  const res = executeScriptStep(
+    spec,
+    world.iterationPath,
+    mkCtx(world, { runner: fake.runner, variables: { PP_X: 'C:\\Windows\\evil.py' } }),
+  );
+  expect(fake.calls.length).toBe(0);
+  expect(res.failure?.class).toBe('binding');
+});
+
+winOnly('T3b (win32): backslash traversal and trailing-dot forms are rejected (canonical compare, not a prefix compare)', () => {
+  const world = mkWorld();
+  for (const evil of ['..\\..\\evil.py', '..\\..\\evil.py.']) {
+    const fake = fakeRunner([okRun()]);
+    const res = executeScriptStep(
+      mkSpec({ script: '${PP_X}' }),
+      world.iterationPath,
+      mkCtx(world, { runner: fake.runner, variables: { PP_X: evil } }),
+    );
+    expect(fake.calls.length).toBe(0);
+    expect(res.failure?.class).toBe('binding');
+    expect(res.failure?.detail).toContain('T3b');
+  }
+});
+
+test('T3b: a substituted path inside the PROJECT root (not the pipeline root) is allowed', () => {
+  const world = mkWorld();
+  const p = join(world.projectRoot, 'tools', 'ok.js');
+  mkdirSync(join(world.projectRoot, 'tools'), { recursive: true });
+  writeFileSync(p, 'x', 'utf8');
+  const fake = fakeRunner([okRun()]);
+  const res = executeScriptStep(
+    mkSpec({ script: '${PP_X}' }),
+    world.iterationPath,
+    mkCtx(world, { runner: fake.runner, variables: { PP_X: p } }),
+  );
+  expect(res.failure).toBeNull();
+  expect(fake.calls.length).toBe(1);
+});
+
+test('zero-change: an AUTHORED (unsubstituted) script path outside the roots is untouched by T3b', () => {
+  // Author-owned text is a pre-existing capability — the gate fires only on
+  // substituted values. Note ctx.variables IS present here (the run declares
+  // variables); the value simply contains no token.
+  const world = mkWorld();
+  const outside = join(mkTmp('sstep-outside-'), 'tool.js');
+  writeFileSync(outside, 'x', 'utf8');
+  const fake = fakeRunner([okRun()]);
+  const res = executeScriptStep(
+    mkSpec({ script: outside }),
+    world.iterationPath,
+    mkCtx(world, { runner: fake.runner, variables: { PP_UNRELATED: 'v' } }),
+  );
+  expect(res.failure).toBeNull();
+  expect(fake.calls[0].argv[1]).toBe(outside);
+});
+
+// --- T3c: the .bat/.cmd carve-out (shell-reachable, not argv-safe) -----------
+
+test('T3c: a substituted script: path landing on .bat/.cmd is refused (cmd.exe re-parses)', () => {
+  const world = mkWorld();
+  for (const impl of ['run.bat', 'run.cmd']) {
+    const fake = fakeRunner([okRun()]);
+    const res = executeScriptStep(
+      mkSpec({ script: 'scripts/${PP_IMPL}' }),
+      world.iterationPath,
+      mkCtx(world, { runner: fake.runner, variables: { PP_IMPL: impl } }),
+    );
+    expect(fake.calls.length).toBe(0);
+    expect(res.failure?.class).toBe('binding');
+    expect(res.failure?.detail).toContain('cmd.exe');
+  }
+});
+
+test('T3c: substituted ARGS to an authored cmd/.bat command are refused; an all-literal one still runs', () => {
+  const world = mkWorld();
+  // Substituted arg through cmd.exe ⇒ refused, nothing spawns.
+  const fake = fakeRunner([okRun()]);
+  const res = executeScriptStep(
+    mkSpec({ script: null, command: ['cmd', '/c', 'scripts\\run.bat', '${PP_A}'] }),
+    world.iterationPath,
+    mkCtx(world, { runner: fake.runner, variables: { PP_A: 'x' } }),
+  );
+  expect(fake.calls.length).toBe(0);
+  expect(res.failure?.class).toBe('binding');
+  expect(res.failure?.detail).toContain('cmd.exe');
+  // All-literal cmd.exe command (authored, no substitution) is untouched.
+  const fake2 = fakeRunner([okRun()]);
+  const ok = executeScriptStep(
+    mkSpec({ script: null, command: ['cmd', '/c', 'scripts\\run.bat', 'literal'] }),
+    world.iterationPath,
+    mkCtx(world, { runner: fake2.runner, variables: { PP_A: 'x' }, dispatchIndex: 2 }),
+  );
+  expect(ok.failure).toBeNull();
+  expect(fake2.calls[0].argv).toEqual(['cmd', '/c', 'scripts\\run.bat', 'literal']);
+});
+
+test('T3c: an authored (unsubstituted) .bat script: still routes through cmd /c exactly as before', () => {
+  const world = mkWorld();
+  const fake = fakeRunner([okRun()]);
+  const res = executeScriptStep(
+    mkSpec({ script: 'scripts/run.bat' }),
+    world.iterationPath,
+    mkCtx(world, { runner: fake.runner, variables: { PP_UNRELATED: 'v' } }),
+  );
+  expect(res.failure).toBeNull();
+  expect(fake.calls[0].argv[0]).toBe('cmd');
+  expect(fake.calls[0].argv[1]).toBe('/c');
+});
+
+// --- D10: the child-env overlay ----------------------------------------------
+
+test('D10: every frozen PP_* entry rides the child env — after env-file entries, PIPELINE_STEP_* untouched', () => {
+  const world = mkWorld();
+  const envFile = join(world.projectRoot, 'wt.env');
+  writeFileSync(envFile, 'PP_SVC=stale-worktree-value\nKEEP_ME=x\n', 'utf8');
+  const fake = fakeRunner([okRun()]);
+  const res = executeScriptStep(
+    mkSpec({ script: null, command: ['mytool'] }),
+    world.iterationPath,
+    mkCtx(world, {
+      runner: fake.runner,
+      worktreeEnvFile: envFile,
+      variables: { PP_SVC: 'frozen-wins', PP_ONLY: 'exported' },
+    }),
+  );
+  expect(res.failure).toBeNull();
+  const env = fake.calls[0].opts.env;
+  // The frozen map wins over a same-name worktree env-file entry (D10)…
+  expect(env.PP_SVC).toBe('frozen-wins');
+  // …other env-file entries survive…
+  expect(env.KEEP_ME).toBe('x');
+  // …every frozen entry is exported even without a placeholder anywhere…
+  expect(env.PP_ONLY).toBe('exported');
+  // …and PIPELINE_STEP_* stays most-authoritative for its own namespace.
+  expect(env.PIPELINE_STEP_ID).toBe('wait-ci');
+});
+
+test('T3b/T3c gate on VARIABLE DATA, not a text diff: an authored `$$` escape collapse never trips them', () => {
+  const world = mkWorld();
+  // script: an authored `$$` path OUTSIDE every root — collapsed but never
+  // variable-steered, so containment must NOT fire (authored capability).
+  const outsideDir = mkTmp('sstep-dollar-');
+  const authoredScript = join(outsideDir, '$$cache', 'run.js');
+  const fake = fakeRunner([okRun()]);
+  const res = executeScriptStep(
+    mkSpec({ script: authoredScript }),
+    world.iterationPath,
+    mkCtx(world, { runner: fake.runner, variables: { PP_UNRELATED: 'v' } }),
+  );
+  expect(res.failure).toBeNull();
+  expect(fake.calls[0].argv[1]).toBe(join(outsideDir, '$cache', 'run.js')); // collapse still applied
+
+  // command: an all-literal `$$` arg through cmd.exe — no variable data, so
+  // the T3c refusal must NOT fire either.
+  const fake2 = fakeRunner([okRun()]);
+  const ok = executeScriptStep(
+    mkSpec({ script: null, command: ['cmd', '/c', 'run.bat', 'a$$b'] }),
+    world.iterationPath,
+    mkCtx(world, { runner: fake2.runner, variables: { PP_UNRELATED: 'v' }, dispatchIndex: 2 }),
+  );
+  expect(ok.failure).toBeNull();
+  expect(fake2.calls[0].argv).toEqual(['cmd', '/c', 'run.bat', 'a$b']);
+});
+
+test('D10/E9: without ctx.variables no PP_* entry is added to the overlay', () => {
+  const world = mkWorld();
+  const fake = fakeRunner([okRun()]);
+  executeScriptStep(mkSpec({ script: null, command: ['mytool'] }), world.iterationPath, mkCtx(world, { runner: fake.runner }));
+  const env = fake.calls[0].opts.env;
+  expect(Object.keys(env).some((k) => k.startsWith('PP_'))).toBe(false);
+});

@@ -341,8 +341,24 @@ function scaffoldVars(): string {
     join(steps, '03-agent.md'),
     '---\nstep_id: agent\n---\n# agent\n## Goal\ng — mentions ${PP_UNUSED} in the body\n## Success Criteria\ns\n',
   );
+  // Params PP_* root + D10 env-overlay witness (a4 render parity).
+  writeFileSync(join(scripts, 'echoenv.js'), ECHOENV_JS);
+  writeFileSync(
+    join(steps, '04-params.md'),
+    scriptStepMd({
+      script: 'scripts/echoenv.js',
+      stepId: 'pp',
+      params: '{ "svc": { "type": "string", "required": true, "from": "${PP_SERVICE}" } }',
+    }),
+  );
   return root;
 }
+
+// Echoes the resolved params AND the PP_SERVICE the child env carries.
+const ECHOENV_JS = `const fs = require('node:fs');
+const p = JSON.parse(fs.readFileSync(process.env.PIPELINE_STEP_PARAMS_FILE, 'utf8'));
+console.log(JSON.stringify({ ok: true, output: { params: p, env_service: process.env.PP_SERVICE ?? null } }));
+`;
 
 test('step run --var: command argv is substituted like a real run — a space-containing value stays ONE argv element (render parity)', () => {
   const root = scaffoldVars();
@@ -404,6 +420,29 @@ test('step run --vars-file: a well-formed file resolves the step exactly like --
   const r = stepRun(root, '01-cmd.md', ['--vars-file', vf, '--json']);
   expect(r.status).toBe(0);
   expect(r.json.output).toEqual({ args: ['--service', 'payments'] });
+}, 30000);
+
+test('step run (a4 render parity): a ${PP_*} Params ref resolves from the map AND the value rides the child env (D10)', () => {
+  const root = scaffoldVars();
+  const r = stepRun(root, '04-params.md', ['--var', 'PP_SERVICE=payments', '--json']);
+  expect(r.status).toBe(0);
+  // The PP_* binding root resolved the param (a JSON string, E6)…
+  expect(r.json.params).toEqual({ svc: 'payments' });
+  expect(r.json.output.params).toEqual({ svc: 'payments' });
+  // …and the frozen value was exported to the child env exactly like a real
+  // run's overlay (the dry run's own process env has no PP_SERVICE — the
+  // harness strips PP_*).
+  expect(r.json.output.env_service).toBe('payments');
+}, 30000);
+
+test('step run (a4 T3b): a traversal value steering script: is a class-binding failure (exit 1), nothing spawns', () => {
+  const root = scaffoldVars();
+  const r = stepRun(root, '02-impl.md', ['--var', 'PP_IMPL=../../../evil', '--json']);
+  expect(r.status).toBe(1);
+  expect(r.json.ok).toBe(false);
+  expect(r.json.class).toBe('binding');
+  expect(r.json.failure.detail).toContain('outside the project root');
+  expect(r.json.attempts).toBe(0); // pre-spawn: nothing executed
 }, 30000);
 
 test('step run: an unknown subcommand and unknown flag are exit-2 usage errors', () => {
