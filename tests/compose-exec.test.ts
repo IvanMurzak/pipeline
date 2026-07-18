@@ -11,14 +11,14 @@
 
 import { test, expect, afterEach } from 'bun:test';
 import { invokeNext } from '../src/commands/next';
-import { runDrive, type ExecutorRequest, type ExecutorRunner } from '../src/commands/drive';
+import { dropRecordsDirFor, runDrive, type ExecutorRequest, type ExecutorRunner } from '../src/commands/drive';
 import { computePlan } from '../src/lib/plan';
 import { computeNext, type NextRecord, type NextState } from '../src/lib/next';
 import { childRunIdFor, readRunTree } from '../src/lib/compose-exec';
 import type { ProcessRunner } from '../src/lib/script-step';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const created: string[] = [];
@@ -719,7 +719,9 @@ test('drive: composed run completes; child step spawns with child-run context an
   expect(captured).toHaveLength(1);
   const req = captured[0];
   expect(req.step_id).toBe('work');
-  expect(req.record_file).toBe(join(w.roots.main, '.runtime', 'drv1', 'records', `${childRunId}-work.json`));
+  // e7 DEFECT-1: the executor-facing record path is the run's tmp DROP dir
+  // (child steps keyed `<child_run>-<step>` exactly like the canonical copy).
+  expect(req.record_file).toBe(join(dropRecordsDirFor(resolve(w.roots.main), 'drv1'), `${childRunId}-work.json`));
   // The spawn prompt carries the CHILD's run context: run id, pipeline root,
   // feedback dir, and the delivered params as the run's task file.
   expect(req.prompt).toContain(`run_id = ${childRunId}`);

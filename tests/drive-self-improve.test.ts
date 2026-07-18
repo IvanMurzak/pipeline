@@ -44,7 +44,10 @@ const prompt = await Bun.stdin.text();
 const m = /^step_record_file = (.+)$/m.exec(prompt);
 if (!m) process.exit(9);
 const recordFile = m[1].trim();
-const root = dirname(dirname(dirname(dirname(recordFile))));
+// pipeline_root line preferred (step record files live in the tmp DROP dir);
+// legacy fallback derives from the record path.
+const rm = /^pipeline_root = (.+)$/m.exec(prompt);
+const root = rm ? rm[1].trim() : dirname(dirname(dirname(dirname(recordFile))));
 const stepId = basename(recordFile, '.json');
 const canned = join(root, 'canned');
 mkdirSync(canned, { recursive: true });

@@ -427,6 +427,39 @@ function mirrorBindingsPath(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Envelope root resolution (shared by emitEvent / emitEventJson)
+// ---------------------------------------------------------------------------
+
+/** Resolve the envelope's project_root + worktree: with an explicit override,
+ *  use it but STILL detect worktree from cwd — inherited only when the
+ *  resolved main repo matches the override (case-insensitive on Windows);
+ *  otherwise detect both from cwd. Extracted verbatim from emitEvent so the
+ *  kv and structured emitters can never drift. */
+function resolveEnvelopeRoot(projectRootOverride: string | null): {
+  projectRoot: string;
+  worktree: string | null;
+} {
+  if (projectRootOverride) {
+    const overridePath = resolve(projectRootOverride);
+    let cwd: string;
+    try {
+      cwd = process.cwd();
+    } catch {
+      cwd = overridePath;
+    }
+    const { project_root: resolvedRoot, worktree: resolvedWorktree } =
+      resolveProjectRoot(cwd);
+    if (resolvedWorktree !== null && pathsEqual(resolvedRoot, overridePath)) {
+      return { projectRoot: overridePath, worktree: resolvedWorktree };
+    }
+    return { projectRoot: overridePath, worktree: null };
+  }
+  const cwd = process.cwd();
+  const resolved = resolveProjectRoot(cwd);
+  return { projectRoot: resolved.project_root, worktree: resolved.worktree };
+}
+
+// ---------------------------------------------------------------------------
 // Public API: emitEvent
 // ---------------------------------------------------------------------------
 
@@ -450,34 +483,75 @@ export function emitEvent(eventType: string, argv: string[]): number {
   const sessionIdValue =
     normEnvelope(sessionIdOverride) ?? envOrNull('CLAUDE_SESSION_ID');
 
-  let projectRoot: string;
-  let worktree: string | null;
-  if (projectRootOverride) {
-    // Use the caller's explicit project_root but STILL detect worktree from
-    // cwd. Only inherit cwd's worktree when the resolved main repo matches the
-    // override (case-insensitive on Windows); otherwise worktree=null.
-    const overridePath = resolve(projectRootOverride);
-    let cwd: string;
-    try {
-      cwd = process.cwd();
-    } catch {
-      cwd = overridePath;
-    }
-    const { project_root: resolvedRoot, worktree: resolvedWorktree } =
-      resolveProjectRoot(cwd);
-    if (resolvedWorktree !== null && pathsEqual(resolvedRoot, overridePath)) {
-      projectRoot = overridePath;
-      worktree = resolvedWorktree;
-    } else {
-      projectRoot = overridePath;
-      worktree = null;
-    }
-  } else {
-    const cwd = process.cwd();
-    const resolved = resolveProjectRoot(cwd);
-    projectRoot = resolved.project_root;
-    worktree = resolved.worktree;
+  const { projectRoot, worktree } = resolveEnvelopeRoot(projectRootOverride);
+
+  const event = {
+    schema: SCHEMA_VERSION,
+    ts: utcNowIso(),
+    type: eventType,
+    project_root: projectRoot,
+    worktree: worktree ? worktree : null,
+    run_id: runIdValue,
+    parent_run_id: parentRunIdValue,
+    session_id: sessionIdValue,
+    data,
+  };
+
+  try {
+    const runtime = ensureRuntimeDir(projectRoot);
+    appendEventLine(runtime, event);
+  } catch (e) {
+    log(`journal write failed: ${e}`);
+    return 0;
   }
+
+  const daemon = readDaemonLock();
+  if (daemon) {
+    pingDaemonRegister(daemon, projectRoot, worktree);
+  }
+
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Public API: emitEventJson (structured data payloads)
+// ---------------------------------------------------------------------------
+
+export interface EmitEventJsonOpts {
+  /** Envelope run_id override (else the PIPELINE_UI_RUN_ID env fallback). */
+  runId?: string | null;
+  parentRunId?: string | null;
+  sessionId?: string | null;
+  /** Explicit project_root (else resolved from cwd, worktree-aware). */
+  projectRoot?: string | null;
+}
+
+/**
+ * Append one event whose `data` payload is a STRUCTURED object — nested
+ * objects/arrays survive verbatim, which the kv interface of {@link emitEvent}
+ * cannot carry (kv values coerce to scalars only). Needed for events whose
+ * cloud-consumed shape REQUIRES nested objects, e.g. `awaiting_input`'s
+ * `question: {text, context, options}` (the pipeline-protocol
+ * `AwaitingInputData` schema, consumed by the control plane's runs/ingest).
+ *
+ * Envelope shape and resolution are identical to emitEvent: same schema
+ * version, same field order, same env fallbacks (PIPELINE_UI_RUN_ID /
+ * PIPELINE_UI_PARENT_RUN_ID / CLAUDE_SESSION_ID), same project_root/worktree
+ * detection (shared resolveEnvelopeRoot), same rotation + daemon ping. `data`
+ * is journalled as passed (caller owns the payload shape). Always returns 0 —
+ * never blocks the caller.
+ */
+export function emitEventJson(
+  eventType: string,
+  data: Record<string, unknown>,
+  opts: EmitEventJsonOpts = {},
+): number {
+  const runIdValue = normEnvelope(opts.runId ?? undefined) ?? envOrNull('PIPELINE_UI_RUN_ID');
+  const parentRunIdValue =
+    normEnvelope(opts.parentRunId ?? undefined) ?? envOrNull('PIPELINE_UI_PARENT_RUN_ID');
+  const sessionIdValue = normEnvelope(opts.sessionId ?? undefined) ?? envOrNull('CLAUDE_SESSION_ID');
+
+  const { projectRoot, worktree } = resolveEnvelopeRoot(opts.projectRoot ?? null);
 
   const event = {
     schema: SCHEMA_VERSION,

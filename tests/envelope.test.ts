@@ -3,7 +3,7 @@
 // 2.1.205 during the headless spike (trimmed to the fields we consume).
 
 import { test, expect } from 'bun:test';
-import { addUsage, emptyUsage, parseEnvelope, detectProviderLimit } from '../src/lib/envelope';
+import { addUsage, emptyUsage, parseEnvelope, parseResultObject, detectProviderLimit } from '../src/lib/envelope';
 
 /** A real-shaped envelope (Claude Code 2.1.205). */
 function fixture(overrides: Record<string, unknown> = {}): string {
@@ -125,4 +125,61 @@ test('detectProviderLimit: other error subtype → null', () => {
 test('detectProviderLimit: error with null subtype → null', () => {
   const env = parseEnvelope(fixture({ is_error: true, subtype: null }))!;
   expect(detectProviderLimit(env)).toBeNull();
+});
+
+// --- e7 DEFECT-1: permission_denials + parseResultObject ---------------------
+
+test('permission_denials: parsed from the envelope (2.1.214 sensitive-path deny shape)', () => {
+  const env = parseEnvelope(
+    fixture({
+      permission_denials: [
+        {
+          tool_name: 'Write',
+          tool_use_id: 'toolu_01U79v6gsqfghVcpE4PgrwVN',
+          tool_input: { file_path: 'C:\proj\.claude\pipeline\p\.runtime\r\records\s.json', content: '{}' },
+        },
+        // Malformed entries contribute nothing but never break the parse.
+        'garbage',
+        { tool_name: 42 },
+      ],
+    }),
+  )!;
+  expect(env.permission_denials).toEqual([
+    { tool_name: 'Write', file_path: 'C:\proj\.claude\pipeline\p\.runtime\r\records\s.json' },
+    { tool_name: null, file_path: null },
+  ]);
+});
+
+test('permission_denials: absent/empty/garbage → empty array', () => {
+  expect(parseEnvelope(fixture())!.permission_denials).toEqual([]);
+  expect(parseEnvelope(fixture({ permission_denials: undefined }))!.permission_denials).toEqual([]);
+  expect(parseEnvelope(fixture({ permission_denials: 'nope' }))!.permission_denials).toEqual([]);
+});
+
+test('parseResultObject: whole-text JSON object', () => {
+  expect(parseResultObject('{"outcome":"completed","summary":"x"}')).toEqual({ outcome: 'completed', summary: 'x' });
+});
+
+test('parseResultObject: fenced block (language tag optional), LAST fence wins', () => {
+  expect(parseResultObject('Record:\n```json\n{"outcome":"halted"}\n```\n')).toEqual({ outcome: 'halted' });
+  expect(parseResultObject('```\n{"outcome":"completed"}\n```')).toEqual({ outcome: 'completed' });
+  expect(
+    parseResultObject('```json\n{"outcome":"halted"}\n```\nrevised:\n```json\n{"outcome":"completed"}\n```'),
+  ).toEqual({ outcome: 'completed' });
+});
+
+test('parseResultObject: JSON wrapped in prose (first-{ to last-} span)', () => {
+  expect(parseResultObject('Here is the record {"outcome":"completed","flags":{"ok":true}} thanks')).toEqual({
+    outcome: 'completed',
+    flags: { ok: true },
+  });
+});
+
+test('parseResultObject: non-objects and garbage → null', () => {
+  expect(parseResultObject(null)).toBeNull();
+  expect(parseResultObject('')).toBeNull();
+  expect(parseResultObject('just prose, no json')).toBeNull();
+  expect(parseResultObject('[1,2,3]')).toBeNull();
+  expect(parseResultObject('42')).toBeNull();
+  expect(parseResultObject('{broken json')).toBeNull();
 });

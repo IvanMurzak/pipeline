@@ -672,6 +672,7 @@ function emitStartedEvents(
   action: NextAction,
   runId: string,
   mapPath: (p: string) => string = (p) => p,
+  resumedReentry = false,
 ): void {
   if (action.action === 'run-step') {
     for (const step of action.steps) {
@@ -688,6 +689,12 @@ function emitStartedEvents(
         kv('resolved_model', step.model),
         kv('resolved_effort', step.effort),
       ];
+      // Additive v5 G5 tag (e7 DEFECT-3): this dispatch re-issues a step that
+      // was already dispatched before (a --resume/auto-resume re-entry parked
+      // in 'await-step' — needs-input answer delivery, crash re-spawn, blocked
+      // resume). The cloud ingest keys its resume-from-awaiting / attempt
+      // bookkeeping on it; v4 consumers ignore the extra field.
+      if (resumedReentry) argv.push(kv('resumed', true));
       // Additive §12 tag, keyed on the DISPATCH type (a §6.3 fallback
       // re-dispatch of a script step is type 'agent' ⇒ untagged). Pipeline
       // dispatches (T3-10 child runs) and approval gates (T3-14) are tagged
@@ -1820,6 +1827,19 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
     repairedStepId = plan.steps.find((s) => s.type === 'script' && samePath(s.path, target))?.step_id ?? null;
   }
 
+  // e7 DEFECT-3 (protocol G5): a resume re-entry whose persisted phase is
+  // 'await-step' RE-ISSUES a previously-dispatched step — its auto-emitted
+  // iteration.started must carry `resumed: true` so consumers (the cloud
+  // ingest's awaiting_input/attempt derivation) can tell a resume-after-answer
+  // (or crash/blocked re-entry) from a fresh first dispatch. Captured BEFORE
+  // computeNext — the engine mutates the state object in place. The pending
+  // step identity is captured too: the in-process script loop below can
+  // advance PAST the re-issued step inside this same call, and the tail
+  // action's FRESH step must not inherit the tag.
+  const resumedReentry = resume && prevState !== null && prevState.phase === 'await-step';
+  const resumedPendingPath = resumedReentry ? (prevState!.current_path ?? null) : null;
+  const resumedPendingStepId = resumedReentry ? (prevState!.current_step_id ?? null) : null;
+
   // Worktree-scoped pre-provision (P2/b3): the create hook already ran and the
   // run plan is the WORKTREE's — consume the provisioned record against the
   // parked state instead of re-entering init/resume (resume MUST be false: the
@@ -2355,8 +2375,18 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   // their own started/completed pairs inline; `continue` announces nothing.
   // run.started was measured early (isInit false here). Event/stats labels use
   // steps[].source_path, so rendering above never leaks `.runtime/rendered/`
-  // paths into the journal.
-  emitStartedEvents(action, a.runId, toMainPath);
+  // paths into the journal. The `resumed:true` tag (e7 DEFECT-3, G5) applies
+  // only when this action RE-ISSUES the step the run was parked on.
+  const tagResumed =
+    resumedReentry &&
+    action.action === 'run-step' &&
+    action.steps.some(
+      (s) =>
+        (resumedPendingStepId !== null && s.step_id === resumedPendingStepId) ||
+        (resumedPendingPath !== null &&
+          (samePath(s.path, resumedPendingPath) || samePath(s.source_path, resumedPendingPath))),
+    );
+  emitStartedEvents(action, a.runId, toMainPath, tagResumed);
   statsNoteAction(a.root, a.runId, action);
   statsNoteTerminal(a.root, a.runId, action);
 

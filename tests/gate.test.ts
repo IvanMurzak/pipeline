@@ -453,11 +453,34 @@ test('drive: a gate parks the run (exit 4) with the approval question — NO exe
   });
   expect(r.json.detail).toContain('--answer');
   expect(r.calls).toEqual([]); // deterministic: the executor seam never fired
+  // e7 DEFECT-3: the gate park carries a STABLE question_id (deterministic on
+  // run+step — no claude session exists to pin one to) …
+  expect(r.json.question_id).toBe('gate:drivegatepark:gate');
   // Re-entry WITHOUT an answer re-parks (still no spawn).
   const again = await drive(w, 'drivegatepark', ['--resume', '--start', gatePath], records);
   expect(again.code).toBe(4);
   expect(again.json.question.approval).toEqual({ required_role: 'admin' });
+  expect(again.json.question_id).toBe('gate:drivegatepark:gate'); // stable across re-entries
   expect(again.calls).toEqual([]);
+  // … and the park is JOURNALLED as awaiting_input (the cloud-ingest-consumed
+  // shape — see awaiting-input-contract.test.ts), approval marker included.
+  const journal = readFileSync(join(w.project, '.claude', 'pipeline', '.runtime', 'events.jsonl'), 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as any);
+  const parks = journal.filter((e) => e.type === 'awaiting_input');
+  expect(parks.length).toBe(2); // first park + the repeat re-entry park
+  expect(parks[0].run_id).toBe('drivegatepark');
+  expect(parks[0].data.run_id).toBe('drivegatepark');
+  expect(parks[0].data.iteration).toBe(1);
+  expect(parks[0].data.question_id).toBe('gate:drivegatepark:gate');
+  expect(parks[0].data.question.text).toBe('Deploy to production?');
+  expect(parks[0].data.question.approval).toEqual({ required_role: 'admin' });
+  expect(parks[0].data.question.question_id).toBe('gate:drivegatepark:gate');
+  expect(parks[0].data.step_id).toBe('gate');
+  expect(parks[0].session_id).toBe(null); // no claude session behind a gate
+  expect(parks[1].data.question_id).toBe(parks[0].data.question_id);
 }, 30000);
 
 test('drive: --answer approve completes the gate and the run proceeds through ## Next', async () => {

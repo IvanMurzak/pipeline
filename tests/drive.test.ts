@@ -14,6 +14,7 @@ import { computePlan } from '../src/lib/plan';
 import {
   buildExecutorArgv,
   DEFAULT_EXECUTOR_TEMPLATE,
+  dropRecordsDirFor,
   extractQuestion,
   quoteForShell,
   resolvePermissionMode,
@@ -44,8 +45,11 @@ const prompt = await Bun.stdin.text();
 const m = /^step_record_file = (.+)$/m.exec(prompt);
 if (!m) process.exit(9);
 const recordFile = m[1].trim();
-// records/<step>.json → <run> → .runtime → <pipeline root>
-const root = dirname(dirname(dirname(dirname(recordFile))));
+// The pipeline root comes from the prompt's own pipeline_root line (the
+// record file now lives in the tmp DROP dir, outside the pipeline tree);
+// legacy fallback: records/<step>.json → <run> → .runtime → <pipeline root>.
+const rm = /^pipeline_root = (.+)$/m.exec(prompt);
+const root = rm ? rm[1].trim() : dirname(dirname(dirname(dirname(recordFile))));
 const stepId = basename(recordFile, '.json');
 const canned = join(root, 'canned');
 mkdirSync(canned, { recursive: true });
@@ -73,7 +77,10 @@ const prompt = await Bun.stdin.text();
 const m = /^step_record_file = (.+)$/m.exec(prompt);
 if (!m) process.exit(9);
 const recordFile = m[1].trim();
-const root = dirname(dirname(dirname(dirname(recordFile))));
+// pipeline_root line preferred (record files live in the tmp DROP dir now);
+// legacy fallback derives from the record path.
+const rm = /^pipeline_root = (.+)$/m.exec(prompt);
+const root = rm ? rm[1].trim() : dirname(dirname(dirname(dirname(recordFile))));
 const stepId = basename(recordFile, '.json');
 const canned = join(root, 'canned');
 mkdirSync(canned, { recursive: true });
@@ -361,9 +368,18 @@ test('drive: 3-step sequential run to completion (exit 0, manager-shaped prompts
   expect(prompt).toContain(`Execute pipeline iteration: ${plan.steps[0].path}`);
   expect(prompt).toContain(`run_id = ${run}`);
   expect(prompt).toContain(`pipeline_root = ${root}`);
-  expect(prompt).toContain(`step_record_file = ${join(root, '.runtime', run, 'records', `${plan.steps[0].step_id}.json`)}`);
+  // e7 DEFECT-1: the executor-facing record path is the tmp DROP dir (outside
+  // .claude/, writable under headless acceptEdits via the --add-dir grant) —
+  // drive persists the canonical .runtime copy itself (asserted below).
+  expect(prompt).toContain(
+    `step_record_file = ${join(dropRecordsDirFor(resolve(root), run), `${plan.steps[0].step_id}.json`)}`,
+  );
   expect(prompt).toContain('Follow the step-executor protocol');
   expect(prompt).toContain(`${root}/.feedback/${run}/`);
+  // The canonical observability copy landed under .runtime (drive-persisted
+  // from the drop file the fake executor wrote).
+  const rec0 = JSON.parse(readFileSync(join(root, '.runtime', run, 'records', `${plan.steps[0].step_id}.json`), 'utf8'));
+  expect(rec0.outcome).toBe('completed');
 
   // Run-start setup mirrored the manager: feedback dir + gitignore stub + records dir.
   expect(existsSync(join(root, '.feedback', run))).toBe(true);
@@ -834,7 +850,8 @@ test('drive: a missing step record file → synthesized halt naming the path and
   expect(r.status).toBe(1);
   expect(r.json.status).toBe('halted');
   expect(r.json.reason).toContain('no valid step record at');
-  expect(r.json.reason).toContain(join(root, '.runtime', run, 'records', `${plan.steps[0].step_id}.json`));
+  // The reason names the DROP path — the file the executor was told to write.
+  expect(r.json.reason).toContain(join(dropRecordsDirFor(resolve(root), run), `${plan.steps[0].step_id}.json`));
   expect(r.json.reason).toContain('(executor exit 7)');
 }, 30000);
 
@@ -1197,6 +1214,248 @@ test('drive: question_id is minted at park time and included in exit-4 JSON and 
   expect(sess.questions[0].question_id).toBe(r.json.question_id);
 }, 30000);
 
+// --- e7 DEFECT-1: record-channel ladder (drop file / legacy file / result text / denial triage) ---
+
+test('buildExecutorArgv: {record_dir} substitutes --add-dir; drops its pair when absent; appended to token-less templates', () => {
+  const schema = stepRecordSchemaJson();
+  // Value present → --add-dir <dir> in place.
+  const withDir = buildExecutorArgv(DEFAULT_EXECUTOR_TEMPLATE, 'sonnet', schema, { recordDir: '/tmp/pd/records' });
+  const ai = withDir.indexOf('--add-dir');
+  expect(ai).toBeGreaterThan(-1);
+  expect(withDir[ai + 1]).toBe('/tmp/pd/records');
+  // No value → the --add-dir pair drops (byte-compatible with the old argv).
+  expect(buildExecutorArgv(DEFAULT_EXECUTOR_TEMPLATE, 'sonnet', schema)).not.toContain('--add-dir');
+  // A custom template WITHOUT {record_dir} gets the pair appended (same
+  // convention as {session} — wrappers forward unknown flags, fakes ignore argv).
+  expect(buildExecutorArgv('bun fake.ts', null, null, { recordDir: '/tmp/pd/records' })).toEqual([
+    'bun',
+    'fake.ts',
+    '--add-dir',
+    '/tmp/pd/records',
+  ]);
+}, 30000);
+
+test('drive: record recovered from the final-response TEXT when structured_output and files are absent (--agent regression workaround)', () => {
+  const root = scaffold(1);
+  const plan = computePlan(root);
+  const run = 'driveresulttext';
+  const template = envelopeTemplate(root);
+  // A 2.1.21x `--agent` envelope: success, NO structured_output, the final
+  // response is exactly the record object (as the headless note demands).
+  cannedEnvelope(root, plan.steps[0].step_id, undefined, {
+    result: JSON.stringify({ outcome: 'completed', next_iteration: 'PIPELINE_COMPLETE', summary: 'from text' }),
+  });
+
+  const r = drive(root, run, ['--start', plan.steps[0].path], { template });
+  expect(r.status).toBe(0);
+  expect(r.json.status).toBe('completed');
+  expect(r.stderr).toContain('step.record');
+  expect(r.stderr).toContain('result-text');
+  // Drive persisted the canonical copy from the recovered record.
+  const rec = JSON.parse(readFileSync(join(root, '.runtime', run, 'records', `${plan.steps[0].step_id}.json`), 'utf8'));
+  expect(rec.outcome).toBe('completed');
+  expect(rec.summary).toBe('from text');
+  expect(rec.kind).toBe('step');
+}, 30000);
+
+test('drive: result-text recovery tolerates a fenced ```json block around the record', () => {
+  const root = scaffold(1);
+  const plan = computePlan(root);
+  const run = 'driveresultfence';
+  const template = envelopeTemplate(root);
+  cannedEnvelope(root, plan.steps[0].step_id, undefined, {
+    result:
+      'Here is my step record:\n```json\n' +
+      JSON.stringify({ outcome: 'completed', next_iteration: 'PIPELINE_COMPLETE' }) +
+      '\n```\n',
+  });
+
+  const r = drive(root, run, ['--start', plan.steps[0].path], { template });
+  expect(r.status).toBe(0);
+  expect(r.json.status).toBe('completed');
+  expect(r.stderr).toContain('result-text');
+}, 30000);
+
+test('drive: structured_output still beats a result-text record (2.1.205 behavior unchanged)', () => {
+  const root = scaffold(1);
+  const plan = computePlan(root);
+  const run = 'driveresultprec';
+  const template = envelopeTemplate(root);
+  // structured says completed; the result text says halted — structured wins.
+  cannedEnvelope(
+    root,
+    plan.steps[0].step_id,
+    { outcome: 'completed', next_iteration: 'PIPELINE_COMPLETE' },
+    { result: JSON.stringify({ outcome: 'halted', halt_reason: 'text must lose' }) },
+  );
+
+  const r = drive(root, run, ['--start', plan.steps[0].path], { template });
+  expect(r.status).toBe(0);
+  expect(r.json.status).toBe('completed');
+  expect(r.stderr).toContain('structured_output');
+}, 30000);
+
+test('drive: record recovered from the LEGACY canonical record file (older-CLI parked session compat)', () => {
+  const root = scaffold(1);
+  const plan = computePlan(root);
+  const run = 'drivelegacyrec';
+  // A fake that ignores the prompt record path and writes the CANONICAL
+  // `.runtime/<run>/records/` file — the pre-drop-dir contract.
+  const legacyFake = `import { writeFileSync, mkdirSync } from 'node:fs';
+import { join, basename } from 'node:path';
+const prompt = await Bun.stdin.text();
+const m = /^step_record_file = (.+)$/m.exec(prompt);
+const rm = /^pipeline_root = (.+)$/m.exec(prompt);
+if (!m || !rm) process.exit(9);
+const stepId = basename(m[1].trim(), '.json');
+const dir = join(rm[1].trim(), '.runtime', '${run}', 'records');
+mkdirSync(dir, { recursive: true });
+writeFileSync(join(dir, stepId + '.json'), JSON.stringify({ kind: 'step', outcome: 'completed', next_iteration: 'PIPELINE_COMPLETE' }), 'utf8');
+process.exit(0);
+`;
+  writeFileSync(join(root, 'legacy-fake.ts'), legacyFake, 'utf8');
+
+  const r = drive(root, run, ['--start', plan.steps[0].path], { template: `bun ${join(root, 'legacy-fake.ts')}` });
+  expect(r.status).toBe(0);
+  expect(r.json.status).toBe('completed');
+  expect(r.stderr).toContain('record-file-legacy');
+}, 30000);
+
+test('drive: a DENIED record-file write is distinguishable from "executor produced no record"', () => {
+  const root = scaffold(1);
+  const plan = computePlan(root);
+  const run = 'drivedenied';
+  const template = envelopeTemplate(root);
+  const droppedPath = join(dropRecordsDirFor(resolve(root), run), `${plan.steps[0].step_id}.json`);
+  // A 2.1.21x sensitive-path denial: success envelope, no structured output,
+  // prose result, and permission_denials naming the record file's Write.
+  cannedEnvelope(root, plan.steps[0].step_id, undefined, {
+    result: 'I tried to write the record but the permission system refused.',
+    permission_denials: [
+      {
+        tool_name: 'Write',
+        tool_use_id: 'toolu_test',
+        tool_input: { file_path: droppedPath, content: '{"outcome":"completed"}' },
+      },
+    ],
+  });
+
+  const r = drive(root, run, ['--start', plan.steps[0].path], { template });
+  expect(r.status).toBe(1);
+  expect(r.json.status).toBe('halted');
+  expect(r.json.reason).toContain('no valid step record at');
+  // The CLEAR halt reason (e7 DEFECT-1 DoD): the denial is named explicitly.
+  expect(r.json.reason).toContain('DENIED by the claude permission gate');
+  expect(r.stderr).toContain('step.record_write_denied');
+}, 30000);
+
+// --- e7 DEFECT-3: awaiting_input journaling + resumed re-entry tag ---------------
+
+/** Read the drive sandbox's journal (cwd = pipeline root, no enclosing git →
+ *  events land at <root>/.claude/pipeline/.runtime/events.jsonl). */
+function journalEvents(root: string): any[] {
+  const p = join(root, '.claude', 'pipeline', '.runtime', 'events.jsonl');
+  if (!existsSync(p)) return [];
+  return readFileSync(p, 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
+}
+
+test('drive: a needs-input park JOURNALS awaiting_input (cloud-consumed shape) and the answer re-entry tags iteration.started resumed:true', () => {
+  const root = scaffold(2);
+  const plan = computePlan(root);
+  const run = 'drivejournalpark';
+  const template = envelopeTemplate(root);
+  const step0 = plan.steps[0].step_id;
+  cannedEnvelope(root, step0, {
+    outcome: 'needs-input',
+    question: { text: 'Which region?', context: 'no default configured', options: ['eu', 'us'] },
+  });
+  writeFileSync(
+    join(root, 'canned', `${step0}.envelope.2.json`),
+    JSON.stringify({
+      type: 'result',
+      is_error: false,
+      result: 'ok',
+      structured_output: { outcome: 'completed', next_iteration: plan.steps[1].path },
+    }),
+    'utf8',
+  );
+  cannedEnvelope(root, plan.steps[1].step_id, { outcome: 'completed', next_iteration: 'PIPELINE_COMPLETE' });
+
+  const first = drive(root, run, ['--start', plan.steps[0].path], { template });
+  expect(first.status).toBe(4);
+
+  // The park landed in the journal with the ingest-consumed shape (provenance:
+  // cloud runs/ingest.ts `awaiting_input` + protocol AwaitingInputData — the
+  // dedicated contract suite validates the full schema; here we pin the values).
+  const parks1 = journalEvents(root).filter((e) => e.type === 'awaiting_input');
+  expect(parks1.length).toBe(1);
+  const evt = parks1[0];
+  expect(evt.run_id).toBe(run); // envelope run_id (shippable, G2)
+  expect(evt.data.run_id).toBe(run); // data.run_id (AwaitingInputData)
+  expect(evt.data.iteration).toBe(1); // the step INDEX, 1-based (correlates iteration.started.index)
+  expect(evt.data.question_id).toBe(first.json.question_id); // same id the exit-4 JSON carries
+  expect(evt.data.question.text).toBe('Which region?');
+  expect(evt.data.question.context).toBe('no default configured');
+  expect(evt.data.question.options).toEqual(['eu', 'us']);
+  expect(evt.data.question.question_id).toBe(first.json.question_id);
+  expect(evt.data.step_id).toBe(step0); // additive
+  expect(evt.session_id).toBe(first.json.session_id); // the parked claude session
+
+  // Answer re-entry: the engine's re-issued iteration.started carries the
+  // additive `resumed: true` (protocol G5) — the un-park signal ingest keys on.
+  const second = drive(root, run, ['--resume', '--start', plan.steps[0].path, '--answer', 'eu'], { template });
+  expect(second.status).toBe(0);
+  const events = journalEvents(root);
+  // (iteration.started.index is the engine's per-DISPATCH counter — the
+  // resumed re-issue gets a fresh index — so pair emissions by path here.)
+  const started = events.filter((e) => e.type === 'iteration.started' && e.data.iteration_path === plan.steps[0].path);
+  expect(started.length).toBe(2); // fresh dispatch + the resume re-issue
+  expect(started[0].data.resumed).toBeUndefined();
+  expect(started[1].data.resumed).toBe(true);
+  // Journal order tells the cloud story: park … then the resumed re-issue.
+  expect(events.findIndex((e) => e.type === 'awaiting_input')).toBeLessThan(
+    events.findIndex((e) => e.type === 'iteration.started' && e.data.resumed === true),
+  );
+  // The answered park never re-parked — exactly one awaiting_input in total.
+  expect(events.filter((e) => e.type === 'awaiting_input').length).toBe(1);
+  // The follow-on FRESH step is NOT tagged resumed.
+  const step2Started = events.filter((e) => e.type === 'iteration.started' && e.data.iteration_path === plan.steps[1].path);
+  expect(step2Started.length).toBe(1);
+  expect(step2Started[0].data.resumed).toBeUndefined();
+}, 30000);
+
+test('drive: a repeat re-entry WITHOUT --answer re-journals awaiting_input with the SAME question_id', () => {
+  const root = scaffold(1);
+  const plan = computePlan(root);
+  const run = 'drivejournalrepark';
+  const template = envelopeTemplate(root);
+  cannedEnvelope(root, plan.steps[0].step_id, {
+    outcome: 'needs-input',
+    question: { text: 'Which port?', context: null },
+  });
+
+  const first = drive(root, run, ['--start', plan.steps[0].path], { template });
+  expect(first.status).toBe(4);
+  const second = drive(root, run, ['--resume', '--start', plan.steps[0].path], { template });
+  expect(second.status).toBe(4);
+
+  const events = journalEvents(root);
+  const parks = events.filter((e) => e.type === 'awaiting_input');
+  expect(parks.length).toBe(2);
+  // Same stored question, same id — a stale answer can still correlate.
+  expect(parks[0].data.question_id).toBe(parks[1].data.question_id);
+  expect(parks[1].data.question.text).toBe('Which port?');
+  // The repeat re-entry's re-issued dispatch is tagged resumed (it un-parks
+  // server-side) and the second awaiting_input re-parks AFTER it.
+  const lastResumed = events.findIndex((e) => e.type === 'iteration.started' && e.data.resumed === true);
+  expect(lastResumed).toBeGreaterThan(-1);
+  expect(events.findIndex((e) => e === parks[1])).toBeGreaterThan(lastResumed);
+}, 30000);
+
 test('drive: provider_limit is detected from error_rate_limited and included in halt JSON', () => {
   const root = scaffold(1);
   const plan = computePlan(root);
@@ -1223,7 +1482,8 @@ const prompt = await Bun.stdin.text();
 const m = /^step_record_file = (.+)$/m.exec(prompt);
 if (!m) process.exit(9);
 const recordFile = m[1].trim();
-const root = dirname(dirname(dirname(dirname(recordFile))));
+const rm = /^pipeline_root = (.+)$/m.exec(prompt);
+const root = rm ? rm[1].trim() : dirname(dirname(dirname(dirname(recordFile))));
 const canned = join(root, 'canned');
 mkdirSync(canned, { recursive: true });
 

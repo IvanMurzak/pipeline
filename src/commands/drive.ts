@@ -21,14 +21,19 @@
 // auto-emission are all IDENTICAL — and actuates each returned action itself:
 //
 //   run-step            → spawn the step-executor as a headless subprocess (the
-//                         manager-documented spawn prompt on stdin), then take
-//                         its step record from the claude JSON envelope's
-//                         schema-validated `structured_output` (the default
-//                         template passes --output-format json --json-schema);
-//                         drive persists it to the record file itself. When the
-//                         envelope is absent (custom --executor-cmd without the
-//                         flags) it falls back to reading the record file the
-//                         executor wrote. Concurrent layers spawn all steps in
+//                         manager-documented spawn prompt on stdin), then
+//                         recover its step record through the belt-and-braces
+//                         channel ladder (see execStep.runAttempt): the claude
+//                         envelope's schema-validated `structured_output`, the
+//                         tmp-dir DROP record file the prompt names (granted
+//                         via `--add-dir {record_dir}` — headless acceptEdits
+//                         on claude >= 2.1.21x auto-denies every `.claude/`
+//                         write as sensitive, and `-p --agent` runs produce no
+//                         structured_output at all, claude-code#20625), the
+//                         legacy canonical record file, then the final-response
+//                         text parsed as JSON. Whichever channel wins, drive
+//                         persists the canonical `.runtime/<run>/records/` copy
+//                         itself. Concurrent layers spawn all steps in
 //                         parallel and fold their records into a {kind:'layer'}
 //                         record. Envelope usage/cost accumulates into
 //                         .runtime/<run_id>/usage.json and enriches the run's
@@ -93,10 +98,15 @@
 // UUID generated before the spawn and persisted in
 // .runtime/<run_id>/sessions/<step_id>.json. A step that reports outcome
 // "needs-input" (with a question object) parks the run: exit 4, the question
-// in the final JSON, the engine untouched. Re-run with
+// in the final JSON, the engine untouched — and the park is JOURNALLED as an
+// `awaiting_input` event ({run_id, iteration, question_id, question} — the
+// @baizor/pipeline-protocol AwaitingInputData shape the cloud ingest consumes
+// to set the run's parked status; e7 DEFECT-3). Re-run with
 // `--resume --start <same-iteration> --answer "<text>"` and drive resumes the
 // SAME claude session (`--resume <session-id>`) with the answer — the step
-// continues from where it stopped instead of re-deriving its work. At most 3
+// continues from where it stopped instead of re-deriving its work; the
+// re-entry's engine-emitted `iteration.started` carries `resumed:true`
+// (protocol G5), which is what un-parks the run server-side. At most 3
 // questions per step, then the step halts. v1 limitation: needs-input inside
 // a PARALLEL layer maps to halted (parallel steps must be self-contained).
 //
@@ -117,14 +127,15 @@
 // question; answer via `--resume --start <same-iteration> --answer <text>`).
 
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { frozenVariablesError, invokeNext } from './next';
 import { addVarFlag, loadVarsFile, mergeCliVars } from '../lib/run-vars';
 import type { ActionStep, LayerResultEntry, MergeBranch, NextRecord, StepRecord } from '../lib/next';
 import { realGit, type GitResult, type GitRunner } from '../lib/git';
-import { addUsage, emptyUsage, parseEnvelope, detectProviderLimit, type ClaudeEnvelope, type ProviderLimit } from '../lib/envelope';
+import { addUsage, emptyUsage, parseEnvelope, parseResultObject, detectProviderLimit, type ClaudeEnvelope, type ProviderLimit } from '../lib/envelope';
 import {
   RECORD_OUTCOMES as RECORD_OUTCOME_LIST,
   extractQuestion,
@@ -137,7 +148,7 @@ import {
   parseScriptCreatorOutput,
   scriptCreatorSchemaJson,
 } from '../lib/improver-schema';
-import { emitEvent } from '../lib/event';
+import { emitEvent, emitEventJson } from '../lib/event';
 
 // Re-exported for record consumers that historically imported from here.
 export { extractQuestion, type StepQuestion };
@@ -173,7 +184,12 @@ export interface ExecutorRequest {
    *  default). Passed as `claude --effort` on EVERY invocation — the flag does
    *  not persist across `--resume`, so answer deliveries re-pass it too. */
   effort: string | null;
-  /** Where the executor is expected to write its {"kind":"step",…} record JSON. */
+  /** Where the executor is expected to write its {"kind":"step",…} record
+   *  JSON. For STEP spawns this is a file in the run's tmp-dir record DROP
+   *  directory (outside `.claude/` — writable under headless acceptEdits via
+   *  the --add-dir grant); drive persists the canonical observability copy to
+   *  `.runtime/<run>/records/` itself after recovery. Improver/script-creator
+   *  spawns keep the canonical path (drive-written only). */
   record_file: string;
   /** The pinned claude session: fresh spawns pass `--session-id <id>`, answer
    *  deliveries pass `--resume <id>` (the same session continues). */
@@ -221,13 +237,20 @@ export interface DriveDeps {
  *  per-machine adjustment; override the whole template with --executor-cmd or
  *  PIPELINE_DRIVE_EXECUTOR_CMD. The prompt is always delivered on stdin.
  *  `{schema}` expands to the compact step-record JSON Schema (the harness
- *  validates the final response and returns it in `structured_output`),
- *  `{permissions}` to the step's resolved permission mode, and `{session}` to
- *  the pinned session UUID — on an answer delivery the flag preceding
- *  `{session}` is swapped to `--resume` so the SAME session continues
- *  (verified on Claude Code 2.1.205). */
+ *  validates the final response and returns it in `structured_output` — on
+ *  claude versions where `-p --agent` supports it; 2.1.214 silently ignores
+ *  the flag for subagent runs, so drive ALSO recovers the record from the
+ *  record file and the final-response text — see execStep), `{permissions}`
+ *  to the step's resolved permission mode, `{session}` to the pinned session
+ *  UUID — on an answer delivery the flag preceding `{session}` is swapped to
+ *  `--resume` so the SAME session continues (verified on Claude Code
+ *  2.1.205) — and `{record_dir}` to the run's tmp-dir record DROP directory,
+ *  granted to the executor via `--add-dir` (verified on 2.1.214: headless
+ *  acceptEdits auto-DENIES every write under `.claude/` as "sensitive" — no
+ *  allow rule can override it — while an --add-dir'd tmp directory is
+ *  writable; this is the narrowest grant that keeps the file channel alive). */
 export const DEFAULT_EXECUTOR_TEMPLATE =
-  'claude -p --agent pipeline:step-executor --model {model} --effort {effort} --permission-mode {permissions} --session-id {session} --output-format json --json-schema {schema}';
+  'claude -p --agent pipeline:step-executor --model {model} --effort {effort} --permission-mode {permissions} --session-id {session} --add-dir {record_dir} --output-format json --json-schema {schema}';
 
 export interface ExecutorArgvOpts {
   session?: { id: string; resume: boolean };
@@ -235,6 +258,12 @@ export interface ExecutorArgvOpts {
   /** The step's resolved reasoning effort — `{effort}` token. Null/absent
    *  drops the `--effort {effort}` pair (inherit the session default). */
   effort?: string | null;
+  /** The run's record DROP directory — `{record_dir}` token (the `--add-dir`
+   *  grant that keeps the record-file channel writable under headless
+   *  acceptEdits). Null/absent drops the pair; a template WITHOUT the token
+   *  gets `--add-dir <dir>` appended (same convention as `{session}` — custom
+   *  claude wrappers must forward unknown flags; fakes ignore argv). */
+  recordDir?: string | null;
 }
 
 /**
@@ -258,21 +287,26 @@ export function buildExecutorArgv(
 ): string[] {
   const argv: string[] = [];
   let sawSession = false;
+  let sawRecordDir = false;
   const dropPair = (): void => {
     if (argv.length && argv[argv.length - 1].startsWith('-')) argv.pop();
   };
   // Scalar tokens all follow the same rule: substitute when a value resolved,
   // otherwise drop the token AND its preceding flag. {session} stays a special
-  // case (resume swaps the preceding flag to --resume; appended when absent).
+  // case (resume swaps the preceding flag to --resume; appended when absent),
+  // and {record_dir} is appended when absent too (the --add-dir grant must
+  // reach a custom claude template that predates the token).
   const scalars: Record<string, string | null | undefined> = {
     '{model}': model,
     '{effort}': opts.effort,
     '{schema}': schema,
     '{permissions}': opts.permissionMode,
+    '{record_dir}': opts.recordDir,
   };
   for (const t of template.split(/\s+/).filter(Boolean)) {
     const token = Object.keys(scalars).find((k) => t.includes(k));
     if (token !== undefined) {
+      if (token === '{record_dir}') sawRecordDir = true;
       const value = scalars[token];
       if (value === null || value === undefined || value === '') dropPair();
       else argv.push(t.replaceAll(token, value));
@@ -291,6 +325,9 @@ export function buildExecutorArgv(
   }
   if (!sawSession && opts.session) {
     argv.push(opts.session.resume ? '--resume' : '--session-id', opts.session.id);
+  }
+  if (!sawRecordDir && opts.recordDir) {
+    argv.push('--add-dir', opts.recordDir);
   }
   return argv;
 }
@@ -314,6 +351,11 @@ function subprocessExecutor(template: string, schema: string | null, err: (s: st
         session: req.session,
         permissionMode: req.permission_mode,
         effort: req.effort,
+        // The --add-dir record grant applies to STEP executors only — their
+        // record_file lives in the run's tmp drop dir (see runDrive). The
+        // improver/script-creator record files are drive-written observability
+        // copies; those sessions never write them, so no grant is needed.
+        recordDir: (req.kind ?? 'step') === 'step' ? dirname(req.record_file) : null,
       });
       if (argv.length === 0) {
         done({ code: null, error: 'executor command template expanded to an empty argv' });
@@ -464,11 +506,14 @@ project-issue / env / friction) as individual files under
 ${pipelineRootAbs}/.feedback/${runId}/ per the step-executor's "Problem journal
 (Tier-2 feedback)" protocol. I created that folder at run start.
 
-You are running headless: when your session was started with a JSON schema
-(the default), your FINAL response is parsed as your step record — end with
-exactly the step-record object (same fields as your step_record_file protocol);
-prose belongs in its "summary" field. Write step_record_file as usual too: the
-driver prefers the structured response and falls back to the file.
+You are running headless: your FINAL response is parsed as your step record —
+end with EXACTLY the step-record JSON object (same fields as your
+step_record_file protocol), no prose and no code fences around it; prose
+belongs in its "summary" field. Write step_record_file as usual too, at the
+EXACT path given above (it may live outside the pipeline tree — that location
+is pre-authorized for your Write tool): the driver prefers the
+harness-validated structured response, then the record file, then your final
+response.
 
 If you cannot proceed because information is MISSING and cannot be discovered
 with your tools (a credential, a human decision between valid alternatives, an
@@ -505,18 +550,22 @@ This step's script failed; failure record at ${step.failure_record}; achieve the
 }
 
 /** The prompt delivered when the pinned session is RESUMED with the answer to
- *  its needs-input question. Repeats step_record_file so the executor (or a
- *  wrapper script) never has to dig it out of the earlier conversation. */
-export function buildAnswerPrompt(answer: string, recordFile: string): string {
+ *  its needs-input question. Repeats step_record_file (and pipeline_root, for
+ *  wrappers/compacted sessions) so the executor never has to dig them out of
+ *  the earlier conversation — and so an older session parked before a CLI
+ *  upgrade is re-pointed at the CURRENT record path. */
+export function buildAnswerPrompt(answer: string, recordFile: string, pipelineRootAbs: string): string {
   return `Answer to your question: ${answer}
 
+pipeline_root = ${pipelineRootAbs}
 step_record_file = ${recordFile}
 
 Continue executing the iteration from where you stopped, using this answer.
 Same protocol as before: verify the Success Criteria, write your step record
-to step_record_file, and end with the step-record object as your final
-response. If the answer is insufficient you may ask again (outcome
-"needs-input"), but the per-step question limit still applies.
+to step_record_file (the EXACT path above), and end with the step-record JSON
+object as your final response (no prose around it). If the answer is
+insufficient you may ask again (outcome "needs-input"), but the per-step
+question limit still applies.
 `;
 }
 
@@ -524,16 +573,17 @@ response. If the answer is insufficient you may ask again (outcome
  *  executor process died, or a previous drive was killed mid-step): the
  *  transcript survived on disk, so the executor verifies and continues
  *  instead of a fresh spawn re-deriving everything. */
-export function buildCrashResumePrompt(recordFile: string): string {
+export function buildCrashResumePrompt(recordFile: string, pipelineRootAbs: string): string {
   return `Your session was interrupted before a valid step record was produced.
 
+pipeline_root = ${pipelineRootAbs}
 step_record_file = ${recordFile}
 
 Re-verify the current state of your work (files, commands, Success Criteria),
 finish anything incomplete, and report as usual: write your step record to
-step_record_file and end with the step-record object as your final response.
-If the iteration's work was already complete before the interruption, just
-verify and report.
+step_record_file (the EXACT path above) and end with the step-record JSON
+object as your final response (no prose around it). If the iteration's work
+was already complete before the interruption, just verify and report.
 `;
 }
 
@@ -821,6 +871,23 @@ function parseArgs(args: string[]): DriveArgs {
 // Record-file reading
 // ---------------------------------------------------------------------------
 
+/**
+ * The per-run executor-writable record DROP directory (e7 DEFECT-1): headless
+ * acceptEdits on Claude Code >= 2.1.21x auto-DENIES every write under
+ * `.claude/` as sensitive (no allow rule can override it), which killed the
+ * canonical `.runtime/<run>/records/` path as an executor write target. Step
+ * executors are handed a per-run tmp-dir record path instead (the directory
+ * is granted to the claude sandbox via `--add-dir {record_dir}` in the
+ * template) and drive persists the canonical observability copy under
+ * `.runtime/<run>/records/` ITSELF after recovery. Keyed on a root hash + run
+ * id so concurrent runs (and parallel test sandboxes reusing run ids) never
+ * collide; the run dir is removed at done/halt.
+ */
+export function dropRecordsDirFor(rootAbs: string, runId: string): string {
+  const rootHash = createHash('sha1').update(rootAbs, 'utf8').digest('hex').slice(0, 8);
+  return join(tmpdir(), 'pipeline-drive', `${rootHash}-${runId}`, 'records');
+}
+
 /** Parse a step record file: a JSON object → the record; missing/unparseable/
  *  non-object → null (the caller synthesizes a halted record). */
 function readRecordFile(path: string): Record<string, unknown> | null {
@@ -846,7 +913,34 @@ function noRecordReason(recordFile: string, exit: ExecutorExit, envelope: Claude
   // An error envelope names the failure category (error_max_turns, …) — far
   // better triage than a bare exit code.
   const env = envelope && envelope.is_error ? `; claude error: ${envelope.subtype ?? 'unknown'}` : '';
-  return `no valid step record at ${recordFile} (executor exit ${code}${env})`;
+  // Distinguish "the executor never produced a record" from "the executor DID
+  // try to write it and the permission gate denied the write" (headless
+  // acceptEdits auto-denies `.claude/` paths as sensitive on Claude Code >=
+  // 2.1.21x — a denial here means a custom template/prompt override still
+  // points records at a gated path; the default contract drops records in an
+  // --add-dir-granted tmp directory precisely to avoid this).
+  const denied = deniedRecordWrite(envelope, recordFile);
+  const deny =
+    denied !== null
+      ? `; record write DENIED by the claude permission gate (${denied}) — the executor attempted the write but the harness refused it (sensitive-path auto-deny)`
+      : '';
+  return `no valid step record at ${recordFile} (executor exit ${code}${env}${deny})`;
+}
+
+/** Does the envelope report a PERMISSION DENIAL for a Write/Edit against one
+ *  of the given paths? Returns the denied path (as the harness reported it),
+ *  or null. Paths compare resolved, slash-normalized, case-insensitive (the
+ *  harness reports Windows backslash paths). */
+export function deniedRecordWrite(envelope: ClaudeEnvelope | null, ...paths: string[]): string | null {
+  if (envelope === null || envelope.permission_denials.length === 0) return null;
+  const norm = (p: string): string => resolve(p).replace(/\\/g, '/').toLowerCase();
+  const targets = new Set(paths.map(norm));
+  for (const d of envelope.permission_denials) {
+    if (d.file_path === null) continue;
+    if (d.tool_name !== null && !/write|edit/i.test(d.tool_name)) continue;
+    if (targets.has(norm(d.file_path))) return d.file_path;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -956,12 +1050,15 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
   // write their step records into.
   const recordsDir = join(rootAbs, '.runtime', runId, 'records');
   const sessionsDir = join(rootAbs, '.runtime', runId, 'sessions');
+  const dropRecordsDir = dropRecordsDirFor(rootAbs, runId);
+  const dropRunDir = dirname(dropRecordsDir);
   try {
     mkdirSync(join(rootAbs, '.feedback', runId), { recursive: true });
     const gi = join(rootAbs, '.feedback', '.gitignore');
     if (!existsSync(gi)) writeFileSync(gi, '*\n', 'utf8');
     mkdirSync(recordsDir, { recursive: true });
     mkdirSync(sessionsDir, { recursive: true });
+    mkdirSync(dropRecordsDir, { recursive: true });
   } catch (e) {
     err(`pipeline drive: run-start setup failed: ${e instanceof Error ? e.message : String(e)}\n`);
     return 2;
@@ -1007,6 +1104,25 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
   }
 
   const recordPath = (stepId: string) => join(recordsDir, `${stepId}.json`);
+  const dropRecordPath = (stepId: string) => join(dropRecordsDir, `${stepId}.json`);
+  /** Best-effort removal of the run's tmp record drop dir (terminal actions
+   *  only — parked/blocked runs may still resume and re-use it). */
+  const cleanupDropDir = (): void => {
+    try {
+      rmSync(dropRunDir, { recursive: true, force: true });
+    } catch {
+      // best-effort — tmp dirs are reaped by the OS eventually
+    }
+  };
+  /** Journal a structured event into events.jsonl (the shipper's upload
+   *  source) — best-effort like every drive emission. */
+  const journalEvent = (eventType: string, data: Record<string, unknown>, sessionId: string | null): void => {
+    try {
+      emitEventJson(eventType, data, { runId, sessionId });
+    } catch {
+      // best-effort — never affect the run
+    }
+  };
   const finalJson = (obj: Record<string, unknown>, code: number): number => {
     out(JSON.stringify({ ...obj, run_id: runId, pipeline_root: rootAbs }, null, 2) + '\n');
     return code;
@@ -1200,12 +1316,16 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
 
   interface SelfImproveSession {
     structured: Record<string, unknown> | null;
-    /** 'structured' — the harness-validated object; 'no-structured-output' — a
-     *  SUCCESSFUL envelope without structured output (pre-v2.1.205 claude or a
-     *  custom template): version-tolerance fallback, not a crash;
-     *  'failed' — no successful envelope within the crash-resume budget (or no
-     *  fresh prompt was available). */
-    source: 'structured' | 'no-structured-output' | 'failed';
+    /** 'structured' — the harness-validated object; 'result-text' — recovered
+     *  by parsing the final response as JSON (a `-p --agent` run on claude >=
+     *  2.1.21x produces no structured_output — upstream claude-code#20625 —
+     *  but the headless notes demand the exact JSON object as the final
+     *  response); 'no-structured-output' — a SUCCESSFUL envelope with neither
+     *  (pre-v2.1.205 claude, or a session that answered in prose):
+     *  version-tolerance fallback, not a crash; 'failed' — no successful
+     *  envelope within the crash-resume budget (or no fresh prompt was
+     *  available). */
+    source: 'structured' | 'result-text' | 'no-structured-output' | 'failed';
     detail: string | null;
   }
 
@@ -1284,7 +1404,15 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         const limit = detectProviderLimit(envelope);
         if (limit) detectedLimit = limit;
       }
-      const structured = envelope?.structured_output ?? null;
+      let structured = envelope?.structured_output ?? null;
+      let structuredSource: 'structured' | 'result-text' = 'structured';
+      if (structured === null && envelope !== null && !envelope.is_error) {
+        // `-p --agent` on claude >= 2.1.21x ignores --json-schema (no
+        // structured_output; claude-code#20625) — recover the record from the
+        // final-response text the headless notes demand.
+        structured = parseResultObject(envelope.result);
+        if (structured !== null) structuredSource = 'result-text';
+      }
       if (structured !== null) {
         sess.status = 'done';
         writeStepSession(sessionsDir, key, sess);
@@ -1293,12 +1421,13 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         } catch {
           // best-effort observability copy — the in-memory object is authoritative
         }
-        return { structured, source: 'structured', detail: null };
+        return { structured, source: structuredSource, detail: null };
       }
       if (envelope !== null && !envelope.is_error) {
         // Version tolerance (05.2 review B): a SUCCESS envelope without
-        // structured output (claude < 2.1.205, or a custom template without
-        // --json-schema). A resume cannot fix this — fall back conservatively.
+        // structured output OR a parseable final response (claude < 2.1.205,
+        // a custom template without --json-schema, or a session that answered
+        // in prose). A resume cannot fix this — fall back conservatively.
         sess.status = 'done';
         writeStepSession(sessionsDir, key, sess);
         return {
@@ -1381,7 +1510,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
       const res = await runSelfImproveSession(improverRunner, 'improver', 'improver', () =>
         buildRetroImproverPrompt(retroRoot, feedbackDir, runId, lintWarnings),
       );
-      if (res.source !== 'structured') {
+      if (res.structured === null) {
         progress('warning', { detail: `retrospective improver pass not applied: ${res.detail}` });
       }
       improverFailed = res.source === 'failed';
@@ -1408,7 +1537,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         const sres = await runSelfImproveSession(scriptCreatorRunner, 'script-creator', 'script', () =>
           buildScriptCreatorPrompt(parsed.script_creation_briefs[i], i + 1, parsed.script_creation_briefs.length, runId, retroRoot),
         );
-        if (sres.source !== 'structured') {
+        if (sres.structured === null) {
           progress('warning', {
             detail: `retrospective script-creator ${i + 1}/${parsed.script_creation_briefs.length} refused: ${sres.detail}`,
           });
@@ -1545,13 +1674,22 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         // best-effort — a missing feedback dir only degrades Tier-2 journaling
       }
     }
-    const recordFile = recordPath(stepKey);
+    // The executor WRITES the drop file (tmp dir, --add-dir-granted — the only
+    // path headless acceptEdits lets it write on claude >= 2.1.21x); drive
+    // persists the CANONICAL observability copy after recovery. Consumers of
+    // r.recordFile (blocker briefs, final JSONs) get the canonical path.
+    const recordFile = dropRecordPath(stepKey);
+    const canonicalRecordFile = recordPath(stepKey);
     /** Halt this step (and close its session — every non-awaiting exit does). */
     const halted = (reason: string): { entry: LayerResultEntry; raw: null; recordFile: string } => {
       sess.status = 'done';
       writeStepSession(sessionsDir, stepKey, sess);
       progress('step.failed', { step_id: step.step_id, reason });
-      return { entry: { step_id: step.step_id, outcome: 'halted', halt_reason: reason }, raw: null, recordFile };
+      return {
+        entry: { step_id: step.step_id, outcome: 'halted', halt_reason: reason },
+        raw: null,
+        recordFile: canonicalRecordFile,
+      };
     };
     /** Park this step on a question — the run exits 4 and the caller resumes
      *  the SAME session with the user's answer. */
@@ -1560,7 +1698,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
       return {
         entry: { step_id: step.step_id, outcome: 'halted' as const, halt_reason: 'awaiting input' },
         raw: null,
-        recordFile,
+        recordFile: canonicalRecordFile,
         // SOURCE path (env-variables a5, E11): this iteration_path is surfaced
         // in the exit-4 JSON, echoed in the `--resume --start <path>` hint, and
         // machine-fed back as `--start` by pipeline-ui's answer flow — a
@@ -1599,7 +1737,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
       }
       sess = { ...prior, status: 'running' };
       warnCwd(sess);
-      initialPrompt = buildAnswerPrompt(pendingAnswer, recordFile);
+      initialPrompt = buildAnswerPrompt(pendingAnswer, recordFile, stepRootAbs);
       initialResume = true;
       pendingAnswer = null; // one-shot: consumed by this step
     } else if (prior !== null && prior.status === 'running' && prior.crashes < MAX_CRASH_RESUMES) {
@@ -1610,7 +1748,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         attempt: sess.crashes,
         detail: 'previous drive process died mid-step; resuming the surviving session',
       });
-      initialPrompt = buildCrashResumePrompt(recordFile);
+      initialPrompt = buildCrashResumePrompt(recordFile, stepRootAbs);
       initialResume = true;
     } else {
       // Fresh session. If this step already ran in this run (graph loop-back /
@@ -1637,10 +1775,36 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     // run's steps read the child manifest's permission-mode, not the parent's).
     const permissionMode = resolvePermissionMode(step.path, stepRootAbs);
 
-    /** One executor spawn against the pinned session; extracts the record
-     *  (structured_output preferred, file fallback) and folds usage. */
+    /** One executor spawn against the pinned session; recovers the record
+     *  through the belt-and-braces channel ladder and folds usage.
+     *
+     *  Channel ladder (e7 DEFECT-1 — each channel covers a claude-version /
+     *  template reality; the FIRST valid record wins, and drive persists the
+     *  canonical `.runtime/<run>/records/` copy itself):
+     *   1. `structured_output` — harness-validated (claude <= 2.1.205 default
+     *      template; any future claude where `-p --agent` supports
+     *      --json-schema again).
+     *   2. the DROP record file (tmp dir, --add-dir-granted) — the prompt's
+     *      step_record_file; the only executor-writable file path under
+     *      headless acceptEdits on claude >= 2.1.21x.
+     *   3. the CANONICAL record file — legacy channel: custom templates /
+     *      permission modes where `.runtime/<run>/records/` is writable, and
+     *      sessions parked under an older CLI whose earlier prompt named it.
+     *   4. the final-response TEXT parsed as JSON — `-p --agent` on 2.1.21x
+     *      silently ignores --json-schema (no structured_output; upstream
+     *      claude-code#20625), so the prompt demands the record object as the
+     *      exact final response and drive parses it back out.
+     *  An INVALID record (wrong outcome) from any file/text channel is still
+     *  surfaced for triage when no channel produced a valid one. */
     const runAttempt = async (promptText: string, resume: boolean) => {
-      rmSync(recordFile, { force: true }); // never trust a stale record from a previous attempt
+      // Never trust a stale record from a previous attempt — on EITHER path.
+      rmSync(recordFile, { force: true });
+      rmSync(canonicalRecordFile, { force: true });
+      try {
+        mkdirSync(dropRecordsDir, { recursive: true }); // tmp dirs can be reaped between attempts
+      } catch {
+        // the read below just misses — the other channels still apply
+      }
       const exit = await executor({
         step_id: step.step_id,
         prompt: promptText,
@@ -1658,21 +1822,61 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         const limit = detectProviderLimit(envelope);
         if (limit) detectedLimit = limit;
       }
-      let attemptRaw: Record<string, unknown> | null;
+      let attemptRaw: Record<string, unknown> | null = null;
+      let source: string | null = null;
       const structured = envelope?.structured_output ?? null;
       if (validRecord(structured)) {
         // Authoritative: the harness validated this against the step schema.
         attemptRaw = { ...structured, kind: 'step' };
+        source = 'structured_output';
+      }
+      if (attemptRaw === null || !validRecord(attemptRaw)) {
+        const drop = readRecordFile(recordFile);
+        if (drop !== null && (attemptRaw === null || validRecord(drop))) {
+          attemptRaw = drop;
+          if (validRecord(drop)) source = 'record-file';
+        }
+      }
+      if (attemptRaw === null || !validRecord(attemptRaw)) {
+        const legacy = readRecordFile(canonicalRecordFile);
+        if (legacy !== null && (attemptRaw === null || validRecord(legacy))) {
+          attemptRaw = legacy;
+          if (validRecord(legacy)) source = 'record-file-legacy';
+        }
+      }
+      if ((attemptRaw === null || !validRecord(attemptRaw)) && envelope !== null && !envelope.is_error) {
+        const fromText = parseResultObject(envelope.result);
+        if (fromText !== null && (attemptRaw === null || validRecord(fromText))) {
+          attemptRaw = fromText;
+          if (validRecord(fromText)) source = 'result-text';
+        }
+      }
+      if (validRecord(attemptRaw)) {
+        attemptRaw = { ...attemptRaw, kind: 'step' };
+        // Persist the canonical observability copy — drive's own write, never
+        // permission-gated. The record file consumers see is ALWAYS this one.
         try {
-          writeFileSync(recordFile, JSON.stringify(attemptRaw), 'utf8');
+          writeFileSync(canonicalRecordFile, JSON.stringify(attemptRaw), 'utf8');
         } catch (e) {
           progress('warning', {
-            detail: `failed to persist structured record to ${recordFile}: ${e instanceof Error ? e.message : String(e)}`,
+            detail: `failed to persist record to ${canonicalRecordFile}: ${e instanceof Error ? e.message : String(e)}`,
           });
         }
-        progress('step.record', { step_id: step.step_id, source: 'structured_output' });
+        progress('step.record', { step_id: step.step_id, source });
       } else {
-        attemptRaw = readRecordFile(recordFile);
+        // No valid record from ANY channel — if the harness DENIED the record
+        // write, say so loudly (distinguishable from "executor produced none").
+        const denied = deniedRecordWrite(envelope, recordFile, canonicalRecordFile);
+        if (denied !== null) {
+          progress('step.record_write_denied', {
+            step_id: step.step_id,
+            path: denied,
+            detail:
+              'the claude permission gate refused the record-file write (sensitive-path auto-deny); ' +
+              'the default contract drops records in an --add-dir-granted tmp dir — a denial usually means ' +
+              'a custom executor template/prompt override still points records at a path under .claude/',
+          });
+        }
       }
       return { exit, envelope, raw: attemptRaw };
     };
@@ -1704,7 +1908,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
             ? noRecordReason(recordFile, att.exit, att.envelope)
             : `invalid outcome '${att.raw.outcome}' in ${recordFile}`,
       });
-      att = await runAttempt(buildCrashResumePrompt(recordFile), true);
+      att = await runAttempt(buildCrashResumePrompt(recordFile, stepRootAbs), true);
     }
     const { exit, envelope } = att;
     const raw = att.raw;
@@ -1755,7 +1959,9 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         halt_reason: typeof raw.halt_reason === 'string' ? raw.halt_reason : null,
       },
       raw,
-      recordFile,
+      // The CANONICAL persisted copy — what blocker briefs / consumers read
+      // (the drop file is ephemeral tmp state and is cleaned at terminal).
+      recordFile: canonicalRecordFile,
     };
   };
 
@@ -1844,11 +2050,35 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
               pendingAnswer = null; // one-shot: consumed by this gate
               continue;
             }
+            // Stable question identity for the gate (no claude session to pin
+            // it to): deterministic on (run, step), so repeat re-entries and
+            // the cloud answer round trip correlate on the SAME id (06.2.1).
+            const gateQuestionId = `gate:${runId}:${gateStep.step_id}`;
             progress('run.awaiting_input', {
               step_id: gateStep.step_id,
               question: question?.text ?? null,
+              question_id: gateQuestionId,
               approval_required_role: question?.approval.required_role ?? null,
             });
+            // e7 DEFECT-3: journal the park — the cloud ingest consumes this
+            // event (runs/ingest.ts `awaiting_input`) to set the run's parked
+            // status; without it a dispatched run looks `running` server-side
+            // and the sweeper's HOLD disposition is unreachable. Shape per
+            // @baizor/pipeline-protocol AwaitingInputData:
+            // { run_id, iteration, question_id, question:{text,…} } —
+            // additive fields only beyond that.
+            journalEvent(
+              'awaiting_input',
+              {
+                run_id: runId,
+                iteration: gateStep.index,
+                question_id: gateQuestionId,
+                question: { ...(question ?? { text: `Approval required to proceed past gate '${gateStep.step_id}'.` }), question_id: gateQuestionId },
+                step_id: gateStep.step_id,
+                iteration_path: gateStep.path,
+              },
+              null,
+            );
             enrichStats(false);
             return finalJson(
               {
@@ -1856,6 +2086,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
                 step_id: gateStep.step_id,
                 iteration_path: gateStep.path,
                 session_id: null,
+                question_id: gateQuestionId,
                 question,
                 detail:
                   'the step is an APPROVAL GATE; deliver the decision by re-running pipeline drive with ' +
@@ -1876,6 +2107,28 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
               question: r.awaiting.question.text,
               question_id: r.awaiting.question_id,
             });
+            // e7 DEFECT-3: journal the park — the cloud ingest consumes this
+            // event (runs/ingest.ts `awaiting_input`) to set the run's parked
+            // status; without it a dispatched run looks `running` server-side,
+            // the sweeper's HOLD disposition is unreachable, and a parked run
+            // gets re-dispatched on lease death (design-forbidden). Shape per
+            // @baizor/pipeline-protocol AwaitingInputData: { run_id, iteration,
+            // question_id, question:{text, context, options} } — additive
+            // fields (step_id, iteration_path) beyond that. Emitted on the
+            // repeat park too (a --resume without --answer), restoring the
+            // parked state after the re-entry's iteration.started un-parked it.
+            journalEvent(
+              'awaiting_input',
+              {
+                run_id: runId,
+                iteration: action.steps[0].index,
+                question_id: r.awaiting.question_id,
+                question: { ...r.awaiting.question, question_id: r.awaiting.question_id },
+                step_id: r.awaiting.step_id,
+                iteration_path: r.awaiting.iteration_path,
+              },
+              r.awaiting.session_id,
+            );
             enrichStats(false);
             return finalJson(
               {
@@ -1925,7 +2178,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
           const brief = takeBrief(action.iteration_path);
           return brief === null ? null : buildImproverPrompt(action.iteration_path, brief, runId, worktreePipelineRoot ?? rootAbs);
         });
-        if (res.source !== 'structured') {
+        if (res.structured === null) {
           progress('warning', { detail: `improver pass for ${action.iteration_path} not applied: ${res.detail}` });
         }
         const parsed = parseImproverOutput(res.structured);
@@ -1960,7 +2213,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
             ? null
             : buildScriptCreatorPrompt(brief, action.number, action.of, runId, worktreePipelineRoot ?? rootAbs);
         });
-        if (res.source !== 'structured') {
+        if (res.structured === null) {
           progress('warning', { detail: `script-creator ${action.number}/${action.of} refused: ${res.detail}` });
         }
         const parsed = parseScriptCreatorOutput(res.structured);
@@ -2007,6 +2260,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
       case 'done': {
         progress('run.completed', {});
         enrichStats(true);
+        cleanupDropDir();
         return finalJson({ status: 'completed', ...finalExtras() }, 0);
       }
       case 'halt': {
@@ -2020,6 +2274,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         }
         progress('run.halted', { status: action.status, reason: action.reason });
         enrichStats(true);
+        cleanupDropDir();
         return finalJson(
           {
             status: action.status,
