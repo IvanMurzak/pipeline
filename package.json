@@ -1,6 +1,6 @@
 {
   "name": "@baizor/pipeline",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "type": "module",
   "description": "Unified local CLI for the Claude-Pipeline plugin: deterministic planning (and, in later phases, matching / routing / event emission / UI) computed OUTSIDE the LLM context so agents pay near-zero tokens for control-flow work. Runs directly with Bun; a Node-targeted bundle can be produced for embedding in other local projects.",
   "homepage": "https://ai-pipeline.dev",
