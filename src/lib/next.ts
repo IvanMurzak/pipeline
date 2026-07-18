@@ -152,6 +152,24 @@ export interface NextState {
    */
   fallback_attempted?: Record<string, true>;
   /**
+   * Agent-step retries (A2 — 04-runner-crash-resume.md §retries): step_ids
+   * mapped to how many RETRY attempts have been dispatched so far (0 = never
+   * retried), mirroring fallback_attempted's storage shape. Written by the
+   * engine BEFORE it re-dispatches a transiently-halted agent step (the
+   * onStepPhase retry decision, sibling of the scriptFallback block);
+   * consulted there to bound further retries against the step's `retries:`
+   * frontmatter budget (plan.ts PlanStep.retries) and by resumeRun's crash
+   * twin to re-emit an in-flight retry dispatch correctly. A step_id's count
+   * is NEVER reset (matches fallback_attempted's once-per-run-bound idiom) —
+   * a graph loop-back revisiting the same step_id later shares the same
+   * budget rather than getting a fresh one. Sequential steps only in v1:
+   * concurrent-layer members never reach this map (their results arrive as a
+   * single {kind:'layer'} record, never the per-step retry decision seam).
+   * Absent on a legacy next.json → normalized to {} on load (the
+   * fallback_attempted pattern).
+   */
+  agent_attempts?: Record<string, number>;
+  /**
    * Script-step self-healing bound #2 (§6.4): step_ids whose script received
    * an in-run `mode: repair-script` fix. OWNED by the command layer (T31
    * appends after dispatching a repair and consults it before dispatching
@@ -264,6 +282,14 @@ export interface ActionStep {
   /** Absolute path of the §6.2.1 failure record the fallback executor reads
    *  (full stdout/stderr live in the sibling .log). */
   failure_record?: string;
+  /**
+   * Agent-step retries (A2 — 04 §retries.6): present ONLY on a retry
+   * re-dispatch — the 1-based attempt number (matching the value just written
+   * to state.agent_attempts[step_id]). Additive event tagging: the command
+   * layer folds it into the re-dispatch's `iteration.started` payload as
+   * `retry: n`. Absent on a step's FIRST (non-retry) dispatch.
+   */
+  retry?: number;
   /**
    * External-isolation (run-level) context, threaded onto every step of an
    * `isolation: external` run. INFORMATIONAL only — the step `cd`s into
@@ -813,6 +839,17 @@ export function computeNext(
   if (state.partial_layer_results === undefined) state.partial_layer_results = null;
   if (state.pending_fallback === undefined) state.pending_fallback = null;
   if (state.active_child === undefined) state.active_child = null;
+  // Backward compat, agent-step retries (A2 — same pattern as
+  // fallback_attempted): a pre-retries next.json lacks the key — absent ⇒
+  // empty map, so legacy in-flight runs load fine and behave byte-identically
+  // (no step has ever been retried).
+  if (
+    state.agent_attempts == null ||
+    typeof state.agent_attempts !== 'object' ||
+    Array.isArray(state.agent_attempts)
+  ) {
+    state.agent_attempts = {};
+  }
 
   // Resume / re-entry: re-run the parent step (sequential/graph) or re-dispatch
   // the in-flight layer (parallel). Used both after a nested blocker landed and
@@ -903,6 +940,8 @@ function initRun(plan: Plan, opts: NextOpts): NextResult {
     pending_fallback: null,
     // Composition (T3-10): no child run in flight at init.
     active_child: null,
+    // Agent-step retries (A2): no step has been retried yet.
+    agent_attempts: {},
   };
 
   if (mode === 'parallel') {
@@ -1027,6 +1066,33 @@ function resumeRun(plan: Plan, state: NextState, opts: NextOpts): NextResult {
       state,
     };
   }
+  // A2 agent-step retries — crash twin (04 §retries.5), beside the
+  // pending_fallback re-emit above: the dispatch in flight at crash time was
+  // itself a RETRY attempt when state.agent_attempts already carries one for
+  // this step AND current_path still points at it — set by
+  // dispatchAgentRetry BEFORE the crash, the same way pending_fallback marks
+  // an in-flight fallback dispatch. Re-emit the SAME pending dispatch — SAME
+  // index (NO bump), mirroring the pending_fallback/script re-emits above —
+  // tagged with the SAME attempt number it already carried, instead of
+  // falling through to the generic dispatchStep fresh-spawn bump below
+  // (which would silently drop the `retry: n` tag and desync the reported
+  // attempt from state.agent_attempts). Agent-only: a fallback dispatch's
+  // PLAN step is always 'script' (handled by the pending_fallback branch
+  // above, mutually exclusive with this one), and a plain script step never
+  // reaches here as 'agent' either.
+  const pendingRetryAttempt = (state.agent_attempts ?? {})[step.step_id] ?? 0;
+  if (
+    state.phase === 'await-step' &&
+    (step.type ?? 'agent') === 'agent' &&
+    pendingRetryAttempt > 0 &&
+    state.current_path != null &&
+    samePath(step.path, state.current_path)
+  ) {
+    state.current_step_id = step.step_id;
+    const actionStep = makeActionStep(state, step, state.index, null);
+    actionStep.retry = pendingRetryAttempt;
+    return { action: { action: 'run-step', concurrent: false, steps: [actionStep] }, state };
+  }
   return dispatchStep(state, step);
 }
 
@@ -1140,6 +1206,30 @@ function makeFallbackStep(
   return actionStep;
 }
 
+/** A2 agent-step retries (04-runner-crash-resume.md §retries.3): re-dispatch
+ *  the SAME agent step in a FRESH executor after a transient halt — a brand
+ *  new spawn (bumped state.index, its own iteration.started, in drive a NEW
+ *  pinned session), never a resume of the halted one. Consumes whatever
+ *  pending dispatch the just-arrived halted record described (pending_fallback
+ *  / active_child cleared — mirrors dispatchStep/dispatchFallback: a fresh
+ *  dispatch supersedes any stale marker). `attempt` (1-based, already written
+ *  to state.agent_attempts[step_id] by the caller) is tagged onto the
+ *  ActionStep for the additive `retry: n` event annotation. */
+function dispatchAgentRetry(state: NextState, step: PlanStep, attempt: number): NextResult {
+  state.index += 1;
+  state.current_step_id = step.step_id;
+  state.current_path = step.path;
+  state.phase = 'await-step';
+  state.pending_fallback = null;
+  state.active_child = null;
+  const actionStep = makeActionStep(state, step, state.index, null);
+  actionStep.retry = attempt;
+  return {
+    action: { action: 'run-step', concurrent: false, steps: [actionStep] },
+    state,
+  };
+}
+
 function dispatchLayer(plan: Plan, state: NextState, layerIndex: number, opts: NextOpts): NextResult {
   const layers = plan.layers ?? [];
   if (layerIndex >= layers.length) {
@@ -1223,8 +1313,16 @@ function redispatchPending(plan: Plan, state: NextState, opts: NextOpts): NextRe
       state,
     };
   }
+  const actionStep = makeActionStep(state, step, state.index, null);
+  // A2 agent-step retries: the "same pending dispatch" idiom applies to a
+  // retry-in-flight too — carry the `retry: n` tag through so a `continue`
+  // re-emit of a retry attempt (defense-in-depth; §7 continue targets script
+  // call-budget hand-offs, but this path is generic over step type) does not
+  // silently present as an untagged fresh dispatch.
+  const pendingRetryAttempt = (state.agent_attempts ?? {})[step.step_id] ?? 0;
+  if (pendingRetryAttempt > 0) actionStep.retry = pendingRetryAttempt;
   return {
-    action: { action: 'run-step', concurrent: false, steps: [makeActionStep(state, step, state.index, null)] },
+    action: { action: 'run-step', concurrent: false, steps: [actionStep] },
     state,
   };
 }
@@ -1296,6 +1394,11 @@ function synthesizeStep(
     script_spec: null,
     pipeline_spec: null,
     gate_spec: null,
+    // Off-plan steps carry no frontmatter read here (unlike model/effort,
+    // which resolve through the injected off-plan resolvers) — no retry
+    // budget, matching the pre-A2 halt-on-failure behavior (out of the v1
+    // scope: bounded retries apply to enumerated PlanSteps only).
+    retries: 0,
   };
 }
 
@@ -1321,6 +1424,40 @@ function onStepPhase(plan: Plan, state: NextState, record: NextRecord | null, op
     const step =
       findStepByPath(plan, state.current_path) ?? synthesizeStep(state.current_path, state, plan, opts);
     return dispatchFallback(state, step, opts.scriptFallback.failure_record);
+  }
+  // A2 agent-step retries (04-runner-crash-resume.md §retries), sibling of
+  // the scriptFallback block above: a transiently-halted AGENT step
+  // re-dispatches in a fresh executor instead of halting the run, bounded by
+  // its `retries:` frontmatter (plan.ts PlanStep.retries, default 0 = zero
+  // behavior change for every pipeline without the key). Gated on
+  // `record.outcome === 'halted'` only — blocked-delegating and
+  // depth-exhausted are NEVER retried (this branch structurally never
+  // matches either). Placed strictly BEFORE the halted fold below: an
+  // eligible retry returns here and never sets state.status='halted' / never
+  // reaches retroOrTerminal, so the intermediate halted record never feeds
+  // graph route counters/flags (§retries.4) — those are touched only by
+  // advance()'s routeNext call on a COMPLETED outcome, so the route sees
+  // only the FINAL outcome once the retry budget is exhausted or the step
+  // succeeds. `state.mode !== 'parallel'` excludes concurrent-layer members
+  // explicitly (defense-in-depth: their results arrive as a single
+  // {kind:'layer'} record via onLayerRecord below in the normal case, never
+  // reaching here at all).
+  if (
+    record &&
+    record.kind === 'step' &&
+    record.outcome === 'halted' &&
+    state.mode !== 'parallel' &&
+    state.current_step_id !== null &&
+    state.current_path !== null
+  ) {
+    const step =
+      findStepByPath(plan, state.current_path) ?? synthesizeStep(state.current_path, state, plan, opts);
+    const budget = step.retries ?? 0;
+    const attempts = (state.agent_attempts ?? {})[state.current_step_id] ?? 0;
+    if (budget > 0 && attempts < budget) {
+      (state.agent_attempts ??= {})[state.current_step_id] = attempts + 1;
+      return dispatchAgentRetry(state, step, attempts + 1);
+    }
   }
   if (record && record.kind === 'layer') return onLayerRecord(plan, state, record, opts);
   if (!record || record.kind !== 'step') return wrongRecord(plan, state, opts, 'step/layer', 'await-step', record);

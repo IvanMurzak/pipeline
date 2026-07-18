@@ -79,6 +79,19 @@ export interface PlanStep {
    *  lib/gate.ts) — null on non-gate steps. `required_role` is non-null on an
    *  error-free plan. */
   gate_spec: GateStepSpec | null;
+  /**
+   * Bounded-retry budget for AGENT steps (A2 — 04-runner-crash-resume.md
+   * §retries): parsed from the SAME `retries:` frontmatter key/vocabulary as
+   * the script-step field (script_spec.retries), but a wholly separate
+   * consumption mechanism — a transiently-halted agent step re-dispatches in
+   * a fresh executor (lib/next.ts NextState.agent_attempts), bounded by this
+   * value, instead of halting the run. Default 0 — zero behavior change for
+   * every pipeline without an explicit `retries:` key. Meaningful on agent
+   * steps only; always 0 on script/pipeline/gate steps (each has its own
+   * execution-knob story — a script step's own budget lives in
+   * `script_spec.retries`). Sequential steps only in v1 (see next.ts).
+   */
+  retries: number;
 }
 
 export interface Plan {
@@ -1080,6 +1093,12 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
     kind: 'script' | 'pipeline' | 'gate';
     params: Record<string, ScriptParamSpec> | null;
   }[] = [];
+  // step_id → {rel, body} for the 08.5 parallel needs-input lint below (C2),
+  // which needs every step's body AFTER `layers` is computed (mode/layers are
+  // only final once the whole enumeration pass finishes) — kept for every
+  // step (not just boundSteps' script/pipeline/gate kinds) since the lint
+  // targets agent steps, the ones actually capable of calling needs-input.
+  const stepBodyById = new Map<string, { rel: string; body: string }>();
   // Declared-name lookup for the D5(c) surface sweep (variableDecls is final
   // here — the manifest was parsed above).
   const declaredVarNames = new Set(variableDecls.map((d) => d.name));
@@ -1101,6 +1120,7 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
     const stem = basename(file).replace(/\.md$/, '');
     const stepId =
       typeof fields.step_id === 'string' && fields.step_id.trim() ? fields.step_id.trim() : stem;
+    stepBodyById.set(stepId, { rel, body });
     const dependsRaw = fields['depends-on'];
     const dependsOn = Array.isArray(dependsRaw)
       ? dependsRaw
@@ -1163,9 +1183,15 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
     let scriptSpec: ScriptStepSpec | null = null;
     let pipelineSpec: PipelineStepSpec | null = null;
     let gateSpec: GateStepSpec | null = null;
+    let agentRetries = 0;
     if (stepType === 'agent') {
       // Script-only frontmatter on an agent step is ignored (§2.1) — warn.
-      const ignored = ['script', 'command', 'timeout', 'retries', 'on-failure'].filter(
+      // `retries:` is the ONE exception (A2 — 04-runner-crash-resume.md
+      // §retries): agent steps carry their own bounded-retry budget, parsed
+      // below with the exact same vocabulary as the script-step field, so it
+      // is deliberately excluded from this ignored-list (unlike `on-failure`,
+      // which stays script-only per the design's explicit scope).
+      const ignored = ['script', 'command', 'timeout', 'on-failure'].filter(
         (k) => fields[k] !== undefined,
       );
       if (ignored.length)
@@ -1177,6 +1203,20 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
         warnings.push(
           `steps/${rel}: 'pipeline:' ignored on an agent step (add 'type: pipeline' to compose another pipeline)`,
         );
+
+      // A2 agent-step retries — same parse as the script-step field below
+      // (§2.1), lifted onto agent PlanSteps. Default 0 = zero behavior
+      // change for every pipeline without the key (never retried, byte-
+      // identical halt behavior). Sequential-only in v1: a step that lands
+      // in a parallel layer may still declare `retries:` (harmless parse),
+      // but lib/next.ts structurally never consults it for layer members —
+      // their results arrive as a single {kind:'layer'} record, never
+      // through the per-step retry decision seam.
+      if (fields.retries !== undefined) {
+        const n = Array.isArray(fields.retries) ? NaN : Number(fields.retries.trim());
+        if (Number.isInteger(n) && n >= 0) agentRetries = n;
+        else warnings.push(`steps/${rel}: invalid retries '${String(fields.retries)}' — using 0`);
+      }
     } else if (stepType === 'pipeline') {
       // T3-09 composition — `type: pipeline` references ANOTHER pipeline to
       // run as a nested child. Script-only execution knobs are meaningless
@@ -1355,6 +1395,7 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
       script_spec: scriptSpec,
       pipeline_spec: pipelineSpec,
       gate_spec: gateSpec,
+      retries: agentRetries,
     });
 
     // Design-time lints (non-fatal, warnings only).
@@ -1436,6 +1477,28 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
     const result = buildLayers(steps);
     layers = result.layers;
     errors.push(...result.errors);
+
+    // 08.5 parallel needs-input lint (C2), companion to the pipeline-designer
+    // "parallel steps must be self-contained" authoring rule: EVERY layer
+    // dispatch — even a singleton layer — goes out with `concurrent: true`
+    // (dispatchLayer, lib/next.ts) and lands on the headless executor with
+    // `allowInput:false` (commands/drive.ts execStep), so a needs-input
+    // question from ANY parallel-layer member halts the run with no way to
+    // answer it — not just genuinely-concurrent (>1 member) layers. Design
+    // time only (no runtime change): warn per member whose iteration body
+    // mentions the phrasing, heuristically (case-insensitive `needs-input`
+    // substring — the same vocabulary as the RECORD_OUTCOMES value and the
+    // designer doc's authoring rule).
+    for (const layer of layers) {
+      for (const id of layer) {
+        const entry = stepBodyById.get(id);
+        if (entry && /needs-input/i.test(entry.body)) {
+          warnings.push(
+            `steps/${entry.rel}: parallel-layer member mentions 'needs-input' — a step placed in a parallel layer must be self-contained (pipeline-designer Authoring Principle 12); the runtime halts an unattended run on a needs-input question raised from inside a parallel layer`,
+          );
+        }
+      }
+    }
   }
 
   // 5. Optional routing graph (Variant A) — parsed + validated from a

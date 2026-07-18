@@ -1678,3 +1678,262 @@ test('vars: 07 P2 source gate — the engine and run-vars libs never read proces
   expect(calls.length).toBe(1);
   expect(nextSrc).toContain('initRunVariables(plan.variables, a.cliVars ?? {}, process.env');
 });
+
+// --- A2 agent-step retries (b4, 04-runner-crash-resume.md §retries) --------
+
+/** Sequential: 01-build (agent) → 02-flaky (agent, `retries: N`) → 03-ship
+ *  (agent). Mirrors scaffoldSequential's shape so plain steps stay untouched. */
+function scaffoldAgentRetrySeq(retries: number): string {
+  const root = mkdtempSync(join(tmpdir(), 'next-agent-retry-seq-'));
+  created.push(root);
+  writeFileSync(join(root, 'PIPELINE.md'), '# P\n\n## End State\nx\n');
+  const steps = join(root, 'steps');
+  mkdirSync(steps, { recursive: true });
+  writeFileSync(join(steps, '01-build.md'), '# build\n');
+  writeFileSync(join(steps, '02-flaky.md'), `---\nstep_id: flaky\nretries: ${retries}\n---\n# flaky\n`);
+  writeFileSync(join(steps, '03-ship.md'), '# ship\n');
+  return root;
+}
+
+/** Graph mode: implement (agent, `retries: N`) → review → package, with a
+ *  bounded needs_fix loop back to implement — the SAME shape as
+ *  scaffoldGraph/BOUNDED_RETRY, so the graph's own loop-back budget can be
+ *  proven independent of implement's agent-retry budget. */
+function scaffoldAgentRetryGraph(retries: number): string {
+  const root = mkdtempSync(join(tmpdir(), 'next-agent-retry-graph-'));
+  created.push(root);
+  writeFileSync(
+    join(root, 'PIPELINE.md'),
+    `# P\n\n## End State\nx\n\n## Graph\n\n\`\`\`json\n${JSON.stringify(BOUNDED_RETRY)}\n\`\`\`\n`,
+  );
+  const steps = join(root, 'steps');
+  mkdirSync(steps, { recursive: true });
+  writeFileSync(join(steps, '01-implement.md'), `---\nstep_id: implement\nretries: ${retries}\n---\n# implement\n`);
+  writeFileSync(join(steps, '02-review.md'), '---\nstep_id: review\n---\n# review\n');
+  writeFileSync(join(steps, '03-package.md'), '---\nstep_id: package\n---\n# package\n');
+  return root;
+}
+
+/** Parallel DAG: [setup] → [x (agent, `retries: 2`), y] → [z]. Proves a
+ *  concurrent-layer member's `retries:` is structurally never consulted. */
+function scaffoldAgentRetryParallel(): string {
+  const root = mkdtempSync(join(tmpdir(), 'next-agent-retry-par-'));
+  created.push(root);
+  writeFileSync(join(root, 'PIPELINE.md'), '---\nexecution: parallel\nisolation: manual\n---\n# P\n\n## End State\nx\n');
+  const steps = join(root, 'steps');
+  mkdirSync(steps, { recursive: true });
+  writeFileSync(join(steps, '01-setup.md'), '---\nstep_id: setup\n---\n# setup\n');
+  writeFileSync(join(steps, '02-x.md'), '---\nstep_id: x\ndepends-on: [setup]\nretries: 2\n---\n# x\n');
+  writeFileSync(join(steps, '03-y.md'), '---\nstep_id: y\ndepends-on: [setup]\n---\n# y\n');
+  return root;
+}
+
+test('A2 retries: a transient halt re-dispatches the SAME step in a fresh executor, tagged retry:1', () => {
+  const plan = computePlan(scaffoldAgentRetrySeq(2));
+  expect(plan.errors).toEqual([]);
+  const flaky = plan.steps.find((s) => s.step_id === 'flaky')!;
+  expect(flaky.retries).toBe(2);
+  const d = driver(plan);
+  d.call(null); // 01-build (index 1)
+  let a = d.call({ kind: 'step', outcome: 'completed', next_iteration: flaky.path }); // dispatch flaky (index 2)
+  if (a.action !== 'run-step') throw 0;
+  expect(a.steps[0].step_id).toBe('flaky');
+  expect(a.steps[0].index).toBe(2);
+  expect(a.steps[0].retry).toBeUndefined(); // first attempt: untagged
+
+  // Transient halt → retried in a FRESH executor (bumped index), the run
+  // never halts.
+  a = d.call({ kind: 'step', outcome: 'halted', halt_reason: 'transient blip' });
+  if (a.action !== 'run-step') throw 0;
+  expect(a.steps[0].step_id).toBe('flaky');
+  expect(a.steps[0].path).toBe(flaky.path);
+  expect(a.steps[0].type).toBe('agent');
+  expect(a.steps[0].index).toBe(3); // FRESH spawn — bumped
+  expect(a.steps[0].retry).toBe(1);
+  expect(d.state!.agent_attempts).toEqual({ flaky: 1 });
+  expect(d.state!.status).toBe(null);
+
+  // The retry attempt succeeds — the chain advances exactly as if the FIRST
+  // attempt had succeeded.
+  a = d.call({ kind: 'step', outcome: 'completed', next_iteration: plan.steps[2].path });
+  if (a.action !== 'run-step') throw 0;
+  expect(a.steps[0].step_id).toBe('03-ship');
+  expect(a.steps[0].index).toBe(4);
+});
+
+test('A2 retries: budget exhaustion halts the run on the attempt that exceeds it', () => {
+  const plan = computePlan(scaffoldAgentRetrySeq(1)); // budget 1 → exactly one retry allowed
+  const flaky = plan.steps.find((s) => s.step_id === 'flaky')!;
+  const d = driver(plan);
+  d.call(null);
+  let a = d.call({ kind: 'step', outcome: 'completed', next_iteration: flaky.path }); // index 2
+  if (a.action !== 'run-step') throw 0;
+
+  a = d.call({ kind: 'step', outcome: 'halted', halt_reason: 'first failure' });
+  if (a.action !== 'run-step') throw 0;
+  expect(a.steps[0].retry).toBe(1); // the ONE retry the budget allows
+  expect(d.state!.agent_attempts).toEqual({ flaky: 1 });
+
+  // Second halt: the budget (1) is already spent → the run actually halts.
+  a = d.call({ kind: 'step', outcome: 'halted', halt_reason: 'second failure' });
+  expect(a.action).toBe('halt');
+  if (a.action !== 'halt') throw 0;
+  expect(a.reason).toBe('second failure');
+  expect(d.state!.status).toBe('halted');
+  expect(d.state!.agent_attempts).toEqual({ flaky: 1 }); // never bumped past budget
+});
+
+test('A2 retries: no retries: frontmatter ⇒ default 0 — halts on the first failure exactly like today (zero behavior change)', () => {
+  const plan = computePlan(scaffoldSequential(2));
+  expect(plan.steps[0].retries).toBe(0);
+  const d = driver(plan);
+  d.call(null);
+  const a = d.call({ kind: 'step', outcome: 'halted', halt_reason: 'boom' });
+  expect(a.action).toBe('halt');
+  if (a.action !== 'halt') throw 0;
+  expect(a.reason).toBe('boom');
+  expect(d.state!.agent_attempts).toEqual({});
+});
+
+test('A2 retries: blocked-delegating and depth-exhausted are NEVER retried, even with budget available', () => {
+  const plan = computePlan(scaffoldAgentRetrySeq(3));
+  const flaky = plan.steps.find((s) => s.step_id === 'flaky')!;
+
+  let d = driver(plan);
+  d.call(null);
+  d.call({ kind: 'step', outcome: 'completed', next_iteration: flaky.path });
+  let a = d.call({ kind: 'step', outcome: 'blocked-delegating' });
+  expect(a.action).toBe('blocked');
+  expect(d.state!.status).toBe('blocked-delegating');
+  expect(d.state!.agent_attempts).toEqual({});
+
+  d = driver(plan);
+  d.call(null);
+  d.call({ kind: 'step', outcome: 'completed', next_iteration: flaky.path });
+  a = d.call({ kind: 'step', outcome: 'depth-exhausted', halt_reason: 'Agent tool unavailable (depth ceiling)' });
+  expect(a.action).toBe('halt');
+  if (a.action !== 'halt') throw 0;
+  expect(d.state!.status).toBe('depth-exhausted');
+  expect(d.state!.agent_attempts).toEqual({});
+});
+
+test('A2 retries: a concurrent-layer member with retries: is NEVER retried — the halted layer record halts the run', () => {
+  const plan = computePlan(scaffoldAgentRetryParallel());
+  const x = plan.steps.find((s) => s.step_id === 'x')!;
+  expect(x.retries).toBe(2); // parses even inside a parallel layer (harmless — never consulted)
+  const d = driver(plan);
+  d.call(null); // [setup]
+  d.call({ kind: 'layer', results: [{ step_id: 'setup', outcome: 'completed' }] }); // → [x, y]
+  const a = d.call({
+    kind: 'layer',
+    results: [
+      { step_id: 'x', outcome: 'halted', halt_reason: 'x transient blip' },
+      { step_id: 'y', outcome: 'completed' },
+    ],
+  });
+  expect(a.action).toBe('halt'); // NOT retried — straight to halt
+  if (a.action !== 'halt') throw 0;
+  expect(a.reason).toBe('x transient blip');
+  expect(d.state!.agent_attempts).toEqual({}); // the retry seam is never reached for layer members
+});
+
+test('A2 retries: intermediate halted attempts never feed graph route counters — only the FINAL outcome routes', () => {
+  const plan = computePlan(scaffoldAgentRetryGraph(2));
+  const d = driver(plan);
+  const stepId = (a: NextAction) => (a.action === 'run-step' ? a.steps[0].step_id : a.action);
+
+  expect(stepId(d.call(null, { start: plan.steps[0].path }))).toBe('implement'); // index 1
+  expect(d.state!.route).toEqual({ counters: {}, transitions: 0 });
+
+  // Two transient halts, both retried within budget — the run never halts,
+  // and routeNext/state.route is never touched by them (advance() is only
+  // ever reached for a COMPLETED outcome).
+  let a = d.call({ kind: 'step', outcome: 'halted', halt_reason: 'blip 1' });
+  if (a.action !== 'run-step') throw 0;
+  expect(a.steps[0].retry).toBe(1);
+  expect(d.state!.route).toEqual({ counters: {}, transitions: 0 });
+
+  a = d.call({ kind: 'step', outcome: 'halted', halt_reason: 'blip 2' });
+  if (a.action !== 'run-step') throw 0;
+  expect(a.steps[0].retry).toBe(2);
+  expect(d.state!.route).toEqual({ counters: {}, transitions: 0 }); // STILL untouched
+
+  // The third (final, within-budget) attempt succeeds — the graph routes for
+  // the FIRST time, exactly once — identical to an un-retried completed
+  // dispatch (transitions === 1, no leftover counters from the two halts).
+  expect(stepId(d.call({ kind: 'step', outcome: 'completed', flags: {} }))).toBe('review');
+  expect(d.state!.route).toEqual({ counters: {}, transitions: 1 });
+
+  // The graph's OWN bounded loop-back budget (review→implement, max: 3) is
+  // completely unaffected by implement's earlier agent-retries.
+  expect(stepId(d.call({ kind: 'step', outcome: 'completed', flags: { changes_needed: true } }))).toBe('implement');
+  expect(d.state!.route.counters['review#0']).toBe(1);
+  expect(d.state!.route.transitions).toBe(2);
+});
+
+test('A2 retries: crash-resume mid-retry re-emits the SAME retry dispatch (same index, retry tag preserved)', () => {
+  const plan = computePlan(scaffoldAgentRetrySeq(2));
+  const flaky = plan.steps.find((s) => s.step_id === 'flaky')!;
+
+  let r = computeNext(plan, null, null, { feedbackCount: 0 }); // 01-build (index 1)
+  r = computeNext(
+    plan,
+    r.state,
+    { kind: 'step', outcome: 'completed', next_iteration: flaky.path },
+    { feedbackCount: 0 },
+  ); // flaky, first attempt (index 2)
+  r = computeNext(
+    plan,
+    r.state,
+    { kind: 'step', outcome: 'halted', halt_reason: 'transient blip' },
+    { feedbackCount: 0 },
+  ); // retried in a fresh executor (index 3, retry:1)
+  expect(r.action.action).toBe('run-step');
+  if (r.action.action !== 'run-step') throw 0;
+  expect(r.action.steps[0].index).toBe(3);
+  expect(r.action.steps[0].retry).toBe(1);
+
+  // The manager/executor crashes BEFORE the retry attempt reports anything.
+  // Simulate persistence (next.json write) + a fresh-context --resume re-entry
+  // off the reloaded state.
+  let state = JSON.parse(JSON.stringify(r.state)) as NextState;
+  r = computeNext(plan, state, null, { feedbackCount: 0, resume: true });
+  expect(r.action.action).toBe('run-step');
+  if (r.action.action !== 'run-step') throw 0;
+  expect(r.action.steps[0].step_id).toBe('flaky');
+  expect(r.action.steps[0].path).toBe(flaky.path);
+  expect(r.action.steps[0].index).toBe(3); // SAME pending dispatch — no extra bump
+  expect(r.action.steps[0].retry).toBe(1); // the tag survives the crash-resume
+  expect(r.state.agent_attempts).toEqual({ flaky: 1 }); // untouched by the resume itself
+
+  // A second crash re-emits again, identically.
+  state = JSON.parse(JSON.stringify(r.state)) as NextState;
+  r = computeNext(plan, state, null, { feedbackCount: 0, resume: true });
+  expect(r.action.action).toBe('run-step');
+  if (r.action.action !== 'run-step') throw 0;
+  expect(r.action.steps[0].index).toBe(3);
+  expect(r.action.steps[0].retry).toBe(1);
+  expect(r.state.agent_attempts).toEqual({ flaky: 1 });
+
+  // The retry attempt finally reports success — the chain advances normally.
+  r = computeNext(
+    plan,
+    r.state,
+    { kind: 'step', outcome: 'completed', next_iteration: plan.steps[2].path },
+    { feedbackCount: 0 },
+  );
+  expect(r.action.action).toBe('run-step');
+  if (r.action.action !== 'run-step') throw 0;
+  expect(r.action.steps[0].step_id).toBe('03-ship');
+  expect(r.action.steps[0].index).toBe(4);
+});
+
+test('A2 retries: a legacy next.json WITHOUT agent_attempts loads fine (normalized to {}, byte-identical halt behavior)', () => {
+  const plan = computePlan(scaffoldSequential(1));
+  let r = computeNext(plan, null, null, { feedbackCount: 0 });
+  const legacy = JSON.parse(JSON.stringify(r.state)) as NextState;
+  delete (legacy as Partial<NextState>).agent_attempts;
+  r = computeNext(plan, legacy, { kind: 'step', outcome: 'halted', halt_reason: 'boom' }, { feedbackCount: 0 });
+  expect(r.action.action).toBe('halt');
+  expect(r.state.agent_attempts).toEqual({}); // normalized on load
+});

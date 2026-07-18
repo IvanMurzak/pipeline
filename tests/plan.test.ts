@@ -183,6 +183,63 @@ test('parallel + external degrades to manual with a warning', () => {
   ).toBe(true);
 });
 
+// ---------------------------------------------------------------------------
+// 08.5 — parallel needs-input lint (C2), companion to the pipeline-designer
+// "parallel steps must be self-contained" authoring rule (Principle 12).
+// ---------------------------------------------------------------------------
+
+test('08.5 lint: a parallel-layer member whose body mentions needs-input warns; a sequential pipeline never checks at all', () => {
+  const plan = computePlan(
+    scaffold('---\nexecution: parallel\n---\n', {
+      '01-setup.md': '---\nstep_id: setup\n---\n# setup\n',
+      '02-x.md':
+        '---\nstep_id: x\ndepends-on: [setup]\n---\n# x\n\nIf unsure, call needs-input to ask the user.\n',
+      '03-y.md': '---\nstep_id: y\ndepends-on: [setup]\n---\n# y\nNothing interactive here.\n',
+    }),
+  );
+  expect(plan.errors).toEqual([]);
+  expect(plan.layers).toEqual([['setup'], ['x', 'y']]);
+  expect(
+    plan.warnings.some(
+      (w) => w.includes('steps/02-x.md') && w.includes("parallel-layer member mentions 'needs-input'"),
+    ),
+  ).toBe(true);
+  // The clean layer-mate and the root (also a layer member) are never flagged.
+  expect(plan.warnings.some((w) => w.includes('steps/03-y.md'))).toBe(false);
+  expect(plan.warnings.some((w) => w.includes('steps/01-setup.md'))).toBe(false);
+
+  // A SEQUENTIAL pipeline with the identical body text is never linted — the
+  // rule only exists because concurrent dispatch (allowInput:false) makes
+  // needs-input unanswerable; sequential steps have no such restriction.
+  const seq = computePlan(
+    scaffold(null, { '01-x.md': '# x\n\nIf unsure, call needs-input to ask the user.\n' }),
+  );
+  expect(seq.warnings).toEqual([]);
+});
+
+test('08.5 lint: fires even on a SINGLETON layer (every layer dispatch is concurrent:true, allowInput:false)', () => {
+  const plan = computePlan(
+    scaffold('---\nexecution: parallel\n---\n', {
+      '01-solo.md': '---\nstep_id: solo\n---\n# solo\n\nMight call needs-input here.\n',
+    }),
+  );
+  expect(plan.layers).toEqual([['solo']]);
+  expect(
+    plan.warnings.some(
+      (w) => w.includes('steps/01-solo.md') && w.includes("parallel-layer member mentions 'needs-input'"),
+    ),
+  ).toBe(true);
+});
+
+test('08.5 lint: the heuristic is case-insensitive and body-only (frontmatter mentions do not count)', () => {
+  const plan = computePlan(
+    scaffold('---\nexecution: parallel\n---\n', {
+      '01-a.md': '---\nstep_id: a\n---\n# a\n\nNEEDS-INPUT in caps still matches.\n',
+    }),
+  );
+  expect(plan.warnings.some((w) => w.includes('steps/01-a.md'))).toBe(true);
+});
+
 test('submodules: inline list and block list parse to the same array', () => {
   const inline = computePlan(
     scaffold('---\nisolation: external\nsubmodules: [AI-Game-Dev-App, Unity-MCP]\n---\n', {

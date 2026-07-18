@@ -232,7 +232,7 @@ test('model/effort/permission-mode on a script step warn and resolve to null (no
   ]);
 });
 
-test('script-only frontmatter on an agent step warns and is ignored; its ## Params block is not parsed', () => {
+test('script-only frontmatter on an agent step warns and is ignored; retries: is the ONE exception (A2); its ## Params block is not parsed', () => {
   const content =
     '---\nscript: scripts/a.py\ntimeout: 60\nretries: 3\non-failure: agent\n---\n# A\n\n## Params\n\n' +
     jsonBlock({ p: { type: 'wtf', value: 1, from: '${steps.ghost.output.x}' } }) +
@@ -240,10 +240,14 @@ test('script-only frontmatter on an agent step warns and is ignored; its ## Para
   const plan = computePlan(scaffold(null, { '01-a.md': content }));
   expect(plan.steps[0].type).toBe('agent');
   expect(plan.steps[0].script_spec).toBeNull();
+  // retries: is honored on agent steps too (A2 — bounded agent-step retries,
+  // lib/next.ts NextState.agent_attempts) — the one script-only field NOT
+  // ignored here, unlike script/timeout/on-failure.
+  expect(plan.steps[0].retries).toBe(3);
   // The malformed Params vocabulary is script-step machinery — not parsed here.
   expect(plan.errors).toEqual([]);
   expect(plan.warnings).toEqual([
-    "steps/01-a.md: script-step field(s) script, timeout, retries, on-failure ignored on an agent step (add 'type: script' to use them)",
+    "steps/01-a.md: script-step field(s) script, timeout, on-failure ignored on an agent step (add 'type: script' to use them)",
   ]);
 });
 
@@ -270,6 +274,49 @@ test('invalid timeout/retries/on-failure warn and fall back to defaults (600s / 
   expect(plan.warnings.some((w) => w.includes("invalid retries '-1'"))).toBe(true);
   expect(plan.warnings.some((w) => w.includes("unknown on-failure 'retry'"))).toBe(true);
   expect(plan.errors).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// Agent-step retries (A2 — bounded agent-step retries, lib/next.ts
+// NextState.agent_attempts). PlanStep.retries lifted onto agent steps from the
+// SAME `retries:` frontmatter key/parse as the script-step field above.
+// ---------------------------------------------------------------------------
+
+test('agent-step retries: retries: on a plain agent step parses onto PlanStep.retries, zero warnings', () => {
+  const plan = computePlan(scaffold(null, { '01-a.md': '---\nstep_id: a\nretries: 3\n---\n# A\n' }));
+  expect(plan.errors).toEqual([]);
+  expect(plan.warnings).toEqual([]);
+  expect(plan.steps[0].type).toBe('agent');
+  expect(plan.steps[0].retries).toBe(3);
+});
+
+test('agent-step retries: default 0 when the key is absent — zero behavior change', () => {
+  const plan = computePlan(scaffold(null, { '01-a.md': '---\nstep_id: a\n---\n# A\n' }));
+  expect(plan.errors).toEqual([]);
+  expect(plan.warnings).toEqual([]);
+  expect(plan.steps[0].retries).toBe(0);
+});
+
+test('agent-step retries: invalid value warns and falls back to 0', () => {
+  const plan = computePlan(scaffold(null, { '01-a.md': '---\nstep_id: a\nretries: nope\n---\n# A\n' }));
+  expect(plan.steps[0].retries).toBe(0);
+  expect(plan.warnings).toEqual(["steps/01-a.md: invalid retries 'nope' — using 0"]);
+  expect(plan.errors).toEqual([]);
+});
+
+test('agent-step retries: retries: on a type: pipeline or type: gate step is NOT honored (script-only-field idiom stays; agent is the one exception)', () => {
+  const plan = computePlan(
+    scaffold(null, {
+      '01-gate.md': '---\ntype: gate\nrequired_role: owner\nretries: 2\n---\n# Gate\n\n## Message\nApprove?\n',
+    }),
+  );
+  // A gate step never spawns an agent — retries stays 0 (no agent_attempts
+  // consumption is possible for it), and the field is still flagged ignored
+  // like every other script-only key on a gate.
+  expect(plan.steps[0].retries).toBe(0);
+  expect(plan.warnings).toEqual([
+    "steps/01-gate.md: script-step field(s) retries ignored on a type: gate step (a gate executes nothing — it awaits an approval decision)",
+  ]);
 });
 
 // ---------------------------------------------------------------------------

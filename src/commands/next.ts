@@ -679,6 +679,9 @@ function emitStartedEvents(action: NextAction, runId: string): void {
       // the same way.
       if (step.type === 'script' || step.type === 'pipeline' || step.type === 'gate')
         argv.push(kv('step_type', step.type));
+      // Additive A2 tag (04 §retries.6): present ONLY on a retry re-dispatch,
+      // the 1-based attempt number engine-set on ActionStep.retry.
+      if (step.retry !== undefined) argv.push(kv('retry', step.retry));
       // step_id ONLY on a concurrent layer (v4 rule) — sequential/graph events
       // omit it so older folds keep the consecutive-window behavior.
       if (action.concurrent === true) argv.push(kv('step_id', step.step_id));
