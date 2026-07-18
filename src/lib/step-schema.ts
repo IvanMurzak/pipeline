@@ -36,6 +36,11 @@ export const STEP_RECORD_SCHEMA = {
     next_iteration: { type: ['string', 'null'] },
     halt_reason: { type: ['string', 'null'] },
     has_improvement_brief: { type: 'boolean' },
+    // Tier-1 self-improvement: the VERBATIM improvement brief (the record-FILE
+    // protocol in step-executor.md already carries it). Present here so the
+    // headless structured-output path carries it too — `pipeline drive` hands
+    // it to its improver session; the engine itself never reads it.
+    improvement_brief: { type: ['string', 'null'] },
     // Graph-mode routing flags (lib/graph.ts routes on these).
     flags: { type: ['object', 'null'] },
     // Parallel-worktree steps: the branch/worktree the step committed to.

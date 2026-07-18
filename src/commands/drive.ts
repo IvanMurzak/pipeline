@@ -42,10 +42,39 @@
 //                         other merge failure, detail-prefixed "merge failed
 //                         (non-conflict):" — records conflict:true and the run
 //                         halts, enumerating the still-unmerged branches.
-//   run-improver /      → v1 SKIPS self-improvement: records applied:false /
-//   run-script-creator    outcome:'refused' and logs a warning.
-//   retrospective       → records done:true; the feedback folder is left in
-//                         place for a manual improver pass.
+//   run-improver /      → headless self-improvement (design 05.2), gated by
+//   run-script-creator    PIPELINE_DRIVE_SELF_IMPROVE (ships OFF by default
+//   retrospective         this release; `0`/unset restores the v1 skip
+//                         byte-identically). When ON: pinned headless
+//                         pipeline-improver / pipeline-script-creator sessions
+//                         through the SAME session + crash-resume machinery as
+//                         steps (session files sessions/improver-<n>.json /
+//                         script-<n>.json, shared MAX_CRASH_RESUMES budget,
+//                         usage folded into usage.json; templates overridable
+//                         via PIPELINE_DRIVE_IMPROVER_CMD /
+//                         PIPELINE_DRIVE_SCRIPT_CREATOR_CMD; requires claude
+//                         >= 2.1.205 for reliable --json-schema structured
+//                         output — a success envelope WITHOUT structured
+//                         output takes a conservative applied:false/'refused'
+//                         fallback with a warning). The retrospective is
+//                         performed MECHANICALLY by drive itself: partition
+//                         .feedback/<run-id>/*.md by frontmatter `category`
+//                         (doc-actionable → ONE batch improver session +
+//                         sequential script-creators; human-only → one-line
+//                         summaries in the final JSON), emit the retro-internal
+//                         improver.*/script_creator.* events plus
+//                         run.retrospective / improvement.applied (paths +
+//                         summaries ONLY — never file content), and delete the
+//                         feedback folder on success — never on
+//                         blocked/awaiting parks (which exit before the
+//                         retrospective can ever fire; manager parity, 01§3.4).
+//                         When improvements were applied but NO finalize hook
+//                         landed them, the final JSON carries
+//                         preserve_workspace:true (05 §Cloud interplay).
+//                         When OFF: v1 skip — records applied:false /
+//                         outcome:'refused' / done:true with a warning; the
+//                         feedback folder is left in place for a manual
+//                         improver pass.
 //   done / halt / blocked → final JSON on stdout; exit 0 / 1 / 3.
 //
 // The executor spawn goes through an injectable ExecutorRunner seam. The
@@ -89,7 +118,7 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { frozenVariablesError, invokeNext } from './next';
 import { addVarFlag, loadVarsFile, mergeCliVars } from '../lib/run-vars';
@@ -102,6 +131,13 @@ import {
   stepRecordSchemaJson,
   type StepQuestion,
 } from '../lib/step-schema';
+import {
+  improverSchemaJson,
+  parseImproverOutput,
+  parseScriptCreatorOutput,
+  scriptCreatorSchemaJson,
+} from '../lib/improver-schema';
+import { emitEvent } from '../lib/event';
 
 // Re-exported for record consumers that historically imported from here.
 export { extractQuestion, type StepQuestion };
@@ -125,6 +161,10 @@ export type { StepSession };
 
 export interface ExecutorRequest {
   step_id: string;
+  /** Session type: 'step' (absent = step, the historical default) |
+   *  'improver' | 'script-creator' — lets an injected runner distinguish
+   *  self-improvement spawns without parsing the prompt. */
+  kind?: 'step' | 'improver' | 'script-creator';
   /** The full step-executor spawn prompt (delivered on stdin by the default runner). */
   prompt: string;
   /** The step's resolved model, or null (inherit). */
@@ -160,6 +200,12 @@ export type ExecutorRunner = (req: ExecutorRequest) => Promise<ExecutorExit>;
 
 export interface DriveDeps {
   executor?: ExecutorRunner;
+  /** Self-improvement session runners (05.2): default is the subprocess
+   *  runner with DEFAULT_IMPROVER_TEMPLATE / DEFAULT_SCRIPT_CREATOR_TEMPLATE
+   *  (env-overridable) + the lib/improver-schema.ts schemas. Injectable for
+   *  tests — the fakes see kind:'improver' / 'script-creator' requests. */
+  improver?: ExecutorRunner;
+  scriptCreator?: ExecutorRunner;
   git?: GitRunner;
   /** stdout sink (the final JSON only). */
   out?: (s: string) => void;
@@ -488,6 +534,179 @@ finish anything incomplete, and report as usual: write your step record to
 step_record_file and end with the step-record object as your final response.
 If the iteration's work was already complete before the interruption, just
 verify and report.
+`;
+}
+
+// ---------------------------------------------------------------------------
+// Headless self-improvement (design 05.2, P3) — templates, gate, prompts
+// ---------------------------------------------------------------------------
+
+/** The P3 rollout gate (05.2.4, owner decision Q3): headless self-improvement
+ *  ships OFF by default this release. Enabled only when
+ *  PIPELINE_DRIVE_SELF_IMPROVE is set to something other than
+ *  ''/'0'/'false'/'off'/'no'; `=0` (or unset) restores the v1 skip sites
+ *  byte-identically. */
+export function selfImproveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = env.PIPELINE_DRIVE_SELF_IMPROVE;
+  if (v === undefined) return false;
+  const t = v.trim().toLowerCase();
+  return t !== '' && t !== '0' && t !== 'false' && t !== 'off' && t !== 'no';
+}
+
+/** Default improver command (05.2.1). No {model}/{effort} tokens: the
+ *  pipeline-improver agent definition pins Opus + max effort itself (a
+ *  per-spawn model would downgrade it — manager parity). acceptEdits because a
+ *  headless session cannot answer permission prompts and the improver's blast
+ *  radius is the pipeline tree. The WHOLE template is overridable via
+ *  PIPELINE_DRIVE_IMPROVER_CMD. Requires claude >= 2.1.205 for reliable
+ *  --json-schema structured output (older versions silently produce
+ *  unstructured output — drive falls back to applied:false with a warning). */
+export const DEFAULT_IMPROVER_TEMPLATE =
+  'claude -p --agent pipeline:pipeline-improver --permission-mode acceptEdits --session-id {session} --output-format json --json-schema {schema}';
+
+/** Default script-creator command — the improver template's twin
+ *  (PIPELINE_DRIVE_SCRIPT_CREATOR_CMD overrides). */
+export const DEFAULT_SCRIPT_CREATOR_TEMPLATE =
+  'claude -p --agent pipeline:pipeline-script-creator --permission-mode acceptEdits --session-id {session} --output-format json --json-schema {schema}';
+
+/** Feedback categories the retrospective feeds to the batch improver: the
+ *  three general doc-actionable categories plus 'script-failure' (written only
+ *  in the script-failure fallback; DOC-ACTIONABLE like doc-flaw —
+ *  step-executor.md "File shape", pipeline-improver.md batch-mode contract). */
+export const DOC_ACTIONABLE_CATEGORIES: ReadonlySet<string> = new Set([
+  'doc-flaw',
+  'ambiguity',
+  'script-candidate',
+  'script-failure',
+]);
+
+/** HUMAN-ONLY feedback categories — summarized for the human in the final
+ *  JSON, NEVER auto-improved (manager parity). */
+export const HUMAN_ONLY_CATEGORIES: ReadonlySet<string> = new Set(['project-issue', 'env', 'friction']);
+
+/** One-line summary of a feedback problem file: the first non-empty,
+ *  non-heading body line, truncated. This single line (plus the file PATH) is
+ *  all that ever leaves the file — events and the final JSON never carry file
+ *  content (privacy tier, 07). */
+export function feedbackSummaryLine(raw: string): string {
+  for (const line of parseFrontmatter(raw).body.split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith('#') || t.startsWith('---')) continue;
+    return t.length > 200 ? t.slice(0, 200) + '…' : t;
+  }
+  return '(empty problem file)';
+}
+
+const IMPROVER_HEADLESS_NOTE = `
+You are running headless: your session was started with a JSON schema, and your
+FINAL response is parsed as your improver record. End with exactly one JSON
+object {"applied": true|false, "script_creation_briefs": [...], "summary":
+"<one line>"|null}: applied=false when you refuse; script_creation_briefs is
+the (possibly empty) LIST of confirmed script-extraction briefs, each entry the
+self-contained brief text; prose belongs in "summary".
+`;
+
+const SCRIPT_CREATOR_HEADLESS_NOTE = `
+You are running headless: your session was started with a JSON schema, and your
+FINAL response is parsed as your script-creator record. End with exactly one
+JSON object {"outcome": "created"|"updated"|"converted"|"repaired"|"refused",
+"script_path": "<abs>"|null, "summary": "<one line>"|null} — the same outcome
+your Script Creator Final Report states, verbatim; script_path null on refusal.
+`;
+
+/** Tier-1 improver spawn prompt: the step's verbatim improvement brief plus
+ *  the manager-documented source-iteration line (the executor may have read a
+ *  rendered copy, so brief paths can point there — the improver edits the
+ *  SOURCE; on a worktree-scoped run that source is the run worktree's copy). */
+export function buildImproverPrompt(
+  iterationPath: string,
+  brief: string,
+  runId: string,
+  pipelineRootAbs: string,
+): string {
+  return `Tier-1 improvement pass for a pipeline iteration.
+
+run_id = ${runId}
+pipeline_root = ${pipelineRootAbs}
+Source iteration file: ${iterationPath}
+
+Apply the improvement brief below per your single-brief (Tier-1) protocol. The
+file to edit is the Source iteration file above (paths inside the brief may
+point at a rendered per-run copy — always edit the source). Read the current
+file state first; never re-apply an already-present fix. You make the final
+call; refuse a bad or ambiguous brief.
+
+${brief}
+${IMPROVER_HEADLESS_NOTE}`;
+}
+
+/** Retrospective (batch) improver spawn prompt — the manager-documented shape
+ *  (pipeline-manager.md "End-of-run Retrospective" step 3) plus the headless
+ *  structured-output note. */
+export function buildRetroImproverPrompt(
+  pipelineRootAbs: string,
+  feedbackDir: string,
+  runId: string,
+  lintWarnings: string[],
+): string {
+  let prompt = `Retrospective (batch) improvement pass for a completed pipeline run.
+
+run_id = ${runId}
+pipeline_root = ${pipelineRootAbs}
+Feedback folder: ${feedbackDir}
+Pipeline root:   ${pipelineRootAbs}
+
+Operate in batch / retrospective mode (see your "Batch / retrospective mode"
+section): read the doc-actionable problem files (categories doc-flaw /
+ambiguity / script-candidate / script-failure) in the feedback folder,
+consolidate and dedup them, then apply surgical doc fixes to the iteration
+files / PIPELINE.md. ALWAYS read the current file state first — Tier-1 may
+already have landed some of these fixes between steps; never re-apply an
+already-present fix. For any script-candidate you confirm is a clean,
+deterministic, judgment-free extraction, include it as one entry in your
+script_creation_briefs list. You make the final call; refuse a bad or
+ambiguous extraction. Ignore human-only files (project-issue / env /
+friction) — they are summarized for the human elsewhere.
+`;
+  if (lintWarnings.length > 0) {
+    prompt += `
+LOW-PRIORITY compaction items from the design-time lint — address
+opportunistically after the doc fixes, per your "Token-budget
+counter-pressure" rules; skip any that cannot be resolved safely:
+${lintWarnings.map((w) => `- ${w}`).join('\n')}
+`;
+  }
+  return prompt + IMPROVER_HEADLESS_NOTE;
+}
+
+/** Script-creator spawn prompt: ONE brief verbatim (manager parity) plus the
+ *  headless structured-output note. */
+export function buildScriptCreatorPrompt(
+  brief: string,
+  number: number,
+  of: number,
+  runId: string,
+  pipelineRootAbs: string,
+): string {
+  return `Script-creation brief ${number} of ${of} from a pipeline improver pass.
+
+run_id = ${runId}
+pipeline_root = ${pipelineRootAbs}
+
+${brief}
+${SCRIPT_CREATOR_HEADLESS_NOTE}`;
+}
+
+/** The crash-resume prompt for an interrupted improver/script-creator session
+ *  (buildCrashResumePrompt's self-improvement twin — the transcript survived
+ *  on disk, so the session verifies and finishes instead of re-deriving). */
+export function buildSelfImproveCrashPrompt(kind: 'improver' | 'script-creator'): string {
+  return `Your ${kind} session was interrupted before a structured result was produced.
+
+Re-verify the current state of your work (files you edited, any script you
+created), finish anything incomplete, and report as originally instructed: end
+with exactly the one JSON object your session's schema requires. If the work
+was already complete before the interruption, just verify and report.
 `;
 }
 
@@ -855,6 +1074,428 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     statsEnrichTokensForRun(rootAbs, runId, tokens, fold?.failures);
   };
 
+  // ---------------------------------------------------------------------------
+  // Headless self-improvement (design 05.2, P3) — run-scoped machinery
+  // ---------------------------------------------------------------------------
+
+  const selfImprove = selfImproveEnabled();
+  const improverRunner =
+    deps.improver ??
+    subprocessExecutor(process.env.PIPELINE_DRIVE_IMPROVER_CMD ?? DEFAULT_IMPROVER_TEMPLATE, improverSchemaJson(), err);
+  const scriptCreatorRunner =
+    deps.scriptCreator ??
+    subprocessExecutor(
+      process.env.PIPELINE_DRIVE_SCRIPT_CREATOR_CMD ?? DEFAULT_SCRIPT_CREATOR_TEMPLATE,
+      scriptCreatorSchemaJson(),
+      err,
+    );
+
+  /** Worktree-scoped runs (P2/b3): the execution pipeline root invokeNext
+   *  surfaces as out.worktree_pipeline_root — the run's pipeline tree, where
+   *  step prompts point the Tier-2 feedback journal, where improver/script
+   *  sessions operate, and where the retrospective reads/deletes feedback.
+   *  Null on unscoped runs (rootAbs applies). */
+  let worktreePipelineRoot: string | null = null;
+  /** True once the run's finalize hook reported ok — the improvements' landing
+   *  path (05 §Cloud interplay). */
+  let finalizeLandedOk = false;
+  /** True once any improver applied doc fixes or a script-creator produced a
+   *  script — drives improvement.applied + the preserve-workspace cue. */
+  let improvementsApplied = false;
+  /** The mechanical retrospective's summary for the terminal JSON. */
+  let retrospectiveSummary: Record<string, unknown> | null = null;
+  /** The CURRENT Tier-1 improver's script_creation_briefs — the following
+   *  run-script-creator actions index into it (1-based action.number). */
+  let scriptBriefs: string[] = [];
+
+  /** Tier-1 improvement briefs captured from completed step records (the
+   *  structured-output/record-file `improvement_brief` field), keyed by the
+   *  step's dispatch and source paths — the engine's run-improver action
+   *  addresses its target by iteration_path. */
+  const pendingBriefs = new Map<string, { step_id: string; brief: string }>();
+  const noteBrief = (step: ActionStep, raw: Record<string, unknown> | null): void => {
+    if (!selfImprove || raw === null || raw.has_improvement_brief !== true) return;
+    if (typeof raw.improvement_brief !== 'string' || raw.improvement_brief.trim() === '') return;
+    const entry = { step_id: step.step_id, brief: raw.improvement_brief };
+    for (const p of [step.path, step.source_path]) {
+      if (typeof p === 'string' && p) pendingBriefs.set(resolve(p), entry);
+    }
+  };
+  const takeBrief = (iterationPath: string): string | null => {
+    const hit = pendingBriefs.get(resolve(iterationPath));
+    const chosen =
+      hit ??
+      // Path-mapping last resort (a scoped+rendered dispatch path can differ
+      // from the engine's plan path): when every pending entry belongs to ONE
+      // step, it is this improver's step.
+      (new Set([...pendingBriefs.values()].map((v) => v.step_id)).size === 1
+        ? pendingBriefs.values().next().value
+        : undefined);
+    if (chosen === undefined) return null;
+    for (const [k, v] of pendingBriefs) if (v.step_id === chosen.step_id) pendingBriefs.delete(k);
+    return chosen.brief;
+  };
+
+  // The current improver's briefs also persist to disk so a drive process that
+  // dies between the improver record and its script-creator spawns can still
+  // serve the engine's run-script-creator actions after re-entry.
+  const briefsFile = join(rootAbs, '.runtime', runId, 'script-briefs.json');
+  const persistScriptBriefs = (briefs: string[]): void => {
+    try {
+      writeFileSync(briefsFile, JSON.stringify({ briefs }), 'utf8');
+    } catch {
+      // best-effort
+    }
+  };
+  const loadScriptBriefs = (): string[] => {
+    try {
+      const v = JSON.parse(readFileSync(briefsFile, 'utf8')) as { briefs?: unknown };
+      return Array.isArray(v.briefs) ? v.briefs.filter((b): b is string => typeof b === 'string') : [];
+    } catch {
+      return [];
+    }
+  };
+
+  // Best-effort UI-event emission for what invokeNext cannot see: the
+  // retrospective-internal `improver.` / `script_creator.` events (manager
+  // parity — the whole retrospective is ONE engine action) and the new
+  // run.retrospective / improvement.applied events (07). Payloads carry paths
+  // + one-line summaries ONLY — never file content.
+  const safeEmit = (eventType: string, fields: Record<string, unknown>): void => {
+    try {
+      emitEvent(
+        eventType,
+        Object.entries(fields).map(([k, v]) => `${k}=${v === null || v === undefined ? 'null' : String(v)}`),
+      );
+    } catch {
+      // best-effort — never affect the run
+    }
+  };
+  const noteImprovementApplied = (fields: Record<string, unknown>): void => {
+    improvementsApplied = true;
+    safeEmit('improvement.applied', { run_id: runId, ...fields });
+  };
+
+  /** Claim the session key for the next improver/script-creator session
+   *  (`sessions/<prefix>-<n>.json`). A session file left 'running' by a died
+   *  drive process is RECLAIMED (crash-resume — same machinery as steps);
+   *  otherwise max+1 mints a fresh key. */
+  const claimSelfImproveKey = (prefix: 'improver' | 'script'): { key: string; prior: StepSession | null } => {
+    let max = 0;
+    const re = new RegExp(`^${prefix}-(\\d+)\\.json$`);
+    try {
+      for (const name of readdirSync(sessionsDir)) {
+        const m = re.exec(name);
+        if (!m) continue;
+        const n = Number(m[1]);
+        if (n > max) max = n;
+        const s = readStepSession(sessionsDir, `${prefix}-${m[1]}`);
+        if (s !== null && s.status === 'running') return { key: `${prefix}-${m[1]}`, prior: s };
+      }
+    } catch {
+      // fresh key below
+    }
+    return { key: `${prefix}-${max + 1}`, prior: null };
+  };
+
+  interface SelfImproveSession {
+    structured: Record<string, unknown> | null;
+    /** 'structured' — the harness-validated object; 'no-structured-output' — a
+     *  SUCCESSFUL envelope without structured output (pre-v2.1.205 claude or a
+     *  custom template): version-tolerance fallback, not a crash;
+     *  'failed' — no successful envelope within the crash-resume budget (or no
+     *  fresh prompt was available). */
+    source: 'structured' | 'no-structured-output' | 'failed';
+    detail: string | null;
+  }
+
+  /** Spawn ONE pinned headless improver/script-creator session and return its
+   *  structured output. Same machinery as steps: UUID pinned + persisted
+   *  BEFORE the spawn, crash-resume of an attempt that produced no successful
+   *  envelope SHARING the step budget (MAX_CRASH_RESUMES per session), and
+   *  envelope usage/cost folded into usage.json + the terminal stats
+   *  enrichment (the session files live in the same sessions dir the
+   *  transcript fold walks). `freshPrompt` is a thunk so a crash-RESUMED
+   *  session (whose transcript already carries the original prompt) never
+   *  needs it — it may return null to signal "cannot fresh-spawn" (e.g. the
+   *  improvement brief was captured by a previous, died drive process).
+   *  Failures never halt the chain — the caller records the conservative
+   *  fallback and continues (05.2 failure modes). */
+  const runSelfImproveSession = async (
+    runner: ExecutorRunner,
+    kind: 'improver' | 'script-creator',
+    prefix: 'improver' | 'script',
+    freshPrompt: () => string | null,
+  ): Promise<SelfImproveSession> => {
+    const { key, prior } = claimSelfImproveKey(prefix);
+    const recordFile = recordPath(key);
+    let sess: StepSession;
+    let prompt: string;
+    let resume: boolean;
+    if (prior !== null && prior.crashes < MAX_CRASH_RESUMES) {
+      // A previous drive died mid-session — resume the surviving transcript.
+      sess = { ...prior, crashes: prior.crashes + 1 };
+      prompt = buildSelfImproveCrashPrompt(kind);
+      resume = true;
+      progress(`${kind}.crash_resume`, {
+        session: key,
+        attempt: sess.crashes,
+        detail: 'previous drive process died mid-session; resuming the surviving session',
+      });
+    } else {
+      const p = freshPrompt();
+      if (p === null) {
+        return {
+          structured: null,
+          source: 'failed',
+          detail: 'no spawn prompt available (the brief was not captured in this process and no session survives to resume)',
+        };
+      }
+      sess = {
+        session_id: randomUUID(),
+        status: 'running',
+        spawn_cwd: process.cwd(),
+        ...(prior !== null
+          ? { previous_session_ids: [prior.session_id, ...(prior.previous_session_ids ?? [])] }
+          : {}),
+        questions: [],
+        crashes: 0,
+      };
+      prompt = p;
+      resume = false;
+    }
+    writeStepSession(sessionsDir, key, sess);
+    progress(`${kind}.session_started`, { session: key, session_id: sess.session_id, ...(resume ? { resumed: true } : {}) });
+    for (;;) {
+      rmSync(recordFile, { force: true });
+      const exit = await runner({
+        step_id: key,
+        kind,
+        prompt,
+        model: null,
+        effort: null,
+        record_file: recordFile,
+        session: { id: sess.session_id, resume },
+        permission_mode: null,
+      });
+      const envelope = typeof exit.stdout === 'string' ? parseEnvelope(exit.stdout) : null;
+      noteUsage(envelope);
+      if (!detectedLimit && envelope) {
+        const limit = detectProviderLimit(envelope);
+        if (limit) detectedLimit = limit;
+      }
+      const structured = envelope?.structured_output ?? null;
+      if (structured !== null) {
+        sess.status = 'done';
+        writeStepSession(sessionsDir, key, sess);
+        try {
+          writeFileSync(recordFile, JSON.stringify(structured), 'utf8');
+        } catch {
+          // best-effort observability copy — the in-memory object is authoritative
+        }
+        return { structured, source: 'structured', detail: null };
+      }
+      if (envelope !== null && !envelope.is_error) {
+        // Version tolerance (05.2 review B): a SUCCESS envelope without
+        // structured output (claude < 2.1.205, or a custom template without
+        // --json-schema). A resume cannot fix this — fall back conservatively.
+        sess.status = 'done';
+        writeStepSession(sessionsDir, key, sess);
+        return {
+          structured: null,
+          source: 'no-structured-output',
+          detail:
+            'session succeeded but produced no structured output — claude >= 2.1.205 (and --json-schema in the template) is required for reliable headless self-improvement',
+        };
+      }
+      const why = envelope?.is_error
+        ? `claude error: ${envelope.subtype ?? 'unknown'}`
+        : exit.code === null
+          ? `spawn failed: ${exit.error ?? 'unknown'}`
+          : `no result envelope (exit ${exit.code})`;
+      if (sess.crashes >= MAX_CRASH_RESUMES) {
+        sess.status = 'done';
+        writeStepSession(sessionsDir, key, sess);
+        return { structured: null, source: 'failed', detail: why };
+      }
+      sess.crashes++;
+      writeStepSession(sessionsDir, key, sess);
+      progress(`${kind}.crash_resume`, { session: key, attempt: sess.crashes, detail: why });
+      prompt = buildSelfImproveCrashPrompt(kind);
+      resume = true;
+    }
+  };
+
+  /** The MECHANICAL end-of-run retrospective (05.2.3) — drive performs the
+   *  manager's documented procedure deterministically: partition
+   *  .feedback/<run-id>/*.md by frontmatter `category`, ONE batch improver
+   *  session for the doc-actionable set, sequential script-creators for its
+   *  briefs, human-only one-line summaries into the returned summary (the
+   *  final JSON's `retrospective` field) + a run.retrospective event. The
+   *  feedback folder is DELETED on success and KEPT when the improver session
+   *  failed outright (its input would be lost unprocessed); blocked/awaiting
+   *  parks exit before this action can ever fire, so their feedback always
+   *  survives (manager parity, 01§3.4). Unparseable/unknown-category files
+   *  are counted as skipped and surfaced — never a halt. */
+  const runRetrospective = async (lintWarnings: string[]): Promise<Record<string, unknown>> => {
+    const retroRoot = worktreePipelineRoot ?? rootAbs;
+    const feedbackDir = join(retroRoot, '.feedback', runId);
+    const docActionable: { path: string; category: string }[] = [];
+    const humanOnly: { category: string; path: string; summary: string }[] = [];
+    let skipped = 0;
+    let names: string[] = [];
+    try {
+      names = readdirSync(feedbackDir)
+        .filter((n) => n.endsWith('.md'))
+        .sort();
+    } catch {
+      // missing/unreadable folder — nothing to partition
+    }
+    for (const name of names) {
+      const p = join(feedbackDir, name);
+      try {
+        const raw = readFileSync(p, 'utf8');
+        const category = String(parseFrontmatter(raw).fields.category ?? '').trim();
+        if (DOC_ACTIONABLE_CATEGORIES.has(category)) docActionable.push({ path: p, category });
+        else if (HUMAN_ONLY_CATEGORIES.has(category)) humanOnly.push({ category, path: p, summary: feedbackSummaryLine(raw) });
+        else skipped++;
+      } catch {
+        skipped++;
+      }
+    }
+    progress('retrospective.started', {
+      feedback_dir: feedbackDir,
+      doc_actionable: docActionable.length,
+      human_only: humanOnly.length,
+      skipped,
+    });
+
+    let improverApplied = false;
+    let improverSummary: string | null = null;
+    let improverFailed = false;
+    const scripts: { outcome: string; script_path: string | null }[] = [];
+    if (docActionable.length > 0) {
+      // Retro-internal events are the CALLER's to emit — the whole
+      // retrospective is one engine action, invisible to the auto-emitter.
+      safeEmit('improver.started', { run_id: runId, iteration_path: retroRoot });
+      const res = await runSelfImproveSession(improverRunner, 'improver', 'improver', () =>
+        buildRetroImproverPrompt(retroRoot, feedbackDir, runId, lintWarnings),
+      );
+      if (res.source !== 'structured') {
+        progress('warning', { detail: `retrospective improver pass not applied: ${res.detail}` });
+      }
+      improverFailed = res.source === 'failed';
+      const parsed = parseImproverOutput(res.structured);
+      improverApplied = parsed.applied;
+      improverSummary = parsed.summary;
+      safeEmit('improver.completed', {
+        run_id: runId,
+        iteration_path: retroRoot,
+        applied: parsed.applied,
+        has_script_brief: parsed.script_creation_briefs.length > 0,
+      });
+      if (parsed.applied) {
+        noteImprovementApplied({
+          source: 'retrospective',
+          pipeline_root: retroRoot,
+          summary: parsed.summary,
+          script_briefs: parsed.script_creation_briefs.length,
+        });
+      }
+      // Script-creators are STRICTLY SEQUENTIAL — they edit shared docs.
+      for (let i = 0; i < parsed.script_creation_briefs.length; i++) {
+        safeEmit('script_creator.started', { run_id: runId, iteration_path: retroRoot });
+        const sres = await runSelfImproveSession(scriptCreatorRunner, 'script-creator', 'script', () =>
+          buildScriptCreatorPrompt(parsed.script_creation_briefs[i], i + 1, parsed.script_creation_briefs.length, runId, retroRoot),
+        );
+        if (sres.source !== 'structured') {
+          progress('warning', {
+            detail: `retrospective script-creator ${i + 1}/${parsed.script_creation_briefs.length} refused: ${sres.detail}`,
+          });
+        }
+        const sparsed = parseScriptCreatorOutput(sres.structured);
+        scripts.push({ outcome: sparsed.outcome, script_path: sparsed.script_path });
+        safeEmit('script_creator.completed', {
+          run_id: runId,
+          iteration_path: retroRoot,
+          script_path: sparsed.script_path,
+          outcome: sparsed.outcome,
+        });
+        if (sparsed.outcome !== 'refused') {
+          noteImprovementApplied({
+            source: 'script-creator',
+            pipeline_root: retroRoot,
+            script_path: sparsed.script_path,
+            outcome: sparsed.outcome,
+            summary: sparsed.summary,
+          });
+        }
+      }
+    }
+
+    let feedbackDeleted = false;
+    if (!improverFailed) {
+      try {
+        rmSync(feedbackDir, { recursive: true, force: true });
+        feedbackDeleted = true;
+      } catch (e) {
+        progress('warning', {
+          detail: `failed to delete processed feedback folder ${feedbackDir}: ${e instanceof Error ? e.message : String(e)}`,
+        });
+      }
+    } else {
+      progress('warning', {
+        detail: `feedback preserved at ${feedbackDir} — the retrospective improver session failed; re-run the improver manually`,
+      });
+    }
+
+    // run.retrospective (07): counts + paths + one-line summaries ONLY.
+    safeEmit('run.retrospective', {
+      run_id: runId,
+      pipeline_root: retroRoot,
+      doc_actionable: docActionable.length,
+      human_only: humanOnly.length,
+      skipped,
+      improver_applied: improverApplied,
+      scripts_created: scripts.filter((s) => s.outcome !== 'refused').length,
+      human_only_summaries: JSON.stringify(humanOnly),
+    });
+    progress('retrospective.completed', {
+      doc_actionable: docActionable.length,
+      human_only: humanOnly.length,
+      skipped,
+      improver_applied: improverApplied,
+      scripts: scripts.length,
+    });
+    return {
+      feedback_dir: feedbackDir,
+      doc_actionable: docActionable.length,
+      human_only: humanOnly,
+      skipped,
+      improver_applied: improverApplied,
+      ...(improverSummary !== null ? { improver_summary: improverSummary } : {}),
+      scripts,
+      feedback_deleted: feedbackDeleted,
+    };
+  };
+
+  /** Self-improvement extras for the terminal (done/halt) JSON: the mechanical
+   *  retrospective summary and — when improvements were applied but NO
+   *  finalize hook landed them (05 §Cloud interplay) — the preserve-workspace
+   *  cue, so an ephemeral (cloud job) checkout is not torn down with unshipped
+   *  improvements inside. */
+  const finalExtras = (): Record<string, unknown> => ({
+    ...(retrospectiveSummary !== null ? { retrospective: retrospectiveSummary } : {}),
+    ...(improvementsApplied ? { improvements_applied: true } : {}),
+    ...(improvementsApplied && !finalizeLandedOk
+      ? {
+          preserve_workspace: true,
+          preserve_workspace_reason:
+            'self-improvement was applied in this working tree but no finalize hook landed it — preserve the workspace or the improvements are lost',
+        }
+      : {}),
+  });
+
   /** A parked needs-input question, surfaced in the final awaiting-input JSON. */
   interface Awaiting {
     step_id: string;
@@ -886,7 +1527,13 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     // .feedback/<child_run_id>/, which drive creates lazily here (the parent's
     // was created at run start).
     const stepRunId = step.run_id ?? runId;
-    const stepRootAbs = step.pipeline_root ? resolve(step.pipeline_root) : rootAbs;
+    // Worktree-scoped runs (P2/b3): the run's pipeline tree is the WORKTREE
+    // copy — the spawn prompt's pipeline_root (and with it the Tier-2 feedback
+    // dir the executor journals into) derives from it, mirroring the manager
+    // contract, so the engine's worktree-scoped retrospective gate counts the
+    // files the executors actually wrote. Records/sessions/usage stay
+    // MAIN-rooted (run bookkeeping, D6).
+    const stepRootAbs = step.pipeline_root ? resolve(step.pipeline_root) : (worktreePipelineRoot ?? rootAbs);
     const stepKey = step.run_id ? `${step.run_id}-${step.step_id}` : step.step_id;
     const stepTaskFile = step.run_id ? taskFileFor(stepRootAbs, stepRunId) : taskFile;
     if (step.run_id) {
@@ -1152,11 +1799,18 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     if (res.out.provisioned) progress('worktree.provisioned', res.out.provisioned as Record<string, unknown>);
     if (res.out.finalized) progress('worktree.finalized', res.out.finalized as Record<string, unknown>);
     if (res.out.teardown) progress('worktree.teardown', res.out.teardown as Record<string, unknown>);
+    // Worktree-scoped runs (P2/b3): remember the execution pipeline root —
+    // step prompts, improver targets, and the retrospective all key on it.
+    if (typeof res.out.worktree_pipeline_root === 'string') worktreePipelineRoot = res.out.worktree_pipeline_root;
+    // A finalize hook that reported ok IS the improvements' landing path
+    // (05 §Cloud interplay) — the preserve-workspace cue keys on its absence.
+    if (res.out.finalized && (res.out.finalized as Record<string, unknown>).ok === true) finalizeLandedOk = true;
 
     switch (action.action) {
       case 'run-step': {
         if (action.concurrent) {
           const results = await Promise.all(action.steps.map((s) => execStep(s, { allowInput: false })));
+          results.forEach((r, i) => noteBrief(action.steps[i], r.raw));
           for (const r of results) {
             if (r.entry.outcome === 'blocked-delegating') blockerRecordFile = r.recordFile;
           }
@@ -1212,6 +1866,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
             );
           }
           const r = await execStep(action.steps[0], { allowInput: true });
+          noteBrief(action.steps[0], r.raw);
           if (r.awaiting !== undefined) {
             // Park the run WITHOUT feeding the engine: on re-entry it re-issues
             // this same step and drive resumes the pinned session with --answer.
@@ -1256,23 +1911,83 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         continue;
       }
       case 'run-improver': {
-        progress('warning', {
-          detail: `self-improvement skipped in headless v1 (improvement brief for ${action.iteration_path} not applied)`,
+        if (!selfImprove) {
+          // PIPELINE_DRIVE_SELF_IMPROVE off — the v1 skip, byte-identical.
+          progress('warning', {
+            detail: `self-improvement skipped in headless v1 (improvement brief for ${action.iteration_path} not applied)`,
+          });
+          record = { kind: 'improver', applied: false, script_briefs: 0 };
+          continue;
+        }
+        scriptBriefs = [];
+        persistScriptBriefs(scriptBriefs);
+        const res = await runSelfImproveSession(improverRunner, 'improver', 'improver', () => {
+          const brief = takeBrief(action.iteration_path);
+          return brief === null ? null : buildImproverPrompt(action.iteration_path, brief, runId, worktreePipelineRoot ?? rootAbs);
         });
-        record = { kind: 'improver', applied: false, script_briefs: 0 };
+        if (res.source !== 'structured') {
+          progress('warning', { detail: `improver pass for ${action.iteration_path} not applied: ${res.detail}` });
+        }
+        const parsed = parseImproverOutput(res.structured);
+        scriptBriefs = parsed.script_creation_briefs;
+        persistScriptBriefs(scriptBriefs);
+        if (parsed.applied) {
+          noteImprovementApplied({
+            source: 'tier1',
+            iteration_path: action.iteration_path,
+            summary: parsed.summary,
+            script_briefs: scriptBriefs.length,
+          });
+        }
+        // improver.started/completed events + stats lines are auto-emitted by
+        // invokeNext around this Tier-1 action/record — drive emits nothing.
+        record = { kind: 'improver', applied: parsed.applied, script_briefs: scriptBriefs.length };
         continue;
       }
       case 'run-script-creator': {
-        progress('warning', {
-          detail: `self-improvement skipped in headless v1 (script-creation brief ${action.number}/${action.of} refused)`,
+        if (!selfImprove) {
+          // PIPELINE_DRIVE_SELF_IMPROVE off — the v1 skip, byte-identical.
+          progress('warning', {
+            detail: `self-improvement skipped in headless v1 (script-creation brief ${action.number}/${action.of} refused)`,
+          });
+          record = { kind: 'script', outcome: 'refused', script_path: null };
+          continue;
+        }
+        if (scriptBriefs.length === 0) scriptBriefs = loadScriptBriefs(); // re-entry after a mid-queue crash
+        const res = await runSelfImproveSession(scriptCreatorRunner, 'script-creator', 'script', () => {
+          const brief = scriptBriefs[action.number - 1] ?? null;
+          return brief === null
+            ? null
+            : buildScriptCreatorPrompt(brief, action.number, action.of, runId, worktreePipelineRoot ?? rootAbs);
         });
-        record = { kind: 'script', outcome: 'refused', script_path: null };
+        if (res.source !== 'structured') {
+          progress('warning', { detail: `script-creator ${action.number}/${action.of} refused: ${res.detail}` });
+        }
+        const parsed = parseScriptCreatorOutput(res.structured);
+        if (parsed.outcome !== 'refused') {
+          noteImprovementApplied({
+            source: 'script-creator',
+            iteration_path: action.iteration_path,
+            script_path: parsed.script_path,
+            outcome: parsed.outcome,
+            summary: parsed.summary,
+          });
+        }
+        // The outcome is recorded VERBATIM (never re-mapped) — the engine and
+        // the auto-emitted script_creator.completed event key on it.
+        record = { kind: 'script', outcome: parsed.outcome, script_path: parsed.script_path };
         continue;
       }
       case 'retrospective': {
-        progress('warning', {
-          detail: `retrospective skipped in headless v1 — feedback left at ${join(rootAbs, '.feedback', runId)} for a manual improver pass`,
-        });
+        if (!selfImprove) {
+          // PIPELINE_DRIVE_SELF_IMPROVE off — the v1 skip, byte-identical.
+          progress('warning', {
+            detail: `retrospective skipped in headless v1 — feedback left at ${join(rootAbs, '.feedback', runId)} for a manual improver pass`,
+          });
+          record = { kind: 'retro', done: true };
+          continue;
+        }
+        retrospectiveSummary = await runRetrospective(action.lint_warnings ?? []);
         record = { kind: 'retro', done: true };
         continue;
       }
@@ -1292,7 +2007,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
       case 'done': {
         progress('run.completed', {});
         enrichStats(true);
-        return finalJson({ status: 'completed' }, 0);
+        return finalJson({ status: 'completed', ...finalExtras() }, 0);
       }
       case 'halt': {
         // Surface leaked layer worktrees in the final stderr summary (B2): on a
@@ -1310,6 +2025,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
             status: action.status,
             reason: action.reason,
             ...(detectedLimit ? { provider_limit: detectedLimit } : {}),
+            ...finalExtras(),
           },
           1,
         );

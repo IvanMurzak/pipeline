@@ -153,6 +153,11 @@ function drive(root: string, runId: string, extra: string[] = [], opts: { viaEnv
   delete env.PIPELINE_UI_PARENT_RUN_ID;
   delete env.CLAUDE_SESSION_ID;
   delete env.PIPELINE_DRIVE_EXECUTOR_CMD;
+  // Self-improvement stays on its shipped default (OFF) regardless of the
+  // developer machine's environment — the v1-skip tests depend on it.
+  delete env.PIPELINE_DRIVE_IMPROVER_CMD;
+  delete env.PIPELINE_DRIVE_SCRIPT_CREATOR_CMD;
+  delete env.PIPELINE_DRIVE_SELF_IMPROVE;
   env.USERPROFILE = root;
   env.HOME = root;
   const template = opts.template ?? `bun ${join(root, 'fake-executor.ts')}`;

@@ -19,6 +19,7 @@
 import type { Plan, PlanStep, Isolation } from './plan';
 import { routeNext, emptyRouteState, type RouteState } from './graph';
 import { ENGINE_OUTCOMES } from './step-schema';
+import type { ScriptCreatorOutcome } from './improver-schema';
 import type { StepType } from './script-types';
 import { resolve } from 'node:path';
 
@@ -466,9 +467,11 @@ export interface ScriptRecord {
   kind: 'script';
   /** pipeline-script-creator result vocabulary: 'created'/'updated' (extract
    *  mode), 'converted' (convert-step mode), 'repaired' (repair-script mode),
-   *  'refused'. The pure engine never keys on the value — onScriptPhase only
-   *  counts records; the command layer/stats interpret the outcome. */
-  outcome?: 'created' | 'updated' | 'converted' | 'repaired' | 'refused';
+   *  'refused'. Derived from lib/improver-schema.ts's SCRIPT_CREATOR_OUTCOMES
+   *  (the --json-schema headless sessions validate against it) so the two
+   *  cannot drift. The pure engine never keys on the value — onScriptPhase
+   *  only counts records; the command layer/stats interpret the outcome. */
+  outcome?: ScriptCreatorOutcome;
   /** Absolute path of the created/updated script (or null when refused). The
    *  manager reports it so the CLI can emit script_creator.completed. */
   script_path?: string | null;
