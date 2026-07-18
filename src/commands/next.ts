@@ -70,7 +70,9 @@
 // the same state. Exit code: 1 on a `halt` action, 0 otherwise.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
-import { join, isAbsolute, resolve, basename, dirname } from 'node:path';
+import { join, isAbsolute, resolve, basename, dirname, relative, sep } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { gitBin } from '../lib/git';
 import { computePlan, findEnclosingPipelineRoot, normalizeEffort, normalizeModel, type Plan, type PlanStep } from '../lib/plan';
 import { parseFrontmatter } from '../lib/frontmatter';
 import {
@@ -487,8 +489,13 @@ function emitCompletionEvents(
   record: NextRecord | null,
   runId: string,
   script?: ScriptTag,
+  mapPath: (p: string) => string = (p) => p,
 ): void {
   if (!prev || !record) return;
+  // Worktree-scoped runs (P2/b3): engine state carries WORKTREE paths (the
+  // whole plan is worktree-based); events/stats/UI receive the prefix-swapped
+  // MAIN author path via `mapPath` (identity on every other run — 05.1.3).
+  const mp = (p: string | null | undefined): string | null => (p == null ? null : mapPath(p));
   if (record.kind === 'step' && prev.phase === 'await-step') {
     const terminal =
       script?.terminal ??
@@ -497,7 +504,7 @@ function emitCompletionEvents(
         record.outcome === 'depth-exhausted');
     const argv = [
       kv('run_id', runId),
-      kv('iteration_path', prev.current_path),
+      kv('iteration_path', mp(prev.current_path)),
       kv('outcome', record.outcome),
       kv('next_iteration_path', record.next_iteration ?? null),
       kv('has_improvement_brief', record.has_improvement_brief === true),
@@ -514,7 +521,7 @@ function emitCompletionEvents(
       const step = plan.steps.find((s) => s.step_id === entry.step_id);
       const argv = [
         kv('run_id', runId),
-        kv('iteration_path', step?.path ?? null),
+        kv('iteration_path', mp(step?.path)),
         kv('outcome', entry.outcome),
         kv('has_improvement_brief', entry.has_improvement_brief === true),
         kv('halt_reason', entry.halt_reason ?? null),
@@ -529,7 +536,7 @@ function emitCompletionEvents(
   if (record.kind === 'improver' && prev.phase === 'await-improver') {
     safeEmit('improver.completed', [
       kv('run_id', runId),
-      kv('iteration_path', prev.improve_target),
+      kv('iteration_path', mp(prev.improve_target)),
       kv('applied', record.applied === true),
       kv('has_script_brief', (record.script_briefs ?? 0) > 0),
     ]);
@@ -538,7 +545,7 @@ function emitCompletionEvents(
   if (record.kind === 'script' && prev.phase === 'await-script') {
     safeEmit('script_creator.completed', [
       kv('run_id', runId),
-      kv('iteration_path', prev.improve_target),
+      kv('iteration_path', mp(prev.improve_target)),
       kv('script_path', record.script_path ?? null),
       kv('outcome', record.outcome ?? null),
     ]);
@@ -560,6 +567,7 @@ function statsNoteRecord(
   prev: NextState | null,
   record: NextRecord | null,
   script?: ScriptTag,
+  mapPath: (p: string) => string = (p) => p,
 ): void {
   if (!prev || !record) return;
   // step_type/failure_class tags mirror the event emitter (§12): set only for
@@ -577,7 +585,10 @@ function statsNoteRecord(
     // loses its wall-clock seconds.
     statsAppend(root, runId, {
       k: 'step.completed',
-      path: prev.current_path,
+      // Worktree-scoped runs (P2/b3): the state cursor is a WORKTREE path —
+      // swap back to the MAIN author path so .stats pairing/placement stays
+      // stable (identity on every other run).
+      path: prev.current_path === null ? null : mapPath(prev.current_path),
       step_id: prev.current_step_id ?? null,
       outcome: record.outcome,
       ...tag,
@@ -657,7 +668,11 @@ function statsNoteTerminal(root: string, runId: string, action: NextAction): voi
 /** Announce the outgoing action (just before printing it). Tier-1
  *  run-improver / run-script-creator only — the retrospective's internal
  *  improver/script spawns are invisible to the CLI and stay manager-emitted. */
-function emitStartedEvents(action: NextAction, runId: string): void {
+function emitStartedEvents(
+  action: NextAction,
+  runId: string,
+  mapPath: (p: string) => string = (p) => p,
+): void {
   if (action.action === 'run-step') {
     for (const step of action.steps) {
       const argv = [
@@ -690,11 +705,14 @@ function emitStartedEvents(action: NextAction, runId: string): void {
     return;
   }
   if (action.action === 'run-improver') {
-    safeEmit('improver.started', [kv('run_id', runId), kv('iteration_path', action.iteration_path)]);
+    // Worktree-scoped runs (P2/b3): the ACTION keeps the worktree target (the
+    // improver edits the run's working tree); the EVENT gets the prefix-swapped
+    // main path (identity on every other run — 05.1.3).
+    safeEmit('improver.started', [kv('run_id', runId), kv('iteration_path', mapPath(action.iteration_path))]);
     return;
   }
   if (action.action === 'run-script-creator') {
-    safeEmit('script_creator.started', [kv('run_id', runId), kv('iteration_path', action.iteration_path)]);
+    safeEmit('script_creator.started', [kv('run_id', runId), kv('iteration_path', mapPath(action.iteration_path))]);
   }
 }
 
@@ -985,6 +1003,102 @@ function execDestroyHook(
 }
 
 // ---------------------------------------------------------------------------
+// Worktree-scoped pipeline I/O (P2/b3 — fix-fundamental-issues 05.1; D3/D6/D14)
+//
+// For `isolation: external` runs the pipeline execution scope is the tree the
+// run works in: the run's plan is computed FROM the provisioned worktree's
+// pipeline copy (`computePlan(<worktree>/<pipeline-root-rel>)`), so dispatch
+// paths, ledger keys, `## Next` parsing, rendered copies, outputs, and
+// improver/script-creator targets are all worktree paths and self-improvement
+// edits ride the run's own finalize commit/PR instead of dirtying main (the
+// verified D3 flaw). Run BOOKKEEPING stays main-scoped (D6): next.json, the
+// events journal, `.stats`, liveness. Observability surfaces receive the
+// prefix-swapped MAIN author path via the `(worktree_prefix, main_prefix)`
+// pair frozen into next.json (05.1.3).
+//
+// Rollout flag: `PIPELINE_WORKTREE_SCOPED` (default ON; `0` restores the
+// legacy main-scoped reads byte-identically). The flag is FROZEN per-run into
+// next.json at init — a mid-run flip can never mix path models in one run.
+// Native-parallel and in-place isolation modes change NOTHING (rule table
+// 05.1); composed CHILD runs and `--manual-hooks` runs stay main-scoped.
+// ---------------------------------------------------------------------------
+
+/** The `PIPELINE_WORKTREE_SCOPED` rollout flag — default ON; only an explicit
+ *  0/false/off/no disables scoping. Read once per run at init (then frozen). */
+function worktreeScopedEnvOn(): boolean {
+  const v = (process.env.PIPELINE_WORKTREE_SCOPED ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'false' || v === 'off' || v === 'no');
+}
+
+/** Swap `p`'s `fromPrefix` for `toPrefix` (both directory prefixes, compared
+ *  with lib/next.ts samePath semantics — case-insensitive on win32). Returns
+ *  null when `p` does not live under `fromPrefix`. The suffix keeps its
+ *  original casing. */
+function swapPathPrefix(p: string, fromPrefix: string, toPrefix: string): string | null {
+  const norm = (s: string): string =>
+    process.platform === 'win32' ? s.replace(/\//g, '\\').toLowerCase() : s;
+  const rp = resolve(p);
+  const np = norm(rp);
+  const nf = norm(resolve(fromPrefix));
+  if (np === nf) return resolve(toPrefix);
+  const nfSep = nf.endsWith(sep) ? nf : nf + sep;
+  if (!np.startsWith(nfSep)) return null;
+  return join(resolve(toPrefix), rp.slice(nfSep.length));
+}
+
+/** Whether `child` lives under (or is) `parent` — the swapPathPrefix
+ *  containment test without the swap. */
+function isUnderPath(child: string, parent: string): boolean {
+  return swapPathPrefix(child, parent, parent) !== null;
+}
+
+/** D14 preflight: uncommitted changes in the MAIN tree's pipeline dir.
+ *  A worktree materializes COMMITTED state only, so a dirty pipeline dir means
+ *  the run will NOT see the operator's latest edits — a documented semantic
+ *  change vs the legacy main-scoped reads, surfaced loudly as a warning (the
+ *  run still proceeds on the committed state). Best-effort: any git failure
+ *  (not a repo, no git) returns null. */
+function dirtyPipelineDirWarning(projectRoot: string, mainPipelineRoot: string): string | null {
+  try {
+    const rel = relative(projectRoot, mainPipelineRoot);
+    if (rel.startsWith('..') || isAbsolute(rel)) return null;
+    const spec = rel === '' ? '.' : rel.split(sep).join('/');
+    const r = spawnSync(gitBin(), ['status', '--porcelain', '--', spec], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      timeout: 15_000,
+      windowsHide: true,
+    });
+    if (r.status !== 0 || typeof r.stdout !== 'string') return null;
+    const dirty = r.stdout.split('\n').filter((l) => l.trim() !== '').length;
+    if (dirty === 0) return null;
+    return (
+      `worktree-scoped run: the main tree's pipeline dir has ${dirty} uncommitted change(s) — ` +
+      'an external-isolation run executes the COMMITTED state only (the run worktree materializes ' +
+      'commits, D14). Commit pipeline edits before the run, or set PIPELINE_WORKTREE_SCOPED=0 ' +
+      'for the legacy main-scoped reads.'
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Idempotently write the run-artifact `.gitignore` stubs + the per-run
+ *  feedback dir in the WORKTREE pipeline tree (05.1.5): finalize must never
+ *  commit `.runtime/` (rendered/records/outputs/ledger) or `.feedback/`.
+ *  Throws on failure — a worktree whose stubs cannot be written must not run
+ *  (the finalize commit would swallow run artifacts). */
+function writeWorktreeArtifactStubs(wtPipelineRoot: string, runId: string): void {
+  for (const dir of ['.runtime', '.feedback']) {
+    const d = join(wtPipelineRoot, dir);
+    mkdirSync(d, { recursive: true });
+    const gi = join(d, '.gitignore');
+    if (!existsSync(gi)) writeFileSync(gi, '*\n', 'utf8');
+  }
+  mkdirSync(join(wtPipelineRoot, '.feedback', runId), { recursive: true });
+}
+
+// ---------------------------------------------------------------------------
 // In-process script-step execution (type: script — DESIGN.md §§5–10)
 // ---------------------------------------------------------------------------
 
@@ -1263,12 +1377,237 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   const prevState = loadState(a.root, a.runId);
   const modelOverrides = a.modelOverrides !== undefined ? a.modelOverrides : prevState?.model_overrides;
   const effortOverrides = a.effortOverrides !== undefined ? a.effortOverrides : prevState?.effort_overrides;
-  const plan = computePlan(a.root, {
+  const planOpts = {
     ...(a.defaultModel === undefined ? {} : { defaultModel: a.defaultModel }),
     ...(modelOverrides === undefined ? {} : { modelOverrides }),
     ...(a.defaultEffort === undefined ? {} : { defaultEffort: a.defaultEffort }),
     ...(effortOverrides === undefined ? {} : { effortOverrides }),
-  });
+  };
+  // The MAIN-tree plan: the run plan for every unscoped run, and the
+  // BOOTSTRAP plan (isolation/hooks/base-branch facts) for a worktree-scoped
+  // external run — whose RUN plan is computed from the worktree below.
+  const mainPlan = computePlan(a.root, planOpts);
+
+  // Finalize opt-in (external only, additive): the run runs the mandatory
+  // finalize stage when the pipeline opted in — via the PRESENCE of a
+  // `worktree-finalize.*` hook in the resolved hook dir OR a `finalize: true`
+  // frontmatter flag. Resolved from the MAIN tree (init-time facts — hooks
+  // are project infrastructure, provisioned before any worktree exists).
+  // Consumed once at init (persisted into state.finalize); inert on resume.
+  const finalizeHookDirAbs = isAbsolute(mainPlan.worktree_hook_dir)
+    ? mainPlan.worktree_hook_dir
+    : join(process.cwd(), mainPlan.worktree_hook_dir);
+  const finalizeOptIn =
+    mainPlan.isolation === 'external' &&
+    (mainPlan.finalize || resolveHookScript(finalizeHookDirAbs, 'worktree-finalize') !== null);
+
+  // -------------------------------------------------------------------------
+  // Worktree-scoped pipeline I/O (P2/b3 — 05.1; D3/D6/D14). Resolve the run's
+  // FROZEN path model: a state that carries `worktree_scoped` keeps it
+  // verbatim (mid-run env flips can never mix path models); a legacy
+  // in-flight external state freezes to false (main-scoped); a FRESH external
+  // run freezes from `PIPELINE_WORKTREE_SCOPED` (default ON) gated on
+  // eligibility. Non-external runs never gain the state key (rule table
+  // 05.1: native-parallel + in-place change NOTHING).
+  // -------------------------------------------------------------------------
+  const externalShape =
+    mainPlan.errors.length === 0 && mainPlan.isolation === 'external' && pickMode(mainPlan) !== 'parallel';
+  let scoped = false;
+  let scopeFreeze = false;
+  let wtPipelineRoot: string | null = null;
+  let mainPipelineRoot = rootAbs;
+  const scopeWarnings: string[] = [];
+  if (prevState !== null && typeof prevState.worktree_scoped === 'boolean') {
+    scoped = prevState.worktree_scoped;
+    scopeFreeze = true;
+    wtPipelineRoot =
+      typeof prevState.worktree_pipeline_root === 'string' ? resolve(prevState.worktree_pipeline_root) : null;
+    if (typeof prevState.main_pipeline_root === 'string') {
+      mainPipelineRoot = resolve(prevState.main_pipeline_root);
+    }
+  } else if (prevState !== null) {
+    // Legacy in-flight state (pre-b3): frozen LEGACY — an in-flight run must
+    // never switch path models. Stamp false so a later env flip stays inert.
+    scoped = false;
+    scopeFreeze = externalShape;
+  } else if (externalShape) {
+    const blockers: string[] = [];
+    if (a.manualHooks === true) blockers.push('--manual-hooks (worktree hooks are caller-actuated)');
+    else if (!isUnderPath(rootAbs, resolve(process.cwd()))) {
+      blockers.push('--root lies outside the project root (no worktree-relative pipeline path)');
+    } else if (composedDepthOf(rootAbs, a.runId) > 1) {
+      blockers.push('composed child runs stay main-scoped');
+    }
+    // `a.record == null`: a record on a STATE-LESS run is already an operator
+    // anomaly (the engine inits regardless) — freeze legacy rather than
+    // provisioning around an un-consumable record.
+    const eligible = blockers.length === 0 && mainPlan.steps.length > 0 && a.record == null;
+    const envOn = worktreeScopedEnvOn();
+    scoped = eligible && envOn;
+    scopeFreeze = true;
+    if (envOn && blockers.length > 0) {
+      const w = `worktree scoping disabled for this run: ${blockers.join('; ')} — running main-scoped`;
+      warnNote(w);
+      scopeWarnings.push(w);
+    }
+  }
+  /** 05.1.3 prefix-swap mapping: worktree → main (observability surfaces) and
+   *  main → worktree (--start/answer-resume round trips). Identity on
+   *  unscoped runs and on paths outside the pair. */
+  const toMainPath = (p: string): string =>
+    scoped && wtPipelineRoot !== null ? (swapPathPrefix(p, wtPipelineRoot, mainPipelineRoot) ?? p) : p;
+  const toWtPath = (p: string): string =>
+    scoped && wtPipelineRoot !== null ? (swapPathPrefix(p, mainPipelineRoot, wtPipelineRoot) ?? p) : p;
+  /** Stamp the frozen path-model trio onto a state about to be saved (the
+   *  model_overrides persistence pattern — called from stampRunFields and the
+   *  pre-provision parking below). */
+  const stampScope = (s: NextState): void => {
+    if (!scopeFreeze) return;
+    s.worktree_scoped = scoped;
+    if (scoped) {
+      s.worktree_pipeline_root = wtPipelineRoot;
+      s.main_pipeline_root = mainPipelineRoot;
+    }
+  };
+
+  /** Provision-at-init (05.1.1, scoped external runs): run the create hook
+   *  BEFORE plan computation, then compute the run plan AGAINST the worktree
+   *  pipeline copy — the run executes the BRANCH's definition. An invalid
+   *  worktree plan runs the destroy hook with outcome 'halted' (init-failure
+   *  teardown — an invalid plan never silently leaks a worktree). */
+  const preProvision = ():
+    | { kind: 'halt'; result: InvokeNextResult }
+    | { kind: 'feed'; plan: Plan; parkedState: NextState; record: WorktreeRecord; provisioned: ProvisionedInfo | null }
+    | { kind: 'passthrough' } => {
+    const projectRoot = process.cwd();
+    const baseOpts: NextOpts = {
+      start: a.start,
+      resume: a.resume === true || prevState !== null,
+      feedbackCount: 0,
+      runId: a.runId,
+      projectRoot,
+      pipelineRoot: a.root,
+      finalizeOptIn,
+      resolveOffPlanModel,
+      resolveOffPlanEffort,
+    };
+    const r1 = computeNext(mainPlan, prevState, null, baseOpts);
+    const provisionAction = r1.action;
+    if (provisionAction.action !== 'provision-worktree') {
+      // Defensive (external + steps>0 always provisions at init/resume):
+      // fall through to the generic flow on the main plan.
+      warnNote('worktree scoping: engine did not emit provision-worktree — dispatching main-scoped this call');
+      return { kind: 'passthrough' };
+    }
+    const parked = r1.state;
+    // Crash-safe parking BEFORE the hook (mirrors the in-process hook loop):
+    // a crash inside the hook re-enters here via the no-record auto-resume
+    // (phase await-provision, prefix still null) and the idempotent hook
+    // simply re-runs.
+    parked.model_overrides = mainPlan.model_overrides;
+    parked.effort_overrides = mainPlan.effort_overrides;
+    stampScope(parked);
+    saveState(a.root, a.runId, parked);
+    // D14 preflight (init only): a worktree materializes COMMITTED state —
+    // warn loudly when the main pipeline dir is dirty.
+    if (prevState === null) {
+      const dirty = dirtyPipelineDirWarning(projectRoot, rootAbs);
+      if (dirty !== null) {
+        warnNote(dirty);
+        scopeWarnings.push(dirty);
+      }
+    }
+    const hookDirAbs = isAbsolute(provisionAction.hook_dir)
+      ? provisionAction.hook_dir
+      : join(projectRoot, provisionAction.hook_dir);
+    const res = execCreateHook(provisionAction, hookDirAbs, projectRoot, rootAbs);
+    if (res.provisioned === null) {
+      // Failed create: best-effort cleanup, then let the generic flow consume
+      // the ok:false record against the main plan — the exact legacy halt
+      // path (worktree_provisioned stays false ⇒ no teardown).
+      execCreateFailedCleanup(provisionAction, hookDirAbs, projectRoot, rootAbs, res.failedWorktreePath);
+      return { kind: 'feed', plan: mainPlan, parkedState: parked, record: res.record, provisioned: null };
+    }
+    // The worktree mirrors the project tree, so the pipeline root keeps its
+    // project-relative path — the `(worktree_prefix, main_prefix)` pair.
+    const wtRoot = resolve(join(res.provisioned.worktree_path, relative(projectRoot, rootAbs)));
+    wtPipelineRoot = wtRoot;
+    let wtPlan: Plan | null = null;
+    let failReason: string | null = null;
+    try {
+      writeWorktreeArtifactStubs(wtRoot, a.runId);
+      wtPlan = computePlan(wtRoot, planOpts);
+      if (wtPlan.errors.length) failReason = `worktree pipeline plan errors: ${wtPlan.errors.join('; ')}`;
+    } catch (e) {
+      failReason = `worktree pipeline could not be prepared: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    if (failReason !== null) {
+      // Init-failure teardown: destroy hook with outcome 'halted' (the
+      // consumer's preserve-on-halt cue applies), state parked terminal.
+      parked.worktree_provisioned = true; // mirror onProvisionPhase bookkeeping
+      parked.worktree_path = res.provisioned.worktree_path;
+      if (res.provisioned.env_file != null) parked.worktree_env_file = res.provisioned.env_file;
+      const haltOpts: NextOpts = { resume: false, feedbackCount: 0, runId: a.runId, projectRoot, pipelineRoot: a.root };
+      const stamp = (s: NextState): void => {
+        s.model_overrides = mainPlan.model_overrides;
+        s.effort_overrides = mainPlan.effort_overrides;
+        stampScope(s);
+      };
+      const halted = executeForceHalt(mainPlan, parked, failReason, haltOpts, a, stamp);
+      const haltOut: Record<string, unknown> = {
+        action: 'halt',
+        status: 'halted',
+        reason: failReason,
+        mode: pickMode(mainPlan),
+        provisioned: res.provisioned,
+      };
+      if (wtPlan !== null && wtPlan.errors.length) haltOut.errors = wtPlan.errors;
+      if (halted.teardown) haltOut.teardown = halted.teardown;
+      return {
+        kind: 'halt',
+        result: { action: { action: 'halt', reason: failReason, status: 'halted' }, out: haltOut, code: 1, plan: mainPlan },
+      };
+    }
+    // Success: the run executes the WORKTREE's definition. Re-point the
+    // pinned start/resume cursor (a --start names the MAIN author path).
+    if (parked.current_path !== null) {
+      const swapped = swapPathPrefix(parked.current_path, mainPipelineRoot, wtRoot);
+      if (swapped !== null) parked.current_path = swapped;
+    }
+    return { kind: 'feed', plan: wtPlan!, parkedState: parked, record: res.record, provisioned: res.provisioned };
+  };
+
+  // Execution-plan selection: scoped runs plan against the worktree pipeline
+  // copy; everything else keeps the main plan byte-identically.
+  let plan = mainPlan;
+  let feed: { state: NextState; record: WorktreeRecord } | null = null;
+  let feedProvisioned: ProvisionedInfo | null = null;
+  if (scoped && wtPipelineRoot !== null) {
+    // Loop call / resume of a provisioned scoped run: plan from the recorded
+    // worktree prefix; --start round trips arrive as MAIN author paths.
+    if (a.start !== undefined) a.start = toWtPath(a.start);
+    // A TERMINAL run needs no dispatch paths (and its worktree may already be
+    // torn down) — answer terminal re-polls off the main plan.
+    plan = prevState !== null && prevState.phase === 'terminal' ? mainPlan : computePlan(wtPipelineRoot, planOpts);
+  } else if (scoped && a.record == null && (prevState === null || prevState.phase === 'await-provision')) {
+    const pre = preProvision();
+    if (pre.kind === 'halt') return pre.result;
+    if (pre.kind === 'feed') {
+      plan = pre.plan;
+      feed = { state: pre.parkedState, record: pre.record };
+      feedProvisioned = pre.provisioned;
+    }
+  } else if (scoped) {
+    // Defensive: a scoped state with no prefix outside await-provision (or an
+    // unexpected record before provisioning) — dispatch main-scoped this call.
+    warnNote('worktree-scoped state carries no worktree prefix — dispatching main-scoped this call');
+  }
+  /** Effective run-artifact root (05.1.3): outputs, ledger/failures, rendered
+   *  copies, and feedback live under the WORKTREE pipeline root on a scoped
+   *  run; bookkeeping (next.json/events/.stats/liveness) ALWAYS stays under
+   *  the main root (D6). */
+  const execRootAbs = scoped && wtPipelineRoot !== null ? resolve(wtPipelineRoot) : rootAbs;
+  const artifactRoot = scoped && wtPipelineRoot !== null ? execRootAbs : a.root;
   const mode = pickMode(plan);
 
   if (plan.errors.length) {
@@ -1335,7 +1674,9 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
     if (stateHasVars) {
       frozenVars = prevState!.variables ?? {};
     } else if (hasDeclarations(plan.variables) || a.cliVars !== undefined) {
-      const { files, manifestRaw } = collectRunVarsFiles(a.root, plan.steps);
+      // Scoped runs resolve declarations from the WORKTREE tree (the run
+      // executes the branch's definition — its `## Variables` included).
+      const { files, manifestRaw } = collectRunVarsFiles(scoped && wtPipelineRoot !== null ? execRootAbs : a.root, plan.steps);
       const init = initRunVariables(plan.variables, a.cliVars ?? {}, process.env, files, manifestRaw);
       if (init.errors.length) {
         const reason = init.message ?? 'variable validation failed';
@@ -1375,6 +1716,8 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
     s.model_overrides = plan.model_overrides;
     s.effort_overrides = plan.effort_overrides;
     if (frozenVars !== null) s.variables = frozenVars;
+    // The frozen worktree-scope trio (P2/b3) rides every save the same way.
+    stampScope(s);
   };
 
   // T3-14 approval gates: a {kind:'gate-answer'} record delivers the decision
@@ -1402,22 +1745,14 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   // forces it. A brand-new run (no state) is init; a normal loop step carries a
   // record and is neither.
   const resume = a.resume === true || (prevState !== null && record == null);
-  // Finalize opt-in (external only, additive): the run runs the mandatory finalize
-  // stage when the pipeline opted in — via the PRESENCE of a `worktree-finalize.*`
-  // hook in the resolved hook dir (the primary trigger; needs the project root,
-  // which only the command has) OR a `finalize: true` frontmatter flag. Gated on
-  // external isolation so a non-external run does ZERO extra work and is
-  // byte-for-byte unchanged. Consumed once at init (persisted into state.finalize);
-  // inert on resume (state already carries the flag).
-  const finalizeHookDirAbs = isAbsolute(plan.worktree_hook_dir)
-    ? plan.worktree_hook_dir
-    : join(process.cwd(), plan.worktree_hook_dir);
-  const finalizeOptIn =
-    plan.isolation === 'external' && (plan.finalize || resolveHookScript(finalizeHookDirAbs, 'worktree-finalize') !== null);
+  // (Finalize opt-in is resolved from the MAIN plan above, before the
+  // worktree-scope machinery — it feeds the pre-provision init too.)
   const opts: NextOpts = {
     start: a.start,
     resume,
-    feedbackCount: feedbackCount(a.root, a.runId),
+    // Feedback lives under the ARTIFACT root: the worktree pipeline tree on a
+    // scoped run (05.1.3), the main root otherwise.
+    feedbackCount: feedbackCount(artifactRoot, a.runId),
     // External-isolation context — surfaced in provision/finalize/teardown actions
     // and consumed by the in-process hook execution below. The command runs with
     // cwd = the consumer project root; --root is the pipeline folder.
@@ -1455,8 +1790,8 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
     if (pending?.type === 'script') manualScriptTag = { failureClass: null };
   }
   if (!resume) {
-    emitCompletionEvents(plan, prevState, record, a.runId, gateTag ?? manualScriptTag);
-    statsNoteRecord(a.root, a.runId, prevState, record, gateTag ?? manualScriptTag);
+    emitCompletionEvents(plan, prevState, record, a.runId, gateTag ?? manualScriptTag, toMainPath);
+    statsNoteRecord(a.root, a.runId, prevState, record, gateTag ?? manualScriptTag, toMainPath);
   }
   const statsIsInit = prevState === null;
   // §10: an INCOMING agent-step record may carry the additive `output` object
@@ -1464,7 +1799,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   // that was in flight. (Synthesized script records are persisted inline by
   // the interception loop below; layer entries carry no output in v1.)
   if (!resume && record?.kind === 'step' && prevState?.phase === 'await-step' && prevState.current_step_id) {
-    const w = persistOutput(rootAbs, a.runId, prevState.current_step_id, record.output ?? null);
+    const w = persistOutput(execRootAbs, a.runId, prevState.current_step_id, record.output ?? null);
     if (w) warnNote(w);
   }
   // §6.4 bound #2 (command-owned state.repaired_steps): a script-creator run
@@ -1485,7 +1820,17 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
     repairedStepId = plan.steps.find((s) => s.type === 'script' && samePath(s.path, target))?.step_id ?? null;
   }
 
-  let { action, state: newState } = computeNext(plan, prevState, record, opts);
+  // Worktree-scoped pre-provision (P2/b3): the create hook already ran and the
+  // run plan is the WORKTREE's — consume the provisioned record against the
+  // parked state instead of re-entering init/resume (resume MUST be false: the
+  // record is being consumed, not replayed; `start` MUST be dropped: initRun/
+  // resumeRun already pinned it into the parked current_path, which the
+  // pre-provision swapped into the worktree — re-passing the raw MAIN path
+  // would override the swap in onProvisionPhase's selectStep).
+  let { action, state: newState } =
+    feed !== null
+      ? computeNext(plan, feed.state, feed.record, { ...opts, start: undefined, resume: false })
+      : computeNext(plan, prevState, record, opts);
   if (repairedStepId !== null && !(newState.repaired_steps ?? []).includes(repairedStepId)) {
     (newState.repaired_steps ??= []).push(repairedStepId);
   }
@@ -1508,7 +1853,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   // MAX_SCRIPT_EXECS_PER_CALL and the §7 call budget — exceeding either parks
   // the persisted dispatch and returns {action:'continue'}.
   // ---------------------------------------------------------------------
-  let provisioned: ProvisionedInfo | null = null;
+  let provisioned: ProvisionedInfo | null = feedProvisioned;
   let finalize: FinalizeInfo | null = null;
   let teardown: TeardownInfo | null = null;
   /** T3-14: the needs_input question of a `type: gate` dispatch that just
@@ -1529,7 +1874,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
    *  resume would re-emit instead of consuming the record) and the feedback
    *  count is RE-COUNTED so a feedback file written by a just-failed script
    *  gates the retrospective of the very halt it documents (§6.2). */
-  const feedOpts = (): NextOpts => ({ ...opts, resume: false, feedbackCount: feedbackCount(a.root, a.runId) });
+  const feedOpts = (): NextOpts => ({ ...opts, resume: false, feedbackCount: feedbackCount(artifactRoot, a.runId) });
 
   /** §7: must the pending script execution be handed to a fresh call window?
    *  TRUE when the per-call execution cap is spent, or when the script's
@@ -1556,7 +1901,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
    *  never double-count the step. */
   const noteScriptStarted = (step: ActionStep, concurrent: boolean): void => {
     const act: NextAction = { action: 'run-step', concurrent, steps: [step] };
-    emitStartedEvents(act, a.runId);
+    emitStartedEvents(act, a.runId, toMainPath);
     statsNoteAction(a.root, a.runId, act);
   };
 
@@ -1580,7 +1925,10 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       stepId: step.step_id,
       dispatchIndex: step.index,
       deadlineMs,
-      pipelineRoot: rootAbs,
+      // Scoped runs (P2/b3): scripts resolve + run against the WORKTREE
+      // pipeline tree — the branch's scripts/, ledger + failure records under
+      // the worktree's .runtime (gitignore-stubbed; preserved on halt).
+      pipelineRoot: execRootAbs,
       projectRoot: process.cwd(),
       // External isolation threads the run worktree; parallel worktree layers
       // deliberately do NOT (script members run IN-PLACE, §9).
@@ -1590,7 +1938,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       readOutput: (id) => {
         let out = outputCache.get(id);
         if (out === undefined) {
-          out = readPersistedOutput(rootAbs, a.runId, id);
+          out = readPersistedOutput(execRootAbs, a.runId, id);
           outputCache.set(id, out);
         }
         return out;
@@ -1619,7 +1967,18 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
 
   const interceptScripts = a.manualScripts !== true;
 
+  /** Worktree-scoped observability re-point (P2/b3, 05.1.3): dispatched steps
+   *  keep the WORKTREE `path` (executors/ledger/`## Next` all work there);
+   *  `source_path` becomes the prefix-swapped MAIN author path — what events,
+   *  stats, the UI, and answer-resume round trips key on. Idempotent (a main
+   *  path swaps to itself); no-op on unscoped runs. */
+  const stampObsPaths = (act: NextAction): void => {
+    if (!scoped || wtPipelineRoot === null || act.action !== 'run-step') return;
+    for (const s of act.steps) s.source_path = toMainPath(s.source_path);
+  };
+
   for (let guard = 0; guard < MAX_SCRIPT_EXECS_PER_CALL + 12; guard++) {
+    stampObsPaths(action);
     // ---- worktree hooks (isolation: external) ---------------------------
     if (
       a.manualHooks !== true &&
@@ -1713,8 +2072,8 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       const rec: NextRecord = { kind: 'layer', results };
       // Label the degradation before the engine consumes it (mutates state in
       // place) — the same completion-pair discipline as the script partition.
-      emitCompletionEvents(plan, newState, rec, a.runId, { stepType: 'gate', failureClass: null });
-      statsNoteRecord(a.root, a.runId, newState, rec, { stepType: 'gate', failureClass: null });
+      emitCompletionEvents(plan, newState, rec, a.runId, { stepType: 'gate', failureClass: null }, toMainPath);
+      statsNoteRecord(a.root, a.runId, newState, rec, { stepType: 'gate', failureClass: null }, toMainPath);
       const r = computeNext(plan, newState, rec, feedOpts());
       action = r.action;
       newState = r.state;
@@ -1766,11 +2125,11 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
         // §5.1 success (or §8 ledger reuse): persist the output (§10), label
         // the completion, feed the synthesized record — the chain advances
         // (sequential ## Next / graph flags / DAG layer) inside the engine.
-        const w = persistOutput(rootAbs, a.runId, step.step_id, res.record.output ?? null);
+        const w = persistOutput(execRootAbs, a.runId, step.step_id, res.record.output ?? null);
         if (w) warnNote(w);
         if (!res.ledgerReused) {
-          emitCompletionEvents(plan, newState, res.record as StepRecord, a.runId, { failureClass: null });
-          statsNoteRecord(a.root, a.runId, newState, res.record as StepRecord, { failureClass: null });
+          emitCompletionEvents(plan, newState, res.record as StepRecord, a.runId, { failureClass: null }, toMainPath);
+          statsNoteRecord(a.root, a.runId, newState, res.record as StepRecord, { failureClass: null }, toMainPath);
         }
         const r = computeNext(plan, newState, res.record as NextRecord, feedOpts());
         action = r.action;
@@ -1779,8 +2138,10 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       }
 
       // §6.2 — ALWAYS on failure: the CLI-written feedback file (what lets the
-      // Tier-2 retrospective heal scripts even when the run halts).
-      if (res.feedback) writeFeedbackFile(a.root, a.runId, step.step_id, res.feedback.body);
+      // Tier-2 retrospective heal scripts even when the run halts). Scoped
+      // runs journal into the WORKTREE's .feedback (the retrospective and its
+      // improver work there — 05.1.3/6).
+      if (res.feedback) writeFeedbackFile(artifactRoot, a.runId, step.step_id, res.feedback.body);
       const cls = res.failure.class;
       // §6.3 policy ladder (transient retries already ran inside
       // executeScriptStep): env ⇒ halt; on-failure halt ⇒ halt; on-failure
@@ -1804,11 +2165,15 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       // this halt-shaped completion is NOT terminal. Journal order is
       // preserved: the fallback's own started pair is emitted at the loop
       // tail, after this completion.
-      emitCompletionEvents(plan, prevSnap, res.record as StepRecord, a.runId, {
-        failureClass: cls,
-        terminal: r.state.pending_fallback == null,
-      });
-      statsNoteRecord(a.root, a.runId, prevSnap, res.record as StepRecord, { failureClass: cls });
+      emitCompletionEvents(
+        plan,
+        prevSnap,
+        res.record as StepRecord,
+        a.runId,
+        { failureClass: cls, terminal: r.state.pending_fallback == null },
+        toMainPath,
+      );
+      statsNoteRecord(a.root, a.runId, prevSnap, res.record as StepRecord, { failureClass: cls }, toMainPath);
       action = r.action;
       newState = r.state;
       continue;
@@ -1837,8 +2202,8 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       const noteMemberDone = (entry: LayerResultEntry, failureClass: FailureClass | null): void => {
         entries.push(entry);
         const rec: NextRecord = { kind: 'layer', results: [entry] };
-        emitCompletionEvents(plan, newState, rec, a.runId, { failureClass });
-        statsNoteRecord(a.root, a.runId, newState, rec, { failureClass });
+        emitCompletionEvents(plan, newState, rec, a.runId, { failureClass }, toMainPath);
+        statsNoteRecord(a.root, a.runId, newState, rec, { failureClass }, toMainPath);
       };
       let parked = false;
       for (const member of scriptMembers) {
@@ -1867,14 +2232,14 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
         persistState();
         const res = runScript(member, spec, true);
         if (res.failure === null) {
-          const w = persistOutput(rootAbs, a.runId, member.step_id, res.record.output ?? null);
+          const w = persistOutput(execRootAbs, a.runId, member.step_id, res.record.output ?? null);
           if (w) warnNote(w);
           // §9: script members run IN-PLACE — no worktree fields, no merge entry.
           const entry: LayerResultEntry = { step_id: member.step_id, outcome: 'completed' };
           if (res.ledgerReused) entries.push(entry);
           else noteMemberDone(entry, null);
         } else {
-          if (res.feedback) writeFeedbackFile(a.root, a.runId, member.step_id, res.feedback.body);
+          if (res.feedback) writeFeedbackFile(artifactRoot, a.runId, member.step_id, res.feedback.body);
           // §6.4 v1: `on-failure: agent` inside a parallel layer degrades to
           // halt — the halted entry halts the folded layer in the engine.
           noteMemberDone(
@@ -1919,6 +2284,9 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   // Re-stamp defensively — the in-process loop may have swapped the state object.
   stampRunFields(newState);
   saveState(a.root, a.runId, newState);
+  // The loop may have exited via `break` after a fresh computeNext — make sure
+  // the outgoing steps carry the prefix-swapped MAIN source_path (idempotent).
+  stampObsPaths(action);
 
   // -------------------------------------------------------------------------
   // Rendered shadow copies (env-variables design 05 §5, D6 — P4/a5): when the
@@ -1948,9 +2316,13 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
     const renderable = action.steps.filter(isRenderedDispatch);
     if (renderable.length) {
       const rendered = renderActionSteps({
-        pipelineRootAbs: rootAbs,
+        // Scoped runs render FROM the worktree tree INTO the worktree's
+        // `.runtime/<run>/rendered/` (P2/b3) — `s.path` is the execution-tree
+        // source here (identical to source_path on unscoped runs; on scoped
+        // runs source_path already carries the prefix-swapped MAIN label).
+        pipelineRootAbs: execRootAbs,
         runId: a.runId,
-        stepSources: renderable.map((s) => s.source_path),
+        stepSources: renderable.map((s) => s.path),
         vars: frozenVars,
       });
       if (!rendered.ok) {
@@ -1984,15 +2356,21 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   // run.started was measured early (isInit false here). Event/stats labels use
   // steps[].source_path, so rendering above never leaks `.runtime/rendered/`
   // paths into the journal.
-  emitStartedEvents(action, a.runId);
+  emitStartedEvents(action, a.runId, toMainPath);
   statsNoteAction(a.root, a.runId, action);
   statsNoteTerminal(a.root, a.runId, action);
 
   // Attach run-context fields the manager surfaces. `warnings` only on init;
   // `provisioned`/`finalized`/`teardown` only when an in-process hook actually ran.
   const out: Record<string, unknown> = { ...action, mode };
-  if (prevState === null && plan.warnings.length) out.warnings = plan.warnings;
+  if (prevState === null && (plan.warnings.length || scopeWarnings.length)) {
+    out.warnings = [...plan.warnings, ...scopeWarnings];
+  }
   if (provisioned) out.provisioned = provisioned;
+  // Worktree-scoped runs (P2/b3): surface the execution pipeline root so
+  // callers (manager) derive feedback/records paths + improver context from
+  // the RUN's working tree instead of the main checkout.
+  if (scoped && wtPipelineRoot !== null) out.worktree_pipeline_root = execRootAbs;
   if (finalize) out.finalized = finalize;
   if (teardown) out.teardown = teardown;
   // T3-14: a surfaced `type: gate` dispatch carries its needs_input question
@@ -2306,14 +2684,20 @@ function startChild(
   // A binding failure halts the parent BEFORE any child scaffolding, exactly
   // like a script step's pre-spawn 'binding' failure.
   const parentState = loadState(a.root, a.runId);
+  // Worktree-scoped parent (P2/b3): its run artifacts (outputs store) live
+  // under the WORKTREE pipeline root — bind against that tree.
+  const parentExecRoot =
+    parentState?.worktree_scoped === true && typeof parentState.worktree_pipeline_root === 'string'
+      ? resolve(parentState.worktree_pipeline_root)
+      : rootAbs;
   const sources: BindingSources = {
     runId: a.runId,
-    pipelineRoot: rootAbs,
+    pipelineRoot: parentExecRoot,
     projectRoot: process.cwd(),
     worktreePath: step.worktree_path ?? parentState?.worktree_path ?? null,
     worktreeEnvFile: step.worktree_env_file ?? parentState?.worktree_env_file ?? null,
     taskText: readTaskText(a.root, a.runId),
-    readOutput: (id) => readPersistedOutput(rootAbs, a.runId, id),
+    readOutput: (id) => readPersistedOutput(parentExecRoot, a.runId, id),
     // The PARENT run's frozen PP_* map (env-variables design a4): resolveRef's
     // PP_* root reads it, so a pipeline-step `## Params` `from: ${PP_X}`
     // template resolves exactly like a script step's (the "EXACT script-step

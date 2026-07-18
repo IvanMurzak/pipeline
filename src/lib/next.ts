@@ -218,6 +218,29 @@ export interface NextState {
    * next.json → normalized to null.
    */
   active_child?: ActiveChildRun | null;
+  /**
+   * Worktree-scoped pipeline I/O (P2/b3 — fix-fundamental-issues design 05.1,
+   * D3/D6): the run's FROZEN path model, OWNED by the command layer (the
+   * model_overrides persistence pattern — the pure engine never reads these).
+   * `worktree_scoped` is the `PIPELINE_WORKTREE_SCOPED` rollout flag frozen
+   * per-run at init: a mid-run env flip can never mix path models within one
+   * run. Written ONLY for external-isolation-shaped runs; absent on every
+   * other run (zero state-shape change) and on legacy in-flight external
+   * runs, which read as false (main-scoped — an in-flight run never switches
+   * models mid-run).
+   */
+  worktree_scoped?: boolean;
+  /**
+   * The `(worktree_prefix, main_prefix)` pair of the 05.1.3 prefix-swap
+   * mapping — absolute pipeline roots, recorded once the run worktree is
+   * provisioned. The whole plan is computed FROM `worktree_pipeline_root`
+   * (dispatch, ledger keys, `## Next` parsing are worktree paths); the
+   * command layer derives every observability `source_path` by swapping the
+   * worktree prefix back to `main_pipeline_root`, keeping events/stats/UI on
+   * stable author paths. Only meaningful when `worktree_scoped` is true.
+   */
+  worktree_pipeline_root?: string | null;
+  main_pipeline_root?: string | null;
 }
 
 /** Composition (T3-10): the persisted parent→child stack link (see
