@@ -46,6 +46,10 @@ export const TEMPLATES: readonly TemplateEntry[] = [
     name: 'support-answer',
     description: 'Local support-desk RAG: BM25 retrieval over a docs folder, then a grounded, cited answer.',
   },
+  {
+    name: 'ship-feature',
+    description: 'Flagship dev flow: plan → implement → bounded self-review loop → open a PR → wait for CI → merge on human approval.',
+  },
 ] as const;
 
 /** Absolute path to the bundled `templates/` directory — resolved relative to
