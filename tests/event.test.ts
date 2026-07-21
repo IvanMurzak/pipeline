@@ -15,7 +15,12 @@
 // (scripts/parallel-tests.ts).
 
 import { test, expect, afterEach, describe } from 'bun:test';
-import { emitEvent, parseKvArgs } from '../src/lib/event';
+import {
+  emitEvent,
+  parseKvArgs,
+  registerMirrorBinding,
+  pipelineUiTranscriptsEnabled,
+} from '../src/lib/event';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -332,5 +337,84 @@ describe('golden — worktree detection', () => {
     // against that directly rather than a git-canonicalized value.
     expect(resolve(ev.project_root as string)).toBe(resolve(main));
     expect(resolve(ev.worktree as string)).toBe(resolve(wtPath));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PIPELINE_UI_TRANSCRIPTS — the transcript-mirroring opt-out (Path-B binding).
+//
+// register-mirror-binding (the /pipeline:run supervisor's binding writer) must
+// withhold the transcript pointer when the switch is off, while still recording
+// the binding (run_id/session_id) for run correlation. Default ON keeps the
+// pointer. Same falsy parse as PIPELINE_UI_ENABLED; orthogonal to
+// PIPELINE_STATS_ENABLED.
+// ---------------------------------------------------------------------------
+
+describe('PIPELINE_UI_TRANSCRIPTS — register-mirror-binding pointer gate', () => {
+  const BIND_REL = join('.claude', 'pipeline-ui', 'active-mirror-bindings.jsonl');
+
+  function readBinding(home: string): Record<string, unknown> {
+    const p = join(home, BIND_REL);
+    const line = readFileSync(p, 'utf-8').split('\n').find((l) => l.trim());
+    return JSON.parse(line!) as Record<string, unknown>;
+  }
+
+  test('three-way reader parse (default ON)', () => {
+    const prev = process.env.PIPELINE_UI_TRANSCRIPTS;
+    try {
+      delete process.env.PIPELINE_UI_TRANSCRIPTS;
+      expect(pipelineUiTranscriptsEnabled()).toBe(true);
+      process.env.PIPELINE_UI_TRANSCRIPTS = '1';
+      expect(pipelineUiTranscriptsEnabled()).toBe(true);
+      for (const v of ['0', 'false', 'no', 'off', 'OFF']) {
+        process.env.PIPELINE_UI_TRANSCRIPTS = v;
+        expect(pipelineUiTranscriptsEnabled()).toBe(false);
+      }
+    } finally {
+      if (prev === undefined) delete process.env.PIPELINE_UI_TRANSCRIPTS;
+      else process.env.PIPELINE_UI_TRANSCRIPTS = prev;
+    }
+  });
+
+  test('default (unset): binding carries the explicit transcript_path', () => {
+    const root = mkGitRepo();
+    const home = mkTmp('bind-home-');
+    runTs(
+      () =>
+        registerMirrorBinding([
+          'run_id=runA',
+          'session_id=sessA',
+          'transcript_path=/tmp/sessA.jsonl',
+          'pipeline_name=demo',
+        ]),
+      root,
+      controlledEnv(home, { PIPELINE_UI_TRANSCRIPTS: '1' }),
+    );
+    const b = readBinding(home);
+    expect(b.run_id).toBe('runA');
+    expect(b.session_id).toBe('sessA');
+    expect(b.transcript_path).toBe('/tmp/sessA.jsonl');
+  });
+
+  test('PIPELINE_UI_TRANSCRIPTS=0: binding written, transcript_path nulled', () => {
+    const root = mkGitRepo();
+    const home = mkTmp('bind-home-');
+    runTs(
+      () =>
+        registerMirrorBinding([
+          'run_id=runB',
+          'session_id=sessB',
+          'transcript_path=/tmp/sessB.jsonl',
+          'pipeline_name=demo',
+        ]),
+      root,
+      controlledEnv(home, { PIPELINE_UI_TRANSCRIPTS: '0' }),
+    );
+    const b = readBinding(home);
+    // Binding still exists (run correlation preserved) …
+    expect(b.run_id).toBe('runB');
+    expect(b.session_id).toBe('sessB');
+    // … but the transcript pointer is withheld.
+    expect(b.transcript_path).toBeNull();
   });
 });

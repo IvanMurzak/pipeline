@@ -49,6 +49,17 @@ function log(msg: string): void {
   if (DEBUG) process.stderr.write(`[pipeline-ui-writer] ${msg}\n`);
 }
 
+/** Transcript opt-out switch (`PIPELINE_UI_TRANSCRIPTS`, default ON). Gates
+ *  ONLY the transcript pointer this writer records on the Path-B supervisor
+ *  mirror binding: when off, `registerMirrorBinding` writes `transcript_path:
+ *  null` so the daemon never mirrors the session transcript, while the binding
+ *  still carries run_id/session_id for run correlation. Same falsy parse as
+ *  `PIPELINE_UI_ENABLED`. Orthogonal to `PIPELINE_STATS_ENABLED`. */
+export function pipelineUiTranscriptsEnabled(): boolean {
+  const v = (process.env.PIPELINE_UI_TRANSCRIPTS ?? '').trim().toLowerCase();
+  return v !== '0' && v !== 'false' && v !== 'no' && v !== 'off';
+}
+
 // ---------------------------------------------------------------------------
 // Time
 // ---------------------------------------------------------------------------
@@ -641,9 +652,13 @@ export function registerMirrorBinding(argv: string[]): number {
   const iterationPath = dataStrOr(data, 'iteration_path') || '';
   const pipelineName = dataStrOr(data, 'pipeline_name') || '';
   const sessionId = dataStrOr(data, 'session_id') || envOrNull('CLAUDE_SESSION_ID');
-  const transcriptPath =
-    dataStrOr(data, 'transcript_path') ||
-    deriveMainTranscriptPath(projectRoot, sessionId);
+  // PIPELINE_UI_TRANSCRIPTS off: withhold the transcript pointer (and skip the
+  // filesystem derivation) so the daemon never mirrors this session transcript;
+  // the binding still carries run_id/session_id for run correlation.
+  const transcriptPath = pipelineUiTranscriptsEnabled()
+    ? (dataStrOr(data, 'transcript_path') ||
+       deriveMainTranscriptPath(projectRoot, sessionId))
+    : null;
   const toolUseId = data['tool_use_id'];
 
   const binding = {
