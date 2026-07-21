@@ -42,6 +42,10 @@ export const TEMPLATES: readonly TemplateEntry[] = [
     name: 'example-minimal',
     description: 'Smallest-valid two-step sequential pipeline skeleton to copy and adapt.',
   },
+  {
+    name: 'support-answer',
+    description: 'Local support-desk RAG: BM25 retrieval over a docs folder, then a grounded, cited answer.',
+  },
 ] as const;
 
 /** Absolute path to the bundled `templates/` directory — resolved relative to

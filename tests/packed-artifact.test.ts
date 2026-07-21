@@ -132,6 +132,21 @@ describe('packed npm artifact (@baizor/pipeline)', () => {
     expect(readdirSync(join(tmplRoot, 'steps')).some((f) => f.endsWith('.md'))).toBe(true);
   });
 
+  test("the support-answer template's scripts/ and sample-docs/ shipped in the tarball", () => {
+    // support-answer is the first template with scripts/ and sample-docs/
+    // subtrees — asset kinds example-minimal has none of. `clone` copies the
+    // WHOLE folder, so a bare `pipeline clone support-answer` run must find the
+    // BM25 script AND the bundled corpus it defaults to; a future restrictive
+    // `files` field (or a stray .gitignore) that dropped either would break the
+    // turnkey run while the example-minimal check above stayed green. Assert
+    // both subtrees are present exactly where clone + the script will look.
+    const root = join(extractedRoot, 'templates', 'support-answer');
+    expect(existsSync(join(root, 'PIPELINE.md'))).toBe(true);
+    expect(existsSync(join(root, 'scripts', 'bm25_retrieve.ts'))).toBe(true);
+    const docs = readdirSync(join(root, 'sample-docs')).filter((f) => f.endsWith('.md'));
+    expect(docs.length).toBeGreaterThan(0);
+  });
+
   test('`pipeline --version` reports package.json\'s version from the packed artifact', () => {
     const res = spawnSync('bun', [join(extractedRoot, 'src', 'cli.ts'), '--version'], {
       cwd: extractedRoot,
