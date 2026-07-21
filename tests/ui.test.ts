@@ -17,16 +17,22 @@ test('parseUiArgs: defaults + flags', () => {
   expect(parseUiArgs(['--restart'])).toEqual({ open: false, json: false, restart: true });
 });
 
-test('uiEnabled: off by default, on for any non-falsy value', () => {
+test('uiEnabled: ON by default, off only on an explicit falsy opt-out', () => {
   const prev = process.env.PIPELINE_UI_ENABLED;
   try {
+    // Unset → ON (the flipped default: the UI works out of the box).
     delete process.env.PIPELINE_UI_ENABLED;
-    expect(uiEnabled()).toBe(false); // disabled by default when unset
+    expect(uiEnabled()).toBe(true); // enabled by default when unset
+    // Empty string is treated as unset → ON (an empty value is NOT an opt-out).
+    process.env.PIPELINE_UI_ENABLED = '';
+    expect(uiEnabled()).toBe(true);
+    // Any explicit truthy / non-falsy value → ON (unchanged).
     for (const v of ['1', 'true', 'TRUE', 'yes', 'on', 'please', 'anything']) {
       process.env.PIPELINE_UI_ENABLED = v;
       expect(uiEnabled()).toBe(true);
     }
-    for (const v of ['', '0', 'false', 'off', 'no']) {
+    // Explicit falsy value → OFF (the opt-out; case-insensitive, whitespace-trimmed).
+    for (const v of ['0', 'false', 'FALSE', 'off', 'OFF', 'no', 'NO', ' 0 ', ' off ']) {
       process.env.PIPELINE_UI_ENABLED = v;
       expect(uiEnabled()).toBe(false);
     }

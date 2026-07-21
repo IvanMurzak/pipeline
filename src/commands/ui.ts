@@ -43,11 +43,11 @@ export interface DaemonLock {
 }
 
 /** True when the UI server system is enabled via PIPELINE_UI_ENABLED. The UI is
- *  OFF BY DEFAULT (the same master switch the hooks honor); set the var to any
- *  non-empty, non-falsy value (anything other than 0/false/no/off) to opt in. */
+ *  ON BY DEFAULT (the same master switch the hooks honor); it stays on unless the
+ *  user explicitly opts OUT by setting the var to a falsy value (0/false/no/off).
+ *  Unset/empty — and any other value — leaves it enabled. */
 export function uiEnabled(): boolean {
   const v = (process.env.PIPELINE_UI_ENABLED ?? '').trim().toLowerCase();
-  if (v === '') return false;
   return v !== '0' && v !== 'false' && v !== 'no' && v !== 'off';
 }
 
@@ -299,19 +299,19 @@ function openBrowser(url: string): void {
 export async function runUi(args: string[]): Promise<number> {
   const opts = parseUiArgs(args);
 
-  // Master switch: the UI server system is OFF BY DEFAULT (mirrors the hooks,
-  // which no-op unless opted in). Refuse to spawn the daemon unless
-  // PIPELINE_UI_ENABLED is set — and tell the user exactly how to turn it on,
-  // since an empty dashboard (daemon up but hooks disabled) would be useless.
-  // Exit 0 so callers/scripts aren't broken.
+  // Master switch: the UI server system is ON BY DEFAULT (mirrors the hooks,
+  // which run unless explicitly opted out). We only refuse to spawn the daemon
+  // when the user has explicitly opted OUT via PIPELINE_UI_ENABLED=0 (or
+  // false/no/off) — respect that choice and point them at the daemon-free
+  // terminal tail. Exit 0 so callers/scripts aren't broken.
   if (!uiEnabled()) {
     if (opts.json) {
       process.stdout.write(JSON.stringify({ enabled: false }) + '\n');
     } else {
       process.stderr.write(
-        'pipeline ui: the dashboard is disabled by default.\n' +
-          '  Enable it by setting  PIPELINE_UI_ENABLED=1  (e.g. in .claude/settings.json "env",\n' +
-          '  or in the shell before launching Claude Code), then re-run.\n' +
+        'pipeline ui: the dashboard is disabled — PIPELINE_UI_ENABLED is set to an explicit\n' +
+          '  opt-out value (0/false/no/off). The UI is on by default: unset that variable (or\n' +
+          '  set PIPELINE_UI_ENABLED=1) to re-enable it, then re-run.\n' +
           '  Tip: `pipeline logs -f` tails events in the terminal with no daemon.\n',
       );
     }

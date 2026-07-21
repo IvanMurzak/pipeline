@@ -5,7 +5,7 @@
 // pretty-printing each event as a readable one-liner. This is the
 // terminal-visible counterpart to the browser dashboard — it answers "show me
 // the pipeline events as they appear" WITHOUT running the UI daemon, so it
-// works regardless of PIPELINE_UI_ENABLED (the UI/daemon is off by default).
+// works regardless of PIPELINE_UI_ENABLED (even when the UI/daemon is opted out).
 //
 // Deliberately READ-ONLY: it never writes the journal, never spawns the daemon,
 // and never emits events. It just resolves the journal path (project root via

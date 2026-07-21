@@ -157,7 +157,7 @@ function usage(): string {
     '       [--project <path>]',
     '      Tail the event journal (.runtime/events.jsonl) to the terminal,',
     '      pretty-printing each event as it appears. Read-only and daemon-free —',
-    '      works regardless of PIPELINE_UI_ENABLED (the UI is off by default).',
+    '      works regardless of PIPELINE_UI_ENABLED (even when the UI is opted out).',
     '',
     '  gc [--project <path>] [--clean] [--json] [--no-submodules]',
     '     [--force-worktree-branches]',

@@ -3,8 +3,9 @@
  *
  *   bun test tests/hook-prompt-match.test.ts
  *
- * The hook is OFF BY DEFAULT (PIPELINE_PROMPT_MATCH_ENABLED gate, same
- * semantics as PIPELINE_UI_ENABLED) and must NEVER block a prompt: every
+ * The hook is OFF BY DEFAULT (PIPELINE_PROMPT_MATCH_ENABLED gate — same
+ * non-falsy value parsing as PIPELINE_UI_ENABLED, but its own opt-in default;
+ * the UI system itself is on by default) and must NEVER block a prompt: every
  * path exits 0, and only a CONFIDENT single BM25 match (exactly one
  * candidate, or top1/top2 score ratio ≥ 2.0 — the /pipeline:dispatch
  * ambiguity threshold) produces stdout, in the documented
