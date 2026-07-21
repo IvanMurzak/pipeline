@@ -119,7 +119,7 @@ import {
   mergeCliVars,
   type ResolvedVars,
 } from '../lib/run-vars';
-import { renderActionSteps } from '../lib/render';
+import { renderActionSteps, sourcePathForRendered } from '../lib/render';
 import { buildGateQuestion, parseGateDecision, type GateQuestion } from '../lib/gate';
 import {
   COMPOSE_EXEC_GUARD,
@@ -1745,6 +1745,21 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       record = gateRecordFor(pendingGate, record.answer, mode === 'sequential');
       gateTag = { stepType: 'gate', failureClass: null };
     }
+  }
+
+  // Rendered-shadow next_iteration → SOURCE (env-variables a5): a step run from
+  // its RENDERED copy has its executor resolve `## Next` relative to the rendered
+  // tree, so the reported next_iteration is a `.runtime/<run>/rendered/<slug>/…`
+  // path. Map it back to the author source BEFORE anything consumes it (the
+  // completion event's next_iteration_path, and — crucially — the engine's
+  // advance()/findStepByPath). Left verbatim it would miss the plan step (⇒
+  // off-plan synthesis, source_path pinned to the rendered path) and the render
+  // seam would judge that `.runtime` path out-of-root and dispatch the NEXT step
+  // UNRENDERED — the "multi-step ${PP_*} pipeline halts at step 2" defect. No-op
+  // on source paths, PIPELINE_COMPLETE, and cross-pipeline hand-offs; idempotent.
+  if (record !== null && record.kind === 'step' && typeof record.next_iteration === 'string' && record.next_iteration !== 'PIPELINE_COMPLETE') {
+    const mapped = sourcePathForRendered(execRootAbs, a.runId, record.next_iteration);
+    if (mapped !== record.next_iteration) record = { ...record, next_iteration: mapped };
   }
 
   // Auto-resume on a re-spawn: persisted state exists but the caller passed no

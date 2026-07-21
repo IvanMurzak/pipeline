@@ -505,3 +505,54 @@ test('an off-plan step outside the pipeline root keeps path === source_path (not
     expect(existsSync(join(w.root, '.runtime', 'r9', 'rendered'))).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 10. Regression — a RENDERED next_iteration (the executor read the rendered
+//     copy and resolved `## Next` relative to it) still dispatches the next
+//     step RENDERED, not off-plan + unrendered.
+//
+// This is the real-world shape of a multi-step run: step 1 is dispatched from
+// its rendered copy, so its executor reports next_iteration as a
+// `.runtime/<run>/rendered/<slug>/steps/NN.md` path (NOT the source path the
+// unit fixtures above hand-fed). Before the fix that rendered path missed the
+// plan (findStepByPath keys by source), was synthesized off-plan with
+// source_path pinned to the rendered path, and was judged out-of-root by
+// relUnder (`.runtime` denylist) → dispatched UNRENDERED with ${PP_SERVICE}
+// left raw — the "support-answer halts at step 2" defect.
+// ---------------------------------------------------------------------------
+
+test('regression: a rendered next_iteration path is mapped back to source — step 2 dispatches RENDERED (substituted), source_path is the author path, no .runtime/rendered leak', () => {
+  const w = scaffoldVarsWorld();
+  inProject(w, () => {
+    const first = invokeNext({ root: w.root, runId: 'r10', cliVars: { PP_SERVICE: 'payments' } });
+    if (first.action.action !== 'run-step') throw new Error('expected run-step');
+    // Step 1 ran from its rendered copy; the executor's `## Next` resolves to a
+    // RENDERED path for step 2 (this is exactly what a real drive records).
+    const renderedNext = join(renderedRoot(w, 'r10'), 'steps', '02-b.md');
+
+    const res = invokeNext({
+      root: w.root,
+      runId: 'r10',
+      record: { kind: 'step', outcome: 'completed', flags: null, next_iteration: renderedNext },
+    });
+    if (res.action.action !== 'run-step') throw new Error(`expected run-step, got ${res.action.action}`);
+    const step2 = res.action.steps[0]!;
+
+    // The invariant is restored: source_path is the AUTHOR source (never a
+    // `.runtime/rendered/` path), path is the rendered copy, and the body was
+    // substituted. Pre-fix: source_path === path === the raw rendered copy and
+    // the body still read `Announce ${PP_SERVICE}.`.
+    expect(step2.step_id).toBe('s2');
+    expect(resolve(step2.source_path)).toBe(resolve(join(w.steps, '02-b.md')));
+    expect(step2.source_path).not.toContain('rendered');
+    expect(resolve(step2.path)).toBe(resolve(join(renderedRoot(w, 'r10'), 'steps', '02-b.md')));
+    expect(step2.path).not.toBe(step2.source_path);
+    expect(readFileSync(step2.path, 'utf8')).toContain('Announce payments.');
+    expect(readFileSync(step2.path, 'utf8')).not.toContain('${PP_SERVICE}');
+
+    // Events label the step by its SOURCE path — no rendered path leaks into the
+    // journal (the design's stated guarantee).
+    const started = readEvents(w).filter((e) => e.type === 'iteration.started');
+    for (const e of started) expect(String(e.data.iteration_path)).not.toContain('rendered');
+  });
+});

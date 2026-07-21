@@ -86,6 +86,31 @@ export function renderedRootFor(pipelineRootAbs: string, runId: string): string 
   return join(pipelineRootAbs, '.runtime', runId, 'rendered', basename(pipelineRootAbs));
 }
 
+/** Inverse of renderedRootFor: if `p` points INTO this run's rendered tree
+ *  (`<root>/.runtime/<run-id>/rendered/<slug>/…`), return its author-owned
+ *  SOURCE counterpart `<root>/<rel>`; otherwise return `p` unchanged.
+ *
+ *  Why it exists: a step dispatched from its RENDERED copy has its executor read
+ *  that copy, so a `## Next` link (`<pipeline-root>/steps/NN.md`) resolves
+ *  RELATIVE to the rendered location and the reported `next_iteration` is a
+ *  rendered path. Feeding that back verbatim (a) misses the plan step — plan
+ *  steps key by SOURCE path, so the engine synthesizes an OFF-PLAN step — and
+ *  (b) is judged out-of-root by relUnder (it lives under the `.runtime`
+ *  denylist) and so is dispatched UNRENDERED with `${PP_*}` never substituted:
+ *  the "multi-step pipeline with variables halts at step 2" defect. Mapping it
+ *  back to the source restores the invariant that the engine's current_path /
+ *  an ActionStep.source_path is ALWAYS an author source, so the next dispatch
+ *  re-renders it normally. resolve()+relative() normalize separators and (win32)
+ *  drive-letter case, so a `C:/…` next_iteration matches a `C:\…` root. A no-op
+ *  for every path NOT under THIS run's rendered root: source paths, the
+ *  PIPELINE_COMPLETE sentinel, and cross-pipeline (family/hub) hand-offs. */
+export function sourcePathForRendered(pipelineRootAbs: string, runId: string, p: string): string {
+  const rootAbs = resolve(pipelineRootAbs);
+  const rel = relative(renderedRootFor(rootAbs, runId), resolve(p));
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return p;
+  return join(rootAbs, rel);
+}
+
 /** Relative path of `p` under `rootAbs`, or null when `p` is not inside the
  *  root OR crosses an excluded entry (runtime artifacts / VCS dirs are never
  *  mirrored, and `.runtime/...` must never be re-rendered into itself).
@@ -323,7 +348,16 @@ export type RenderStepsResult =
  *  `{ok:false}` for the command layer to halt on cleanly. */
 export function renderActionSteps(input: RenderStepsInput): RenderStepsResult {
   const rootAbs = resolve(input.pipelineRootAbs);
-  const rels = input.stepSources.map((p) => relUnder(rootAbs, p));
+  // Defense in depth: a stepSource that is ITSELF a path into this run's
+  // rendered tree (a rendered `next_iteration` that reached here, e.g. a
+  // crash-resume replaying buggy persisted state) means its SOURCE counterpart
+  // — map it back so relUnder classifies it INSIDE the root and it renders,
+  // instead of being rejected as an out-of-root `.runtime` path and dispatched
+  // UNRENDERED. A no-op for the normal case (stepSources are already source
+  // paths — the command layer maps `next_iteration` back before the engine).
+  const rels = input.stepSources.map((p) =>
+    relUnder(rootAbs, sourcePathForRendered(rootAbs, input.runId, p)),
+  );
   if (!rels.some((r) => r !== null)) {
     // Every dispatched file lives outside the pipeline root — nothing to
     // render, no tree work (the caller keeps source paths).
