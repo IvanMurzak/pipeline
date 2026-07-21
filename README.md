@@ -26,6 +26,32 @@ bun run build          # → dist/cli.mjs (Node-compatible ESM)
 
 ## Commands
 
+### `clone` — scaffold a ready-made pipeline into your project
+
+```bash
+bun src/cli.ts clone <name> [--force] [--dir <path>] [--list] [--json]
+```
+
+Copies a bundled, ready-made pipeline **template** into
+`./.claude/pipeline/<name>/` (relative to the current directory, or `--dir
+<path>`) — the local-first onboarding entry point: install `@baizor/pipeline`,
+then `pipeline clone <name>` drops a working pipeline you can run and adapt.
+
+Templates ship **inside** this package (`apps/pipeline-cli/templates/<name>/`)
+and are resolved relative to the CLI's own source, so `clone` behaves the same
+from a plugin checkout and an npm/bun install. `--list` shows what's available;
+an unknown name errors and lists the choices. The command **refuses to
+overwrite** an existing `./.claude/pipeline/<name>/` unless `--force` is passed
+(which replaces the folder entirely — no stale files survive).
+
+Exit codes: `0` cloned (or `--list`) · `1` target exists without `--force`, or
+the copy failed · `2` usage (no name, unknown template, bad flag).
+
+> **Adding a template:** drop a folder under `templates/<name>/` (a valid
+> `PIPELINE.md` + a `steps/` folder — mirror `example-minimal`) and register it
+> in `src/lib/templates.ts`. The test suite validates that every registered
+> template plans cleanly and ships in the npm tarball.
+
 ### `plan` — compute the execution plan
 
 ```bash

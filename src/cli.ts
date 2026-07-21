@@ -21,6 +21,7 @@ import { runSubmodule } from './commands/submodule';
 import { runRelease } from './commands/release';
 import { runStep } from './commands/step-run';
 import { runHash } from './commands/hash';
+import { runClone } from './commands/clone';
 
 /**
  * Single-sourced from package.json — resolved relative to THIS file's own
@@ -54,6 +55,14 @@ function usage(): string {
     'Usage: pipeline <command> [options]',
     '',
     'Commands:',
+    '  clone <name> [--force] [--dir <path>] [--list] [--json]',
+    '      Copy a bundled ready-made pipeline template into',
+    '      ./.claude/pipeline/<name>/ (relative to the current directory, or',
+    '      --dir <path>). Refuses to overwrite an existing target unless --force.',
+    '      --list shows the available templates; unknown template → error listing',
+    '      them. Exit 0 cloned/listed · 1 target exists (no --force)/copy failed ·',
+    '      2 usage.',
+    '',
     '  hash --root <pipeline_root> [--json]',
     '      Compute the pipeline content hash (SHA-256 over PIPELINE.md + steps/** +',
     '      scripts/**) and output it as sha256:<hex> (plain) or {"content_hash":"sha256:<hex>"}',
@@ -246,6 +255,8 @@ async function main(argv: string[]): Promise<number> {
   switch (command) {
     case 'hash':
       return runHash(rest);
+    case 'clone':
+      return runClone(rest);
     case 'plan':
       return runPlan(rest);
     case 'match':

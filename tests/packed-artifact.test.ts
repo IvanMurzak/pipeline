@@ -119,6 +119,19 @@ describe('packed npm artifact (@baizor/pipeline)', () => {
     expect(existsSync(join(extractedRoot, 'src', 'lib', 'vendor', 'transcript-walk.ts'))).toBe(true);
   });
 
+  test('the bundled clone templates shipped in the tarball', () => {
+    // `pipeline clone` reads templates from `<pkg>/templates/…` at runtime
+    // (src/lib/templates.ts resolves them relative to its own dir). The package
+    // declares no `files` allowlist, so they ship by default — but if a future
+    // restrictive `files` field ever dropped them, `clone` would 404 for every
+    // npm/bun install. This asserts the example template is actually present in
+    // the packed artifact, exactly where clone will look for it.
+    const tmplRoot = join(extractedRoot, 'templates', 'example-minimal');
+    expect(existsSync(join(tmplRoot, 'PIPELINE.md'))).toBe(true);
+    expect(existsSync(join(tmplRoot, 'steps'))).toBe(true);
+    expect(readdirSync(join(tmplRoot, 'steps')).some((f) => f.endsWith('.md'))).toBe(true);
+  });
+
   test('`pipeline --version` reports package.json\'s version from the packed artifact', () => {
     const res = spawnSync('bun', [join(extractedRoot, 'src', 'cli.ts'), '--version'], {
       cwd: extractedRoot,
