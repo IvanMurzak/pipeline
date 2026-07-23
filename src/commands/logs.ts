@@ -184,6 +184,16 @@ function bitsForEvent(type: string, d: Record<string, unknown>): FormatBits {
       return { glyph: '▶', codes: [C.yellow], summary: `resolved ${f(d, 'merged_pr_url')}` };
     case 'manager.stopped':
       return { glyph: '◌', codes: [C.dim], summary: 'manager stopped' };
+    case 'run.awaiting_input': {
+      // The whole point of this line: `pipeline logs` works with no daemon, so
+      // a blocked run is visible even for a user who runs no dashboard.
+      const excerpt = f(d, 'message_excerpt');
+      return {
+        glyph: '⏸',
+        codes: [C.yellow],
+        summary: `awaiting ${f(d, 'kind') || 'input'}${excerpt ? `: ${excerpt}` : ''}`,
+      };
+    }
     case 'worktree.created':
       return {
         glyph: '⌥',

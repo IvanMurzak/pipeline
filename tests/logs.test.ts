@@ -187,3 +187,28 @@ test('journalPathFor: resolves to <project>/.claude/pipeline/.runtime/events.jso
   expect(journalPathFor(root)).toBe(expected);
   expect(journalPathFor(deep)).toBe(expected);
 });
+
+// design 05: the ⏸ line is the whole daemon-free half of the awaiting-input
+// feature — a user who opted out of the dashboard still sees a blocked run.
+test('formatEvent: run.awaiting_input renders the pause line with kind + excerpt', () => {
+  const line = formatEvent(
+    {
+      ts: '2026-05-21T19:03:00.000Z',
+      type: 'run.awaiting_input',
+      run_id: 'feedfacecafe0000',
+      data: { kind: 'permission', message_excerpt: 'Claude needs your permission to use Bash' },
+    },
+    false,
+  );
+  expect(line).toBe(
+    '19:03:00 ⏸ run.awaiting_input feedface  awaiting permission: Claude needs your permission to use Bash',
+  );
+});
+
+test('formatEvent: run.awaiting_input without an excerpt still reads cleanly', () => {
+  const line = formatEvent(
+    { ts: '2026-05-21T19:04:00.000Z', type: 'run.awaiting_input', run_id: null, data: { kind: 'input' } },
+    false,
+  );
+  expect(line).toBe('19:04:00 ⏸ run.awaiting_input  awaiting input');
+});
