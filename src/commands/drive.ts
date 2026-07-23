@@ -135,7 +135,16 @@ import { frozenVariablesError, invokeNext } from './next';
 import { addVarFlag, loadVarsFile, mergeCliVars } from '../lib/run-vars';
 import type { ActionStep, LayerResultEntry, MergeBranch, NextRecord, StepRecord } from '../lib/next';
 import { realGit, type GitResult, type GitRunner } from '../lib/git';
-import { addUsage, emptyUsage, parseEnvelope, parseResultObject, detectProviderLimit, type ClaudeEnvelope, type ProviderLimit } from '../lib/envelope';
+import {
+  addUsage,
+  emptyUsage,
+  loadUsageTotals,
+  parseEnvelope,
+  parseResultObject,
+  detectProviderLimit,
+  type ClaudeEnvelope,
+  type ProviderLimit,
+} from '../lib/envelope';
 import {
   RECORD_OUTCOMES as RECORD_OUTCOME_LIST,
   extractQuestion,
@@ -1132,15 +1141,9 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
   // SAME run (blocked → resume re-enters a fresh process) so the terminal
   // stats enrichment covers every spawn. Best-effort like all stats.
   const usageFile = join(rootAbs, '.runtime', runId, 'usage.json');
-  const usageTotals = emptyUsage();
-  try {
-    const prev = JSON.parse(readFileSync(usageFile, 'utf8')) as Record<string, unknown>;
-    for (const k of ['input', 'output', 'cache_read', 'cache_creation', 'cost_usd'] as const) {
-      if (typeof prev[k] === 'number' && Number.isFinite(prev[k] as number)) usageTotals[k] = prev[k] as number;
-    }
-  } catch {
-    // no prior usage — fresh run
-  }
+  // Shared reader (lib/envelope.ts, also used by the stats backfill core):
+  // missing/corrupt → zeros, i.e. a fresh run.
+  const usageTotals = loadUsageTotals(usageFile).totals;
   const noteUsage = (envelope: ClaudeEnvelope | null): void => {
     if (!envelope || (envelope.usage === null && envelope.total_cost_usd === null)) return;
     addUsage(usageTotals, envelope);

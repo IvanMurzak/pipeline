@@ -15,6 +15,8 @@
 //   usage:{input_tokens output_tokens cache_read_input_tokens
 //          cache_creation_input_tokens}
 
+import { readFileSync } from 'node:fs';
+
 export interface EnvelopeUsage {
   input: number;
   output: number;
@@ -189,6 +191,28 @@ export function parseResultObject(result: string | null): Record<string, unknown
 /** Zero-initialized usage accumulator. */
 export function emptyUsage(): EnvelopeUsage & { cost_usd: number } {
   return { input: 0, output: 0, cache_read: 0, cache_creation: 0, cost_usd: 0 };
+}
+
+/** Read a persisted usage accumulator (`.runtime/<run>/usage.json`, written by
+ *  `pipeline drive`'s noteUsage) back into a fresh accumulator. Shared by the
+ *  writer's own resume path (commands/drive.ts) and the stats backfill core
+ *  (lib/stats-backfill.ts) so the 5-field shape is parsed in exactly one
+ *  place. Never throws. `found` is derived from THIS single read (no separate
+ *  existsSync — no TOCTOU window): true only when the file was read AND
+ *  parsed to an object; missing/corrupt → zeros + false. The one deliberate
+ *  exception to this module's otherwise pure (no-fs) surface. */
+export function loadUsageTotals(usageFile: string): { totals: EnvelopeUsage & { cost_usd: number }; found: boolean } {
+  const totals = emptyUsage();
+  try {
+    const raw = JSON.parse(readFileSync(usageFile, 'utf8')) as Record<string, unknown>;
+    if (raw === null || typeof raw !== 'object') return { totals, found: false };
+    for (const k of ['input', 'output', 'cache_read', 'cache_creation', 'cost_usd'] as const) {
+      if (typeof raw[k] === 'number' && Number.isFinite(raw[k])) totals[k] = raw[k] as number;
+    }
+    return { totals, found: true };
+  } catch {
+    return { totals, found: false };
+  }
 }
 
 /** Fold one envelope's usage/cost into an accumulator (mutates + returns it). */

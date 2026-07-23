@@ -376,3 +376,79 @@ export function collectRunToolFailures(
   all.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
   return { failures: all.slice(0, cap), truncated: all.length > cap };
 }
+
+// ---------------------------------------------------------------------------
+// From apps/pipeline-ui/transcript-stats.ts — run→transcript locator
+// ---------------------------------------------------------------------------
+
+/** Per-(file, run_id) occurrence-count memo. The negative-result path retries
+ *  while a live run has no resolved transcript — without this it re-reads every
+ *  in-window multi-MB session file each time even though none of them changed.
+ *  Keyed by path|runId; invalidated by size/mtime drift. */
+const occurrenceMemo = new Map<string, { size: number; mtimeMs: number; count: number }>();
+const OCCURRENCE_MEMO_MAX = 2000;
+
+/** Locate the session transcript belonging to a run: among the project's
+ *  in-window session files, the one that mentions the run id the most times
+ *  (a manager transcript names its run repeatedly; a session that merely
+ *  mentions it once loses). Returns null when nothing contains the run id —
+ *  callers must treat that as "no transcript", never guess by window alone. */
+export function findTranscriptByRunId(
+  projectRoot: string,
+  runId: string,
+  windowStartIso: string | null,
+  windowEndIso: string | null,
+  homeOverride?: string,
+): string | null {
+  if (!runId) return null;
+  const dir = join(claudeProjectsDir(homeOverride), encodeClaudeProjectDir(projectRoot));
+  if (!existsSync(dir)) return null;
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const start = toEpochOrNull(windowStartIso);
+  const end = toEpochOrNull(windowEndIso);
+  let best: string | null = null;
+  let bestCount = 0;
+  for (const name of names) {
+    if (!name.endsWith('.jsonl')) continue;
+    const p = join(dir, name);
+    let st;
+    try {
+      st = statSync(p);
+    } catch {
+      continue;
+    }
+    if (!st.isFile()) continue;
+    const birth = st.birthtimeMs && st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs;
+    // Window overlap: the session must still have been written to after the
+    // run started, and must have existed before the run ended.
+    if (start !== null && st.mtimeMs < start - BIRTHTIME_SLACK_MS) continue;
+    if (end !== null && birth > end + BIRTHTIME_SLACK_MS) continue;
+    const memoKey = `${p}|${runId}`;
+    const memo = occurrenceMemo.get(memoKey);
+    let count: number;
+    if (memo && memo.size === st.size && memo.mtimeMs === st.mtimeMs) {
+      count = memo.count;
+    } else {
+      let text: string;
+      try {
+        text = readFileSync(p, 'utf-8');
+      } catch {
+        continue;
+      }
+      count = 0;
+      for (let i = text.indexOf(runId); i !== -1; i = text.indexOf(runId, i + runId.length)) count++;
+      if (occurrenceMemo.size >= OCCURRENCE_MEMO_MAX) occurrenceMemo.clear();
+      occurrenceMemo.set(memoKey, { size: st.size, mtimeMs: st.mtimeMs, count });
+    }
+    if (count > bestCount) {
+      bestCount = count;
+      best = p;
+    }
+  }
+  return best;
+}
