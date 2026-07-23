@@ -383,7 +383,7 @@ test('drive: 3-step sequential run to completion (exit 0, manager-shaped prompts
 
   // Run-start setup mirrored the manager: feedback dir + gitignore stub + records dir.
   expect(existsSync(join(root, '.feedback', run))).toBe(true);
-  expect(readFileSync(join(root, '.feedback', '.gitignore'), 'utf8')).toBe('*\n');
+  expect(readFileSync(join(root, '.feedback', '.gitignore'), 'utf8')).toMatch(/^\*$/m);
   expect(existsSync(join(root, '.runtime', run, 'records'))).toBe(true);
 }, 30000);
 

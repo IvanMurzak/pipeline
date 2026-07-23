@@ -233,6 +233,48 @@ export function findStatsProjectRoot(start: string): string | null {
   return null;
 }
 
+/** A run id as `/pipeline:run` mints it: 12 lowercase hex chars
+ *  (`randomBytes(6).toString('hex')`). */
+const RUN_ID_SHAPE = /^[0-9a-f]{12}$/;
+/** Maximal hex runs in the transcript — a run id can only ever occur inside
+ *  one of these. */
+const HEX_RUN = /[0-9a-f]{12,}/g;
+
+/**
+ * Every 12-hex window of the hint transcript, precomputed ONCE.
+ *
+ * The correlation test is "does this record's run_id occur literally in the
+ * hint", and the obvious spelling — `hintText.includes(runId)` per record —
+ * rescans a possibly multi-megabyte string for every candidate, which is where
+ * a Stop-rung pass with hundreds of unenriched records spends its budget.
+ *
+ * The index is EXACT for hex-shaped ids, not an approximation: a run id is all
+ * hex, so any literal occurrence lies inside some maximal hex run, and taking
+ * every 12-char window of every such run reproduces `includes` precisely
+ * (including ids that start mid-hash). Most hex runs are exactly 12 chars, so
+ * this is ~one entry each; a 40-char sha contributes 29.
+ *
+ * Returns null when the text is absent — callers then have no hint at all.
+ */
+function indexHintRunIds(hintText: string | null): Set<string> | null {
+  if (hintText === null) return null;
+  const index = new Set<string>();
+  for (const match of hintText.matchAll(HEX_RUN)) {
+    const run = match[0];
+    for (let i = 0; i + 12 <= run.length; i++) index.add(run.slice(i, i + 12));
+  }
+  return index;
+}
+
+/** Whether the hint demonstrably mentions this run. Ids that do not match the
+ *  minted shape fall back to a direct scan, so a custom/legacy id keeps
+ *  working rather than silently failing correlation. */
+function hintMentionsRun(hintText: string | null, index: Set<string> | null, runId: string): boolean {
+  if (hintText === null) return false;
+  if (RUN_ID_SHAPE.test(runId)) return index !== null && index.has(runId);
+  return hintText.includes(runId);
+}
+
 /** Reconcile every `tokens === null` run record under `<projectRoot>/.claude/
  *  pipeline/.stats/` that falls in window, per the source-select rules above.
  *  Writes enrichment via `statsEnrichTokens` (regenerates SUMMARY.md).
@@ -270,6 +312,9 @@ export function backfillProject(projectRoot: string, opts: BackfillOptions = {})
       hintText = null;
     }
   }
+  // Indexed once, so the per-record correlation check is a Set lookup rather
+  // than a fresh scan of the whole transcript (see indexHintRunIds).
+  const hintRunIds = indexHintRunIds(hintText);
 
   outer: for (const runsFile of findRunsFiles(base)) {
     let text: string;
@@ -299,7 +344,7 @@ export function backfillProject(projectRoot: string, opts: BackfillOptions = {})
           // Pre-refactor relay semantics: hint or nothing (a vanished hint
           // file means every candidate is unprovable this pass).
           result = hintText === null ? { status: 'pruned' } : foldManagerStyle(opts.transcriptHint, rec);
-        } else if (hintText !== null && hintText.includes(rec.run_id)) {
+        } else if (hintMentionsRun(hintText, hintRunIds, rec.run_id)) {
           // 'correlated': this record demonstrably belongs to the hinted
           // session — fold it (manager-style: the hint + its subagents dir,
           // which is where a pipeline-manager's transcript lives when the

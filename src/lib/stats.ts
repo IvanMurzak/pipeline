@@ -32,6 +32,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { ensureGeneratedDir } from './generated-dir';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 
 // ---------------------------------------------------------------------------
@@ -403,7 +404,7 @@ export function statsFinalizeRun(
       runner: (process.env.PIPELINE_STATS_RUNNER ?? '').trim() || 'manager',
       endedMs: Date.now(),
     });
-    mkdirSync(join(loc.base, loc.rel, 'runs'), { recursive: true });
+    ensureGeneratedDir(join(loc.base, loc.rel, 'runs'), loc.base);
     appendFileSync(runsFile, JSON.stringify(rec) + '\n', 'utf8');
     writeFileSync(join(loc.base, loc.rel, 'runs', `${runId}.log`), renderRunLog(rec), 'utf8');
     if (existsSync(buf)) unlinkSync(buf);
@@ -760,7 +761,7 @@ export function renderSummary(base: string): void {
     for (const f of findRunsFiles(base)) {
       if (existsSync(f)) records.push(...parseRunRecords(readFileSync(f, 'utf8')));
     }
-    mkdirSync(base, { recursive: true });
+    ensureGeneratedDir(base);
     writeFileSync(join(base, 'SUMMARY.md'), renderSummaryMd(records, findInflight(base)), 'utf8');
   } catch {
     // best-effort

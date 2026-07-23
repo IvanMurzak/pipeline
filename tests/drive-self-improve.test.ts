@@ -527,7 +527,7 @@ test('drive self-improve: retrospective partitions all six categories (+script-f
 
   // Feedback deleted on success; the .gitignore stub kept (manager parity).
   expect(existsSync(feedbackDir)).toBe(false);
-  expect(readFileSync(join(root, '.feedback', '.gitignore'), 'utf8')).toBe('*\n');
+  expect(readFileSync(join(root, '.feedback', '.gitignore'), 'utf8')).toMatch(/^\*$/m);
 
   // Events: retro-internal improver/script events are drive-emitted; the
   // run.retrospective payload carries counts + summaries + paths ONLY.

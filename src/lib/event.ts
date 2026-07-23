@@ -30,6 +30,7 @@ import {
   rmSync,
   realpathSync,
 } from 'node:fs';
+import { ensureGeneratedDir } from './generated-dir';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, dirname, resolve, isAbsolute, basename } from 'node:path';
@@ -211,7 +212,10 @@ export function resolveProjectRoot(start: string): ResolvedRoot {
 
 function ensureRuntimeDir(projectRoot: string): string {
   const runtime = join(projectRoot, '.claude', 'pipeline', '.runtime');
-  mkdirSync(runtime, { recursive: true });
+  // The whole .runtime tree is machine-generated — journals, liveness
+  // lockfiles, per-run session ids, rendered shadow copies. Mark it ignored at
+  // the root so a `git add -A` after a run cannot sweep it into a commit.
+  ensureGeneratedDir(runtime);
   return runtime;
 }
 

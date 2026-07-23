@@ -135,6 +135,7 @@ import { frozenVariablesError, invokeNext } from './next';
 import { addVarFlag, loadVarsFile, mergeCliVars } from '../lib/run-vars';
 import type { ActionStep, LayerResultEntry, MergeBranch, NextRecord, StepRecord } from '../lib/next';
 import { realGit, type GitResult, type GitRunner } from '../lib/git';
+import { ensureGeneratedDir } from '../lib/generated-dir';
 import {
   addUsage,
   emptyUsage,
@@ -1062,12 +1063,13 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
   const dropRecordsDir = dropRecordsDirFor(rootAbs, runId);
   const dropRunDir = dirname(dropRecordsDir);
   try {
-    mkdirSync(join(rootAbs, '.feedback', runId), { recursive: true });
-    const gi = join(rootAbs, '.feedback', '.gitignore');
-    if (!existsSync(gi)) writeFileSync(gi, '*\n', 'utf8');
-    mkdirSync(recordsDir, { recursive: true });
-    mkdirSync(sessionsDir, { recursive: true });
-    mkdirSync(dropRecordsDir, { recursive: true });
+    // Every one of these is a machine-generated tree; the shared helper marks
+    // each tree's ROOT ignored (see lib/generated-dir.ts) instead of leaving
+    // the rule to each consumer project's .gitignore.
+    ensureGeneratedDir(join(rootAbs, '.feedback', runId), join(rootAbs, '.feedback'));
+    ensureGeneratedDir(recordsDir, join(rootAbs, '.runtime'));
+    ensureGeneratedDir(sessionsDir, join(rootAbs, '.runtime'));
+    ensureGeneratedDir(dropRecordsDir, dropRunDir);
   } catch (e) {
     err(`pipeline drive: run-start setup failed: ${e instanceof Error ? e.message : String(e)}\n`);
     return 2;

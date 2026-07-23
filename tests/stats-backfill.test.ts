@@ -475,3 +475,79 @@ describe('backfillProject', () => {
     expect(report.enriched).toEqual([]);
   });
 });
+
+/**
+ * The hint-correlation index. It replaced a per-record `includes()` scan of the
+ * whole transcript, so the property that matters is that it decides IDENTICALLY
+ * — including the awkward case of an id sitting inside a longer hash.
+ */
+describe('hint correlation index', () => {
+  const projectRootFor = () => projectRoot;
+
+  test('an id embedded INSIDE a longer hex string still correlates', () => {
+    // A 40-char sha whose interior contains the run id — `includes` matched
+    // this, so the index must too, or the Stop rung would silently stop
+    // enriching such runs.
+    const rec = baseRecord({ run_id: 'abcdef123456', runner: 'headless', pipeline: 'demo' });
+    writeRuns([rec]);
+    const dir = join(home, '.claude', 'projects', encodeClaudeProjectDir(projectRootFor()));
+    mkdirSync(dir, { recursive: true });
+    const transcript = join(dir, 'embedded.jsonl');
+    const mid = new Date((Date.parse(rec.started_at as string) + Date.parse(rec.ended_at)) / 2).toISOString();
+    writeFileSync(
+      transcript,
+      entry(mid, {
+        role: 'assistant',
+        usage: { input_tokens: 9, output_tokens: 4, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        content: [use('t1', 'Read', { file_path: '/x' })],
+      }) +
+        entry(mid, { role: 'user', content: [okResult('t1')] }) +
+        entry(mid, { role: 'assistant', content: [{ type: 'text', text: 'sha 99abcdef1234567890fedcba0987654321000000 done' }] }),
+      'utf8',
+    );
+    const report = backfillProject(projectRootFor(), { transcriptHint: transcript });
+    expect(report.enriched).toEqual(['abcdef123456']);
+  });
+
+  test('a NON-hex-shaped run id falls back to a direct scan', () => {
+    const rec = baseRecord({ run_id: 'legacy-run-id', runner: 'headless', pipeline: 'demo' });
+    writeRuns([rec]);
+    const dir = join(home, '.claude', 'projects', encodeClaudeProjectDir(projectRootFor()));
+    mkdirSync(dir, { recursive: true });
+    const transcript = join(dir, 'legacy.jsonl');
+    const mid = new Date((Date.parse(rec.started_at as string) + Date.parse(rec.ended_at)) / 2).toISOString();
+    writeFileSync(
+      transcript,
+      entry(mid, {
+        role: 'assistant',
+        usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        content: [use('t1', 'Read', { file_path: '/x' })],
+      }) +
+        entry(mid, { role: 'user', content: [okResult('t1')] }) +
+        entry(mid, { role: 'assistant', content: [{ type: 'text', text: 'run legacy-run-id done' }] }),
+      'utf8',
+    );
+    expect(backfillProject(projectRootFor(), { transcriptHint: transcript }).enriched).toEqual(['legacy-run-id']);
+  });
+
+  test('an id absent from the hint still does NOT correlate', () => {
+    const rec = baseRecord({ run_id: 'ffffffffffff', runner: 'headless', pipeline: 'demo' });
+    writeRuns([rec]);
+    const dir = join(home, '.claude', 'projects', encodeClaudeProjectDir(projectRootFor()));
+    mkdirSync(dir, { recursive: true });
+    const transcript = join(dir, 'absent.jsonl');
+    const mid = new Date((Date.parse(rec.started_at as string) + Date.parse(rec.ended_at)) / 2).toISOString();
+    writeFileSync(
+      transcript,
+      entry(mid, {
+        role: 'assistant',
+        usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        content: [use('t1', 'Read', { file_path: '/x' })],
+      }) + entry(mid, { role: 'user', content: [okResult('t1')] }),
+      'utf8',
+    );
+    const report = backfillProject(projectRootFor(), { transcriptHint: transcript });
+    expect(report.enriched).toEqual([]);
+    expect(report.transcript_pruned).toEqual(['ffffffffffff']);
+  });
+});

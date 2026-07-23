@@ -220,7 +220,7 @@ test('F5: branch-divergent pipeline — run executes the BRANCH definition from 
     expect(r1.json.steps[0].worktree_path).toBe(wt);
     // .gitignore stubs written in the WORKTREE pipeline tree.
     expect(readFileSync(join(wtRoot, '.runtime', '.gitignore'), 'utf8')).toBe('*\n');
-    expect(readFileSync(join(wtRoot, '.feedback', '.gitignore'), 'utf8')).toBe('*\n');
+    expect(readFileSync(join(wtRoot, '.feedback', '.gitignore'), 'utf8')).toMatch(/^\*$/m);
     // Bookkeeping stays MAIN-scoped: next.json under the main pipeline root,
     // carrying the frozen flag + the (worktree_prefix, main_prefix) pair.
     const st1 = JSON.parse(readFileSync(join(mainRoot, '.runtime', runId, 'next.json'), 'utf8'));
