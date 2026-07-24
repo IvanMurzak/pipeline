@@ -240,6 +240,16 @@ function usage(): string {
     '      token never touches the project). Re-running updates the binding.',
     '      Exit 0 connected/updated · 1 auth/network failure · 2 usage.',
     '',
+    '  mesh notify [--interval-ms <n>] [--once] [--json]',
+    '      Background department-mesh task notifier (department-mesh design, task',
+    "      a1): polls the caller's open tasks via the credential",
+    '      `pipeline cloud connect` already stored and surfaces INPUT_REQUIRED/',
+    '      AUTH_REQUIRED and terminal transitions — an OS-level toast plus a',
+    "      durable pending-notification journal the plugin's SessionStart hook",
+    '      drains on the next Claude Code session, in ANY project. Normally',
+    '      spawned detached by the SessionStart hook; --once runs one poll cycle',
+    '      and exits (smoke-test a connection). Default interval 60000ms.',
+    '',
     '  step run <iteration.md> [--param <name>=<value> ...]',
     '           [--var NAME=value ...] [--vars-file <path>] [--json]',
     '      Dry-run ONE `type: script` step exactly as the runtime would (same',
@@ -312,6 +322,13 @@ async function main(argv: string[]): Promise<number> {
       // machinery — keep the hot `next` loop's per-spawn startup cost unchanged.
       const { runCloud } = await import('./commands/cloud');
       return runCloud(rest);
+    }
+    case 'mesh': {
+      // Lazy import (mirrors `cloud`): `mesh` pulls in the HTTP polling +
+      // child_process notification machinery — keep the hot `next` loop's
+      // per-spawn startup cost unchanged.
+      const { runMesh } = await import('./commands/mesh');
+      return runMesh(rest);
     }
     case 'step':
       return runStep(rest);
