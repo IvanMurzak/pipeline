@@ -230,6 +230,71 @@ describe('pollOnce', () => {
     expect(result.notifications).toEqual([]);
   });
 
+  test('a task originated via the REAL /mcp tasks.send tool (originPrincipal "mcp-user:<id>") is STILL detected as the caller\'s own — regression for the e3 gate convergence bug', async () => {
+    // cloud/apps/api/src/modules/mesh-mcp/tools/types.ts#principalForUser
+    // stamps MCP-created tasks `mcp-user:<id>`, not `user:<id>` — the two
+    // spellings name the SAME human via two different orchestrator entry
+    // points (REST vs the live Claude-Code-via-MCP path Persona B actually
+    // uses). Before this fix, pollOnce compared against `user:<id>` only, so
+    // a task created the way Persona B really creates it was silently never
+    // surfaced — Q2's "a parked task announces itself" guarantee never fired
+    // for the one path it exists to serve.
+    const home = mkHome();
+    seedCredential(home, SERVER, TOKEN);
+    const orgs = [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'member' }];
+    const fetchImpl = scriptedFetch({
+      me: { status: 200, body: { user: { id: 'u1' }, orgs } },
+      tasksByOrg: { 'org-1': [task({ originPrincipal: 'mcp-user:u1' })] },
+    });
+    const result = await pollOnce(makeDeps(fetchImpl, home));
+    expect(result.notifications).toHaveLength(1);
+    expect(result.notifications[0]!.taskId).toBe('task-1');
+  });
+
+  test('a "mcp-user:" task belonging to someone else is still filtered out', async () => {
+    const home = mkHome();
+    seedCredential(home, SERVER, TOKEN);
+    const orgs = [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'member' }];
+    const fetchImpl = scriptedFetch({
+      me: { status: 200, body: { user: { id: 'u1' }, orgs } },
+      tasksByOrg: { 'org-1': [task({ originPrincipal: 'mcp-user:someone-else' })] },
+    });
+    const result = await pollOnce(makeDeps(fetchImpl, home));
+    expect(result.notifications).toEqual([]);
+  });
+
+  test('a task originated via the A2A façade (originPrincipal "a2a-user:<id>") is ALSO detected as the caller\'s own — completing the same-class fix for c7', async () => {
+    // cloud/apps/api/src/modules/mesh-a2a/tokens.ts#principalForA2a stamps
+    // A2A-created tasks `a2a-user:<id>` — the THIRD user-delegated namespace
+    // (after REST `user:` and MCP `mcp-user:`), landed by task c7. The e3
+    // convergence fix must recognize it too, or the exact same silent-miss
+    // bug re-appears for the A2A entry point.
+    const home = mkHome();
+    seedCredential(home, SERVER, TOKEN);
+    const orgs = [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'member' }];
+    const fetchImpl = scriptedFetch({
+      me: { status: 200, body: { user: { id: 'u1' }, orgs } },
+      tasksByOrg: { 'org-1': [task({ originPrincipal: 'a2a-user:u1' })] },
+    });
+    const result = await pollOnce(makeDeps(fetchImpl, home));
+    expect(result.notifications).toHaveLength(1);
+    expect(result.notifications[0]!.taskId).toBe('task-1');
+  });
+
+  test('a non-user principal (execution/department) with the caller\'s id embedded is NOT matched (no over-match across namespaces)', async () => {
+    // `department:<id>`/`runner:<id>` etc. are machine principals — even if an
+    // id string collided, they must never be surfaced as the human's own task.
+    const home = mkHome();
+    seedCredential(home, SERVER, TOKEN);
+    const orgs = [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'member' }];
+    const fetchImpl = scriptedFetch({
+      me: { status: 200, body: { user: { id: 'u1' }, orgs } },
+      tasksByOrg: { 'org-1': [task({ originPrincipal: 'department:u1' })] },
+    });
+    const result = await pollOnce(makeDeps(fetchImpl, home));
+    expect(result.notifications).toEqual([]);
+  });
+
   test('an EXPIRED stored credential is skipped with an error, not thrown', async () => {
     const home = mkHome();
     seedCredential(home, SERVER, TOKEN, Date.parse('2026-07-01T00:00:00.000Z')); // in the past relative to `now`

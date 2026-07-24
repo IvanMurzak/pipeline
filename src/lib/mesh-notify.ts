@@ -97,6 +97,39 @@ export type DeptTaskState =
   | 'REJECTED'
   | 'AUTH_REQUIRED';
 
+/**
+ * True when `originPrincipal` names `userId` as the ORIGINATING human —
+ * across EVERY principal spelling the mesh orchestrator produces for a
+ * user-delegated task, not just one.
+ *
+ * FIX (e3 P2 gate, cross-repo convergence bug found against the REAL c6
+ * `tasks.send` tool, not the REST reference path this module was written
+ * against): the same human is stamped under a DIFFERENT namespace depending
+ * on the entry point that created the task —
+ *   - `user:<id>`      — the REST `POST /api/v1/dept-tasks`
+ *                        (`cloud/apps/api/src/modules/mesh/routes.ts`'s `principalFor`);
+ *   - `mcp-user:<id>`  — the `/mcp` `tasks.send` tool, the ACTUAL Persona B
+ *                        entry point Q2 exists to serve
+ *                        (`mesh-mcp/tools/types.ts`'s `principalForUser`);
+ *   - `a2a-user:<id>`  — the A2A façade's `message:send`
+ *                        (`mesh-a2a/tokens.ts`'s `principalForA2a`, task c7).
+ * Each is deliberately namespaced "so it is unambiguously distinguishable in
+ * audit trails" — but they all name the SAME originating user. This module's
+ * poll filter originally compared against `user:<id>` ONLY, so a task created
+ * by the live Claude-Code-via-MCP flow was silently invisible to its own
+ * notifier — Q2's parked-task-across-sessions guarantee (12-user-workflows.md
+ * Persona B) never fired for the one path that matters. Recognize ALL THREE
+ * user-delegated spellings so a task is "mine" regardless of which surface
+ * created it, while an execution/runner/department principal (or another
+ * user's id under any namespace) never matches.
+ */
+const USER_PRINCIPAL_PREFIXES = ["user:", "mcp-user:", "a2a-user:"] as const;
+
+function isOwnTask(originPrincipal: string, userId: string): boolean {
+  if (userId.length === 0) return false;
+  return USER_PRINCIPAL_PREFIXES.some((prefix) => originPrincipal === `${prefix}${userId}`);
+}
+
 /** States worth waking the user up for: needs a human, or done (either way). */
 export const NOTIFY_STATES: ReadonlySet<DeptTaskState> = new Set([
   'INPUT_REQUIRED',
@@ -324,11 +357,11 @@ export async function pollOnce(deps: MeshNotifyDeps): Promise<PollResult> {
       continue;
     }
     serversPolled++;
-    const myPrincipal = `user:${me.user?.id ?? ''}`;
+    const myUserId = me.user?.id ?? '';
     for (const org of me.orgs) {
       const tasks = await fetchOpenTasks(deps, server, cred.access_token, org.id);
       for (const task of tasks) {
-        if (task.originPrincipal !== myPrincipal) continue;
+        if (!isOwnTask(task.originPrincipal, myUserId)) continue;
         if (!NOTIFY_STATES.has(task.state)) continue;
         const key = `${server}::${task.id}`;
         const prior = journal.seen[key];
