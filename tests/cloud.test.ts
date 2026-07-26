@@ -31,6 +31,10 @@ import { createHash } from 'node:crypto';
 
 const SECRET_TOKEN = 'pat_SUPER_SECRET_abcdef0123456789';
 const DEVICE_CODE = 'device-code-xyz';
+/** The RFC 8628 device grant's refresh token (task a3) — a5 depends on this
+ *  surviving into the credential store; see the "device flow persists the
+ *  refresh token" test below. */
+const DEVICE_REFRESH_TOKEN = 'rt_device_SECRET_0123456789';
 
 const created: string[] = [];
 afterEach(() => {
@@ -80,9 +84,13 @@ interface FetchLog {
 }
 
 /**
- * A fetch that serves /auth/device/start once, then N pending replies on
- * /auth/device/token before an approved reply, then /api/v1/me. `orgs` and
- * `selectedOrgId` shape the identity response.
+ * A fetch that serves the RFC 8628 device grant — /oauth/device_authorization
+ * once, then N pending/slow_down replies on /oauth/token before an approved
+ * reply, then /api/v1/me. `orgs` and `selectedOrgId` shape the identity
+ * response. (Task a3: this used to script the legacy `/auth/device/*`
+ * endpoints — see the "legacy device flow" describe block at the bottom of
+ * this file for that contract, pinned separately now that `cloud.ts` no
+ * longer calls it.)
  */
 function scriptedFetch(opts: {
   pendingPolls?: number;
@@ -101,7 +109,7 @@ function scriptedFetch(opts: {
   let polls = 0;
   const fetchImpl = async (url: string, init: HttpInit): Promise<HttpResponse> => {
     opts.log.push({ url, init });
-    if (url.endsWith('/auth/device/start')) {
+    if (url.endsWith('/oauth/device_authorization')) {
       return reply(200, {
         device_code: DEVICE_CODE,
         user_code: 'WDJB-MJHT',
@@ -111,7 +119,7 @@ function scriptedFetch(opts: {
         interval: opts.interval ?? 5,
       });
     }
-    if (url.endsWith('/auth/device/token')) {
+    if (url.endsWith('/oauth/token')) {
       if (polls < slow) {
         polls++;
         return reply(400, { error: 'slow_down' });
@@ -123,11 +131,15 @@ function scriptedFetch(opts: {
       if (opts.tokenError) {
         return reply(400, { error: opts.tokenError });
       }
+      // RFC 8628 device grant response (mesh-oauth/routes.ts's
+      // `handleDeviceCodeGrant`) — REFRESHABLE, unlike the legacy PAT flow's
+      // reply, and no `token_prefix` (the AS never returns one).
       return reply(200, {
         access_token: SECRET_TOKEN,
-        token_type: 'bearer',
-        expires_in: 90 * 24 * 60 * 60,
-        token_prefix: 'pat_SUPER',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        refresh_token: DEVICE_REFRESH_TOKEN,
+        scope: '',
       });
     }
     if (url.endsWith('/api/v1/me')) {
@@ -298,22 +310,31 @@ describe('runCloud connect — happy path', () => {
     expect(cloud.org).toBe('acme');
     expect(typeof cloud.project).toBe('string');
     expect(typeof cloud.connected_at).toBe('string');
-    // THE no-secret guarantee.
+    // THE no-secret guarantee — covers the refresh token too (a3).
     expect(cloudRaw.includes(SECRET_TOKEN)).toBe(false);
     expect(cloudRaw.includes(DEVICE_CODE)).toBe(false);
+    expect(cloudRaw.includes(DEVICE_REFRESH_TOKEN)).toBe(false);
 
-    // Credential file DOES hold the token and lives OUTSIDE the project.
+    // Credential file DOES hold the access token AND the refresh token
+    // (a3 — a5 depends on the latter being here to rotate), and lives
+    // OUTSIDE the project.
     const credPath = credentialFilePath({ platform: 'linux', env: deps.env, homedir: deps.homedir });
     expect(existsSync(credPath)).toBe(true);
     expect(credPath.startsWith(deps.cwd)).toBe(false);
     const cred = JSON.parse(readFileSync(credPath, 'utf-8'));
     expect(cred.servers['https://api.ai-pipeline.dev'].access_token).toBe(SECRET_TOKEN);
+    expect(cred.servers['https://api.ai-pipeline.dev'].refresh_token).toBe(DEVICE_REFRESH_TOKEN);
 
-    // The token was NEVER logged.
+    // Neither secret was EVER logged.
     expect(out().includes(SECRET_TOKEN)).toBe(false);
     expect(err().includes(SECRET_TOKEN)).toBe(false);
-    // The user_code WAS shown (it is meant to be).
+    expect(out().includes(DEVICE_REFRESH_TOKEN)).toBe(false);
+    expect(err().includes(DEVICE_REFRESH_TOKEN)).toBe(false);
+    // The user_code WAS shown (it is meant to be), and so was the full
+    // `verification_uri_complete` (RFC 8628 §3.3.1 — a3): a phone can scan
+    // it instead of transcribing the code by hand.
     expect(out()).toContain('WDJB-MJHT');
+    expect(out()).toContain('https://app.example.com/auth/device?user_code=WDJB-MJHT');
   });
 
   test('credential file written with 0600 and chmod 0600; dir mkdir 0700', async () => {
@@ -348,11 +369,105 @@ describe('runCloud connect — happy path', () => {
     expect(out().includes(SECRET_TOKEN)).toBe(false);
   });
 
-  test('slow_down widens the interval and still approves', async () => {
+  test('slow_down widens the interval, prints its stated message, and still approves', async () => {
     const log: FetchLog[] = [];
-    const { deps } = makeDeps(scriptedFetch({ slowDownPolls: 1, pendingPolls: 1, log }), recordingFs());
+    const { deps, out } = makeDeps(scriptedFetch({ slowDownPolls: 1, pendingPolls: 1, log }), recordingFs());
     const code = await runCloud(['connect'], deps);
     expect(code).toBe(0);
+    expect(out()).toContain('slow down');
+  });
+
+  test('authorization_pending has a stated message ("Waiting for you to approve…") while polling', async () => {
+    const log: FetchLog[] = [];
+    const { deps, out } = makeDeps(scriptedFetch({ pendingPolls: 3, log }), recordingFs());
+    const code = await runCloud(['connect'], deps);
+    expect(code).toBe(0);
+    expect(out()).toContain('Waiting for you to approve');
+  });
+
+  test('falls back to the bare verification_uri + typed code when verification_uri_complete is absent', async () => {
+    const log: FetchLog[] = [];
+    const fetchImpl = async (url: string, init: HttpInit): Promise<HttpResponse> => {
+      log.push({ url, init });
+      if (url.endsWith('/oauth/device_authorization')) {
+        return reply(200, {
+          device_code: DEVICE_CODE,
+          user_code: 'NOQR-CODE',
+          verification_uri: 'https://app.example.com/auth/device',
+          // deliberately no verification_uri_complete
+          expires_in: 900,
+          interval: 5,
+        });
+      }
+      if (url.endsWith('/oauth/token')) {
+        return reply(200, {
+          access_token: SECRET_TOKEN,
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: DEVICE_REFRESH_TOKEN,
+          scope: '',
+        });
+      }
+      if (url.endsWith('/api/v1/me')) {
+        return reply(200, {
+          user: { id: 'u1', email: 'dev@example.com' },
+          orgs: [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'owner' }],
+          selectedOrgId: null,
+          selectedRole: null,
+        });
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    };
+    const { deps, out } = makeDeps(fetchImpl, recordingFs());
+    const code = await runCloud(['connect'], deps);
+    expect(code).toBe(0);
+    expect(out()).toContain('https://app.example.com/auth/device');
+    expect(out()).toContain('NOQR-CODE');
+  });
+
+  test('device_authorization request is form-urlencoded, names the api resource, and sends no scope', async () => {
+    const log: FetchLog[] = [];
+    let sawContentType = '';
+    let sawParams: URLSearchParams | undefined;
+    const fetchImpl = async (url: string, init: HttpInit): Promise<HttpResponse> => {
+      log.push({ url, init });
+      if (url.endsWith('/oauth/device_authorization')) {
+        sawContentType = init.headers['content-type'] ?? '';
+        sawParams = new URLSearchParams(init.body ?? '');
+        return reply(200, {
+          device_code: DEVICE_CODE,
+          user_code: 'WDJB-MJHT',
+          verification_uri: 'https://app.example.com/auth/device',
+          verification_uri_complete: 'https://app.example.com/auth/device?user_code=WDJB-MJHT',
+          expires_in: 900,
+          interval: 5,
+        });
+      }
+      if (url.endsWith('/oauth/token')) {
+        return reply(200, {
+          access_token: SECRET_TOKEN,
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: DEVICE_REFRESH_TOKEN,
+          scope: '',
+        });
+      }
+      if (url.endsWith('/api/v1/me')) {
+        return reply(200, {
+          user: { id: 'u1', email: 'dev@example.com' },
+          orgs: [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'owner' }],
+          selectedOrgId: null,
+          selectedRole: null,
+        });
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    };
+    const { deps } = makeDeps(fetchImpl, recordingFs());
+    expect(await runCloud(['connect'], deps)).toBe(0);
+    expect(sawContentType).toBe('application/x-www-form-urlencoded');
+    expect(sawParams?.get('client_id')).toBe('ai-pipeline-cli');
+    expect(sawParams?.get('resource')).toBe('https://api.ai-pipeline.dev/api');
+    expect(sawParams?.has('scope')).toBe(false);
   });
 
   test('--server flag overrides the default and keys the credential store', async () => {
@@ -401,7 +516,7 @@ describe('runCloud connect — failure outcomes', () => {
     expect(code).toBe(1);
     expect(err()).toContain('timed out');
     // Bounded: it stopped polling well before 100000 attempts.
-    const tokenPolls = log.filter((l) => l.url.endsWith('/auth/device/token')).length;
+    const tokenPolls = log.filter((l) => l.url.endsWith('/oauth/token')).length;
     expect(tokenPolls).toBeLessThan(10);
   });
 
@@ -457,7 +572,7 @@ describe('runCloud connect — idempotency', () => {
     expect(await runCloud(['connect'], first.deps)).toBe(0);
 
     // Second run: SAME home + project + fs, fresh fetch log. Should skip
-    // device/start + token entirely and only call /api/v1/me.
+    // device_authorization + token entirely and only call /api/v1/me.
     const log2: FetchLog[] = [];
     const second = makeDeps(scriptedFetch({ log: log2 }), fsPair, {
       env: first.deps.env,
@@ -466,8 +581,8 @@ describe('runCloud connect — idempotency', () => {
     });
     const code = await runCloud(['connect'], second.deps);
     expect(code).toBe(0);
-    expect(log2.some((l) => l.url.endsWith('/auth/device/start'))).toBe(false);
-    expect(log2.some((l) => l.url.endsWith('/auth/device/token'))).toBe(false);
+    expect(log2.some((l) => l.url.endsWith('/oauth/device_authorization'))).toBe(false);
+    expect(log2.some((l) => l.url.endsWith('/oauth/token'))).toBe(false);
     expect(log2.some((l) => l.url.endsWith('/api/v1/me'))).toBe(true);
     expect(second.out()).toContain('stored credential');
     expect(second.out()).toContain('updating the binding');
@@ -485,7 +600,7 @@ describe('runCloud connect — idempotency', () => {
       cwd: first.deps.cwd,
     });
     expect(await runCloud(['connect', '--reauth'], second.deps)).toBe(0);
-    expect(log2.some((l) => l.url.endsWith('/auth/device/start'))).toBe(true);
+    expect(log2.some((l) => l.url.endsWith('/oauth/device_authorization'))).toBe(true);
   });
 });
 
@@ -516,19 +631,26 @@ describe('runCloud connect — browser flow selection ladder', () => {
     const code = await runCloud(['connect'], deps);
     expect(code).toBe(0);
     expect(out()).toContain('No browser available here — falling back to a device code.');
-    expect(log.some((l) => l.url.endsWith('/auth/device/start'))).toBe(true);
+    expect(log.some((l) => l.url.endsWith('/oauth/device_authorization'))).toBe(true);
   });
 
-  test('--device skips the browser silently (no fallback reason line) and uses the device flow', async () => {
+  test('--device skips the browser silently (no fallback reason line), completes against /oauth/device_authorization, and yields a refreshable credential (DoD box 1)', async () => {
     const log: FetchLog[] = [];
     // platform 'darwin' would otherwise sail straight through every
     // pre-flight check — proving --device wins regardless.
-    const { deps, out } = makeDeps(scriptedFetch({ log }), recordingFs(), { platform: 'darwin' });
+    const { deps, out } = makeDeps(scriptedFetch({ pendingPolls: 1, log }), recordingFs(), { platform: 'darwin' });
     const code = await runCloud(['connect', '--device'], deps);
     expect(code).toBe(0);
     expect(out()).not.toContain('falling back');
-    expect(log.some((l) => l.url.endsWith('/auth/device/start'))).toBe(true);
+    expect(log.some((l) => l.url.endsWith('/oauth/device_authorization'))).toBe(true);
     expect(log.some((l) => l.url.endsWith('/oauth/authorize'))).toBe(false);
+
+    // "Yields a refreshable credential": the stored credential carries the
+    // refresh token the RFC 8628 grant returned — a5 rotates it from here.
+    const credPath = credentialFilePath({ platform: 'darwin', env: deps.env, homedir: deps.homedir });
+    const cred = JSON.parse(readFileSync(credPath, 'utf-8'));
+    expect(cred.servers['https://api.ai-pipeline.dev'].access_token).toBe(SECRET_TOKEN);
+    expect(cred.servers['https://api.ai-pipeline.dev'].refresh_token).toBe(DEVICE_REFRESH_TOKEN);
   });
 
   test('SSH_CONNECTION with no DISPLAY falls back with the SSH-specific reason', async () => {
@@ -539,7 +661,7 @@ describe('runCloud connect — browser flow selection ladder', () => {
     const code = await runCloud(['connect'], deps);
     expect(code).toBe(0);
     expect(out()).toContain('Connected over SSH with no browser to open — falling back to a device code.');
-    expect(log.some((l) => l.url.endsWith('/auth/device/start'))).toBe(true);
+    expect(log.some((l) => l.url.endsWith('/oauth/device_authorization'))).toBe(true);
   });
 
   test('an unbindable loopback port falls back with the documented message', async () => {
@@ -561,7 +683,7 @@ describe('runCloud connect — browser flow selection ladder', () => {
     const code = await runCloud(['connect'], deps);
     expect(code).toBe(0);
     expect(out()).toContain('Could not open a local callback port — falling back to a device code.');
-    expect(log.some((l) => l.url.endsWith('/auth/device/start'))).toBe(true);
+    expect(log.some((l) => l.url.endsWith('/oauth/device_authorization'))).toBe(true);
   });
 
   test('a browser opener that exits non-zero falls back, prints why, and closes the listener it had already bound', async () => {
@@ -580,7 +702,7 @@ describe('runCloud connect — browser flow selection ladder', () => {
     const code = await runCloud(['connect'], deps);
     expect(code).toBe(0);
     expect(out()).toContain('Could not open your browser — falling back to a device code.');
-    expect(log.some((l) => l.url.endsWith('/auth/device/start'))).toBe(true);
+    expect(log.some((l) => l.url.endsWith('/oauth/device_authorization'))).toBe(true);
     expect(spy.closed()).toBe(true);
   });
 
@@ -676,7 +798,9 @@ describe('runCloud connect — browser flow selection ladder', () => {
           access_token: SECRET_TOKEN,
           token_type: 'bearer',
           expires_in: 3600,
-          refresh_token: 'rt_should_be_ignored_by_a2',
+          // a3: the browser flow's refresh token is now PERSISTED (it was
+          // silently dropped before a3 shipped) — see the assertion below.
+          refresh_token: 'rt_persisted_by_a3',
           scope: '',
         });
       }
@@ -703,14 +827,167 @@ describe('runCloud connect — browser flow selection ladder', () => {
     expect(code).toBe(0);
     expect(out()).toContain('Opening your browser to authorize');
     expect(log.some((l) => l.url.endsWith('/oauth/token'))).toBe(true);
-    expect(log.some((l) => l.url.endsWith('/auth/device/start'))).toBe(false);
+    expect(log.some((l) => l.url.endsWith('/oauth/device_authorization'))).toBe(false);
     expect(spy.closed()).toBe(true); // closed even on the SUCCESS path
 
     const credPath = credentialFilePath({ platform: 'darwin', env: deps.env, homedir: deps.homedir });
     const cred = JSON.parse(readFileSync(credPath, 'utf-8'));
     expect(cred.servers['https://api.ai-pipeline.dev'].access_token).toBe(SECRET_TOKEN);
+    expect(cred.servers['https://api.ai-pipeline.dev'].refresh_token).toBe('rt_persisted_by_a3');
     expect(cred.servers['https://api.ai-pipeline.dev'].org_slug).toBe('acme');
     expect(out().includes(SECRET_TOKEN)).toBe(false);
+    expect(out().includes('rt_persisted_by_a3')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Legacy device flow (server-side regression — no longer called by this CLI)
+// ---------------------------------------------------------------------------
+//
+// Task a3 re-points `deviceStart`/`pollForToken` at the authorization
+// server's RFC 8628 grant (`/oauth/device_authorization` + `/oauth/token`)
+// — every test above this point exercises THAT path. The OLD
+// `/auth/device/start` + `/auth/device/token` contract
+// (cloud/apps/api/src/modules/auth/routes.ts) is deliberately NOT removed —
+// it keeps serving whatever CLI version is already installed out in the
+// world (this task's DoD: "the legacy endpoints are untouched and still
+// work for an old CLI").
+//
+// Nothing in `cloud.ts` calls it anymore, so it cannot be regression-tested
+// through `runCloud`/`parseConnectArgs` — this repo owns the client, not the
+// server, and a live run against `cloud/apps/api` is out of reach here (no
+// DB, and the task instructions are explicit: don't try). What follows is
+// the most honest thing this repo CAN do: a minimal, self-contained
+// reimplementation of the PRE-a3 client logic (see git history for the code
+// this replaced), run against a fake server scripted to the exact shape read
+// directly out of `auth/routes.ts` on 2026-07-26 — JSON in, JSON out, a
+// PAT-shaped success with NO `refresh_token` (unlike the new RFC 8628 path
+// above). It is intentionally NOT exported from, or shared with, `cloud.ts`
+// — this is a pinned contract test, not shipped code. If the real server
+// ever silently drifts from this shape, this is the only place in the tree
+// that would still notice.
+
+const LEGACY_DEVICE_CODE = 'legacy-device-code-abc';
+const LEGACY_PAT = 'pat_LEGACY_SECRET_9876543210';
+
+class LegacyDeviceError extends Error {}
+
+/** Scripts the LEGACY `/auth/device/start` + `/auth/device/token` contract
+ *  (JSON request/response; a PAT-shaped approval with NO `refresh_token`) —
+ *  the mirror image of `scriptedFetch` above, which scripts the NEW RFC 8628
+ *  contract. Also asserts the exact wire shape an old CLI relied on, so a
+ *  server-side drift fails this suite loudly rather than silently. */
+function legacyScriptedFetch(opts: { pendingPolls?: number; slowDownPolls?: number; tokenError?: string }) {
+  const pending = opts.pendingPolls ?? 0;
+  const slow = opts.slowDownPolls ?? 0;
+  let polls = 0;
+  return async (url: string, init: HttpInit): Promise<HttpResponse> => {
+    if (url.endsWith('/auth/device/start')) {
+      expect(init.method).toBe('POST');
+      expect(init.headers['content-type']).toBe('application/json');
+      expect(init.body).toBe('{}');
+      return reply(200, {
+        device_code: LEGACY_DEVICE_CODE,
+        user_code: 'ABCD-1234',
+        verification_uri: 'https://app.example.com/auth/device',
+        verification_uri_complete: 'https://app.example.com/auth/device?user_code=ABCD-1234',
+        expires_in: 900,
+        interval: 5,
+      });
+    }
+    if (url.endsWith('/auth/device/token')) {
+      expect(init.headers['content-type']).toBe('application/json');
+      const parsedBody = JSON.parse(init.body ?? '{}') as { device_code?: string };
+      expect(parsedBody.device_code).toBe(LEGACY_DEVICE_CODE);
+      if (polls < slow) {
+        polls++;
+        return reply(400, { error: 'slow_down' });
+      }
+      if (polls < slow + pending) {
+        polls++;
+        return reply(400, { error: 'authorization_pending' });
+      }
+      if (opts.tokenError) {
+        return reply(400, { error: opts.tokenError });
+      }
+      return reply(200, {
+        access_token: LEGACY_PAT,
+        token_type: 'bearer',
+        expires_in: 90 * 24 * 60 * 60,
+        token_prefix: 'pat_LEGACY',
+        // Deliberately NO refresh_token — auth/routes.ts's device/token
+        // handler never returns one. That absence is exactly what a3 fixes
+        // on the NEW endpoint, and exactly what this test pins for the OLD
+        // one (see the assertion below).
+      });
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+}
+
+/** A minimal reimplementation of the client logic `cloud.ts` used to run
+ *  BEFORE task a3 — kept ONLY here, not in production code, purely so this
+ *  suite can prove the server's legacy contract is still walkable end to
+ *  end. */
+async function legacyDeviceFlow(
+  fetchImpl: (url: string, init: HttpInit) => Promise<HttpResponse>,
+  server: string,
+): Promise<{ access_token: string; token_type?: string; token_prefix?: string; refresh_token?: string }> {
+  const startRes = await fetchImpl(`${server}/auth/device/start`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: '{}',
+  });
+  if (startRes.status !== 200) throw new LegacyDeviceError(`device/start failed: HTTP ${startRes.status}`);
+  const start = (await startRes.json()) as { device_code: string; user_code: string };
+
+  for (;;) {
+    const res = await fetchImpl(`${server}/auth/device/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ device_code: start.device_code }),
+    });
+    if (res.status === 200) {
+      return (await res.json()) as { access_token: string; token_type?: string; token_prefix?: string };
+    }
+    const body = (await res.json()) as { error?: string };
+    if (body.error === 'authorization_pending' || body.error === 'slow_down') continue;
+    throw new LegacyDeviceError(body.error ?? `HTTP ${res.status}`);
+  }
+}
+
+describe('legacy device flow (server-side regression — /auth/device/* is not touched by a3)', () => {
+  test('start + immediate approval mints a PAT-shaped credential with NO refresh_token', async () => {
+    const cred = await legacyDeviceFlow(legacyScriptedFetch({}), 'https://api.ai-pipeline.dev');
+    expect(cred.access_token).toBe(LEGACY_PAT);
+    expect(cred.token_type).toBe('bearer');
+    expect(cred.token_prefix).toBe('pat_LEGACY');
+    expect(cred.refresh_token).toBeUndefined();
+  });
+
+  test('authorization_pending keeps polling, then approves', async () => {
+    const cred = await legacyDeviceFlow(legacyScriptedFetch({ pendingPolls: 2 }), 'https://api.ai-pipeline.dev');
+    expect(cred.access_token).toBe(LEGACY_PAT);
+  });
+
+  test('slow_down keeps polling, then approves', async () => {
+    const cred = await legacyDeviceFlow(
+      legacyScriptedFetch({ slowDownPolls: 1, pendingPolls: 1 }),
+      'https://api.ai-pipeline.dev',
+    );
+    expect(cred.access_token).toBe(LEGACY_PAT);
+  });
+
+  test('access_denied aborts with the server-supplied error code', async () => {
+    await expect(
+      legacyDeviceFlow(legacyScriptedFetch({ tokenError: 'access_denied' }), 'https://api.ai-pipeline.dev'),
+    ).rejects.toThrow('access_denied');
+  });
+
+  test('expired_token aborts with the server-supplied error code', async () => {
+    await expect(
+      legacyDeviceFlow(legacyScriptedFetch({ tokenError: 'expired_token' }), 'https://api.ai-pipeline.dev'),
+    ).rejects.toThrow('expired_token');
   });
 });
 

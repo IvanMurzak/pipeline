@@ -78,6 +78,13 @@ export interface StoredCredential {
   token_type: string;
   /** Non-secret display prefix (e.g. `pat_ab12…`) — safe to show. */
   token_prefix?: string;
+  /** The OAuth refresh token (a SECRET) — present when the credential came
+   *  from the browser authorization_code flow (a2) or the RFC 8628 device
+   *  grant (a3); absent for a credential minted by the legacy PAT-issuing
+   *  device flow, which never returns one. Rotation (single-flight,
+   *  family-reuse detection) is task a5's job — this field just makes sure
+   *  the value survives long enough for a5 to rotate it. */
+  refresh_token?: string;
   /** Epoch ms when the token expires (absent = unknown/non-expiring). */
   expires_at?: number;
   /** Non-secret display fields captured at connect time. */

@@ -5,24 +5,45 @@
 // asked which authentication method to use (simplified-onboarding
 // `04-cloud-auth.md` §4's selection ladder decides): a browser
 // authorization_code + PKCE flow with a loopback redirect (RFC 8252) is the
-// default, and it silently falls back to the legacy OAuth-style device flow
-// (RFC 8628-shaped) — printing a one-line reason — when no browser is
-// reachable, the loopback port can't be bound, `SSH_CONNECTION` is set with
-// no X forwarding, the browser opener exits non-zero, or `--device` was
+// default, and it silently falls back to the authorization server's RFC 8628
+// Device Authorization Grant — printing a one-line reason — when no browser
+// is reachable, the loopback port can't be bound, `SSH_CONNECTION` is set
+// with no X forwarding, the browser opener exits non-zero, or `--device` was
 // passed explicitly. Either way the obtained token lands in the SECURE
 // per-user credential store, then a NON-SECRET project↔cloud binding is
 // recorded in `<cwd>/.claude/pipeline/cloud.json`.
 //
 // Server contract (read-only source of truth):
-//   Device flow — apps/api/src/modules/auth/routes.ts:
-//     POST /auth/device/start  → 200 { device_code, user_code, verification_uri,
-//                                       verification_uri_complete, expires_in, interval }
-//     POST /auth/device/token  { device_code } →
-//          200 { access_token, token_type, expires_in, token_prefix }  (approved)
+//   Device flow — apps/api/src/modules/mesh-oauth/routes.ts (task a3 — the
+//   AS's RFC 8628 grant; this file used to call a legacy PAT-issuing device
+//   flow instead, see "Legacy device flow" below):
+//     POST /oauth/device_authorization  (form-urlencoded)
+//          client_id=ai-pipeline-cli&resource=<server>/api →
+//          200 { device_code, user_code, verification_uri,
+//                verification_uri_complete, expires_in, interval }
+//          — NO `scope`: the `api` audience carries none by design (same
+//          rule the browser flow's token exchange obeys, below).
+//     POST /oauth/token  (form-urlencoded)
+//          grant_type=urn:ietf:params:oauth:grant-type:device_code&
+//          device_code=&client_id=ai-pipeline-cli →
+//          200 { access_token, token_type, expires_in, refresh_token, scope }
+//               (approved — REFRESHABLE, unlike the legacy PAT this
+//               replaces; persisted below in the credential store for a5's
+//               rotation to use)
 //          400 { error: "authorization_pending" }  → keep polling
 //          400 { error: "slow_down" }              → widen the interval, keep polling
 //          400 { error: "access_denied" }          → user denied — abort
-//          400 { error: "expired_token" }          → code expired — abort
+//          400 { error: "expired_token" }          → code expired, or the
+//                                                      code was already
+//                                                      redeemed — abort
+//   Legacy device flow — apps/api/src/modules/auth/routes.ts — STILL SERVED,
+//   unchanged, so a CLI published before this migration keeps working:
+//   `POST /auth/device/start` + `POST /auth/device/token`, minting a
+//   non-refreshable PAT. This file no longer calls it (see git history for
+//   the prior implementation); `tests/cloud.test.ts`'s "legacy device flow
+//   (server-side regression)" suite pins the exact wire contract so a
+//   silent server-side drift is still caught even though nothing HERE
+//   exercises it at runtime.
 //   Browser flow — apps/api/src/modules/mesh-oauth/routes.ts:
 //     GET  ${server}/oauth/authorize?client_id=ai-pipeline-cli&redirect_uri=
 //          http://127.0.0.1:<port>/callback&response_type=code&code_challenge=
@@ -46,12 +67,17 @@
 //        { user, orgs:[{id,slug,name,role}], selectedOrgId, selectedRole }
 //        — the ONLY source of the org slug (neither token exchange carries
 //        one for the browser flow's org selection step; org binding for the
-//        *token itself* is separate and happens server-side at consent).
+//        *token itself* is separate and happens server-side at consent — and
+//        the device grant's token is deliberately NOT org-bound at all,
+//        matching the legacy PAT's shape; see mesh-oauth/routes.ts's
+//        `handleDeviceCodeGrant`).
 //
 // Security invariants:
-//   - cloud.json holds ONLY slugs/URLs — the token NEVER touches the project.
-//   - the token is written to the per-user store with 0600 perms and is NEVER
-//     printed to stdout/stderr (only its non-secret prefix, if shown at all).
+//   - cloud.json holds ONLY slugs/URLs — neither the access token nor the
+//     refresh token ever touches the project.
+//   - the access token AND the refresh token are written to the per-user
+//     store with 0600 perms and are NEVER printed to stdout/stderr (only the
+//     access token's non-secret prefix, if the server ever supplies one).
 //   - the loopback listener binds the IP LITERAL only (127.0.0.1 / [::1]),
 //     never `localhost` (RFC 8252 §7.3); PKCE `S256` + `state` are both
 //     mandatory and both drawn from a CSPRNG (see lib/loopback-oauth.ts); the
@@ -199,12 +225,15 @@ interface TokenResponse {
   access_token: string;
   token_type?: string;
   expires_in?: number;
+  /** Legacy-flow-only: the OLD `/auth/device/token` response carries a
+   *  display prefix for the PAT it mints. Neither the RFC 8628 device grant
+   *  nor the browser flow's token endpoint returns one (undefined on both,
+   *  as of a3). */
   token_prefix?: string;
-  /** Browser flow only — device-grant tokens are refreshable too, but the
-   *  device-flow branch below has never stored one, and a5 (credential-store
-   *  refresh: single-flight rotation with family-reuse detection) owns
-   *  actually persisting and rotating this. Out of scope here on purpose —
-   *  see the module doc. */
+  /** Both the browser flow (a2) and the RFC 8628 device grant (a3) return
+   *  one; `connect()` below persists it in the credential store for either
+   *  path. a5 owns ROTATING it (single-flight refresh with family-reuse
+   *  detection) — this task only makes sure it is never discarded. */
   refresh_token?: string;
   scope?: string;
 }
@@ -318,7 +347,12 @@ async function doFetch(deps: CloudDeps, url: string, init: HttpInit): Promise<Ht
   }
 }
 
-const JSON_HEADERS = { 'content-type': 'application/json', accept: 'application/json' };
+/** Form-urlencoded — every RFC 6749/RFC 8628 endpoint on the AS
+ *  (`/oauth/device_authorization`, `/oauth/token`) reads `c.req.parseBody()`,
+ *  never JSON (mesh-oauth/routes.ts's `readFormBody`). */
+const FORM_HEADERS = { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' };
+/** RFC 8628 §3.4's registered grant-type URN for the device access token request. */
+const DEVICE_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
 
 /** Best-effort parse of an error body's `error` code (tolerant of non-JSON). */
 async function errorCode(res: HttpResponse): Promise<string | undefined> {
@@ -330,11 +364,26 @@ async function errorCode(res: HttpResponse): Promise<string | undefined> {
   }
 }
 
+/**
+ * RFC 8628 §3.1 device authorization request, against the AS's real grant
+ * (mesh-oauth/routes.ts's `POST /oauth/device_authorization`) — task a3's
+ * migration off the legacy PAT-issuing `/auth/device/start` this function
+ * used to call (see git history / the module doc's "Legacy device flow"
+ * note). `resource` names the SAME `<issuer>/api` REST audience the browser
+ * flow requests (`tryBrowserFlow`, below) — deliberately NO `scope`: the
+ * `api` audience carries none by design (mesh-oauth/resource.ts's
+ * `scopesAllowedForResource("api")` is `[]`; the AS refuses any non-empty
+ * scope request against it, mirroring the browser flow's own token exchange).
+ */
 async function deviceStart(deps: CloudDeps, server: string): Promise<DeviceStartResponse> {
-  const res = await doFetch(deps, `${server}/auth/device/start`, {
+  const body = new URLSearchParams({
+    client_id: CLI_CLIENT_ID,
+    resource: `${server}/api`,
+  }).toString();
+  const res = await doFetch(deps, `${server}/oauth/device_authorization`, {
     method: 'POST',
-    headers: JSON_HEADERS,
-    body: '{}',
+    headers: FORM_HEADERS,
+    body,
   });
   if (res.status !== 200) {
     const code = await errorCode(res);
@@ -342,11 +391,11 @@ async function deviceStart(deps: CloudDeps, server: string): Promise<DeviceStart
       `device authorization request failed (HTTP ${res.status}${code ? `: ${code}` : ''})`,
     );
   }
-  const body = (await res.json()) as DeviceStartResponse;
-  if (!body || !body.device_code || !body.user_code || !body.verification_uri) {
+  const parsed = (await res.json()) as DeviceStartResponse;
+  if (!parsed || !parsed.device_code || !parsed.user_code || !parsed.verification_uri) {
     throw new CloudError('device authorization response was missing required fields');
   }
-  return body;
+  return parsed;
 }
 
 /**
@@ -354,11 +403,25 @@ async function deviceStart(deps: CloudDeps, server: string): Promise<DeviceStart
  * (denied/expired/deadline). Respects the server-provided poll `interval` and
  * `expires_in`, widening the interval on `slow_down`. Bounded — never loops
  * past the expiry deadline.
+ *
+ * RE-POINTED, NOT REWRITTEN (task a3): the request now targets the AS's real
+ * `POST /oauth/token` (`grant_type=urn:ietf:params:oauth:grant-type:device_code`,
+ * form-urlencoded, per RFC 8628 §3.4) instead of the legacy
+ * `/auth/device/token`'s JSON body — but the timing/retry state machine
+ * below (the deadline check, the sleep-then-poll order, the interval
+ * widening, which error codes continue vs. abort) is untouched: it was
+ * already RFC 8628 §3.5 conformant before this task, and the new endpoint's
+ * error vocabulary (`authorization_pending`/`slow_down`/`access_denied`/
+ * `expired_token`) is byte-identical to the legacy one's, so the `switch`
+ * below needed no logic changes — only a `say()` call added to the
+ * `slow_down` arm so that state has a stated, testable message too (04-05
+ * DoD).
  */
 async function pollForToken(
   deps: CloudDeps,
   server: string,
   start: DeviceStartResponse,
+  say: (s: string) => void,
 ): Promise<TokenResponse> {
   let intervalMs =
     (start.interval && start.interval > 0 ? start.interval : DEFAULT_INTERVAL_S) * 1000;
@@ -374,10 +437,14 @@ async function pollForToken(
     }
     await deps.sleep(intervalMs);
 
-    const res = await doFetch(deps, `${server}/auth/device/token`, {
+    const res = await doFetch(deps, `${server}/oauth/token`, {
       method: 'POST',
-      headers: JSON_HEADERS,
-      body: JSON.stringify({ device_code: start.device_code }),
+      headers: FORM_HEADERS,
+      body: new URLSearchParams({
+        grant_type: DEVICE_GRANT_TYPE,
+        device_code: start.device_code,
+        client_id: CLI_CLIENT_ID,
+      }).toString(),
     });
 
     if (res.status === 200) {
@@ -394,6 +461,7 @@ async function pollForToken(
         continue;
       case 'slow_down':
         intervalMs += SLOW_DOWN_BUMP_S * 1000;
+        say('The server asked us to slow down — waiting a bit longer between checks.\n');
         continue;
       case 'access_denied':
         throw new CloudError('authorization was denied — nothing was connected');
@@ -409,15 +477,19 @@ async function pollForToken(
   }
 }
 
-/** The legacy device flow's user-facing steps, extracted so both it and the
- *  browser flow's fallback path share one implementation. */
+/** The RFC 8628 device flow's user-facing steps (the browser flow's
+ *  fallback path, or `--device`'s direct target). Prefers
+ *  `verification_uri_complete` (RFC 8628 §3.3.1) when the server supplies
+ *  one — turning approval from a phone into a scan rather than a
+ *  transcription — falling back to the bare `verification_uri` + typed code
+ *  otherwise. */
 async function runDeviceFlow(deps: CloudDeps, server: string, say: (s: string) => void): Promise<TokenResponse> {
   const start = await deviceStart(deps, server);
   say('To authorize this device, open:\n');
   say(`  ${start.verification_uri_complete ?? start.verification_uri}\n`);
   say(`and enter the code:  ${start.user_code}\n`);
   say('Waiting for you to approve in the browser…\n');
-  return await pollForToken(deps, server, start);
+  return await pollForToken(deps, server, start, say);
 }
 
 /**
@@ -690,12 +762,16 @@ async function connect(deps: CloudDeps, opts: ConnectOptions): Promise<number> {
   } else {
     const tok = await obtainToken(deps, server, opts, say);
     token = tok.access_token;
-    // Persist the SECRET immediately, with restrictive perms, before anything
-    // else can fail — so a verified auth is never thrown away.
+    // Persist the SECRET(s) immediately, with restrictive perms, before
+    // anything else can fail — so a verified auth is never thrown away.
+    // `refresh_token` is present on BOTH the browser flow (a2) and the RFC
+    // 8628 device grant (a3) as of this task — a5 depends on it being here
+    // to rotate, so it must never be dropped on the floor.
     store.servers[server] = {
       access_token: tok.access_token,
       token_type: tok.token_type ?? 'bearer',
       token_prefix: tok.token_prefix,
+      refresh_token: tok.refresh_token,
       expires_at: tok.expires_in ? now + tok.expires_in * 1000 : undefined,
     };
     writeCredentialStore(deps.fs, credPath, store);
