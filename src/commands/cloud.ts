@@ -71,6 +71,53 @@
 //        the device grant's token is deliberately NOT org-bound at all,
 //        matching the legacy PAT's shape; see mesh-oauth/routes.ts's
 //        `handleDeviceCodeGrant`).
+//   Machine credential — apps/api/src/modules/mesh-oauth/routes.ts's
+//   `issueMachineCredentialToken` (task a4, depends on the server-side c7
+//   machine-credentials module — read there, not guessed, on 2026-07-26):
+//     POST /oauth/token  (form-urlencoded, HTTP Basic client auth — mirrors
+//          pipeline-runner's core/mesh-oauth.ts, the sibling repo's OWN
+//          client_credentials caller)
+//          Authorization: Basic base64(<client-id>:<secret>)  — split from
+//          the `aip_m_<client-id>.<secret>` string carried in
+//          PIPELINE_MACHINE_TOKEN / --machine-token (splitMachineCredential
+//          below mirrors machine-credentials/service.ts's
+//          `splitMachineCredentialToken` byte-for-byte; this package cannot
+//          import the private cloud/ tree, same constraint as
+//          lib/mesh-notify.ts's duplicated task-state vocabulary)
+//          grant_type=client_credentials&scope=machine:credential&
+//          resource=<server>/api  — the resource check runs BEFORE the
+//          secret is even looked up server-side (routes.ts's own doc
+//          comment), so only this exact scope+resource pair is ever sent.
+//          200 { access_token, token_type, expires_in, scope } — NO
+//               refresh_token (RFC 6749 §4.4.3 / OAuth 2.1 §4.2 forbid one
+//               for client_credentials); this branch never tries to persist
+//               one even if a server response ever included it.
+//          401 { error: "invalid_client", error_description: "That machine
+//               token was rejected (expired or revoked). Issue a new one at
+//               <appOrigin>/settings/machine-credentials." } — EVERY reject
+//               reason (unknown secret, client_id/secret mismatch, revoked,
+//               expired) collapses to this ONE string server-side
+//               (issueMachineCredentialToken's own doc: "no oracle for a
+//               caller to learn WHICH of those it was") — this file relays
+//               it verbatim rather than inventing a distinction the server
+//               deliberately refuses to make.
+//   GAP FOUND READING THE SERVER (not in the design doc's illustrative
+//   transcript): a machine-credential token has no human identity behind
+//   it — auth/middleware.ts's `resolveMachineCredentialBearer` sets
+//   `userId: <machine_credentials row id>`, and `GET /api/v1/me`
+//   (auth/routes.ts) does `store.getUserById(auth.userId)`, which looks the
+//   id up in the `users` table and finds nothing — a machine credential's
+//   row lives in a DIFFERENT table and is never a `users.id`. So `/me` 401s
+//   for this token class BY CONSTRUCTION, and there is no server endpoint
+//   that maps a machine credential to an org SLUG (only the opaque org_id
+//   UUID rides in the token's own claims, and only client_id/secret —
+//   never `org` — is sent to /oauth/token, so there is also no server-side
+//   "wrong org" oracle to distinguish from "wrong credential"). This branch
+//   therefore never calls /api/v1/me: org resolution for a machine-credential
+//   connect is `--org <slug>`, supplied by the operator who minted the
+//   credential from that org's dashboard, not auto-discovered. See
+//   `connectWithMachineCredential` below and the PR description for the
+//   full reasoning.
 //
 // Security invariants:
 //   - cloud.json holds ONLY slugs/URLs — neither the access token nor the
@@ -85,6 +132,16 @@
 //     than `/callback`, enforces a short absolute timeout, and is closed on
 //     EVERY exit path (success, wrong state, timeout, or an aborted attempt)
 //     — simplified-onboarding `07-approval-policy.md` §8.
+//   - a machine credential (PIPELINE_MACHINE_TOKEN / --machine-token, task
+//     a4) authenticates the REST `api` audience ONLY and is NEVER attached
+//     to a request targeting `/mcp` — `assertNotMcpUrl` below is a throwing
+//     guard on every request that carries machine-credential material (the
+//     raw secret at exchange time; there is no later bearer-reuse call site
+//     today, but the guard exists so a future refactor cannot add one
+//     silently). MCP authorization spec MUST: "servers MUST only accept
+//     tokens that are valid for use with their own resources"; a
+//     department's /mcp credential is always the per-execution token of
+//     department-mesh 13-mcp-authorization.md §12, never this credential.
 //
 // Exit: 0 connected/updated · 1 auth/network/identity failure · 2 usage.
 //
@@ -259,6 +316,74 @@ const SLOW_DOWN_BUMP_S = 5;
  *  clients.ts) — carries the loopback redirect patterns for the browser flow
  *  and has no `redirect_uri` use on the device grant. */
 const CLI_CLIENT_ID = 'ai-pipeline-cli';
+
+// ---------------------------------------------------------------------------
+// Machine credential (task a4) — 04-cloud-auth.md §3/§4, D12
+// ---------------------------------------------------------------------------
+
+/** The documented form (04§3: "PIPELINE_MACHINE_TOKEN is the documented
+ *  form"). `--machine-token` also works (see `parseConnectArgs`) but is
+ *  deliberately not advertised as the recommended path — argv is
+ *  world-readable in `ps` on Linux, the same posture
+ *  `PIPELINE_RUNNER_OAUTH_CLIENT_SECRET` already takes in the sibling
+ *  pipeline-runner repo's `cli.ts`. */
+export const MACHINE_TOKEN_ENV = 'PIPELINE_MACHINE_TOKEN';
+
+/** "aip_m_" — mirrors `machine-credentials/service.ts#MACHINE_CREDENTIAL_PREFIX`
+ *  byte-for-byte. Deliberately not `pk_live_` (Stripe's *publishable*,
+ *  non-secret key shape) — this prefix marks a SECRET. */
+export const MACHINE_CREDENTIAL_PREFIX = 'aip_m_';
+
+/** The one scope `04-cloud-auth.md` §3's machine-credential exchange ever
+ *  requests (mesh-oauth/routes.ts's `MACHINE_CREDENTIAL_SCOPE`). */
+const MACHINE_CREDENTIAL_SCOPE = 'machine:credential';
+
+/**
+ * Split a presented `aip_m_<client-id>.<secret>` string into its OAuth
+ * `client_id` (everything up to the first `.`, INCLUDING the `aip_m_`
+ * prefix — the prefix is part of the opaque client_id, not stripped from
+ * it) and `secret` halves. Mirrors
+ * `machine-credentials/service.ts#splitMachineCredentialToken` exactly —
+ * never throws, so a malformed value is always a clean, locally-detected
+ * rejection rather than a server round trip. Exported for direct testing
+ * (DoD box 2's "malformed" case, which has no server oracle to test
+ * against).
+ */
+export function splitMachineCredential(raw: string): { clientId: string; secret: string } | null {
+  if (!raw.startsWith(MACHINE_CREDENTIAL_PREFIX)) return null;
+  const dot = raw.indexOf('.');
+  if (dot === -1) return null;
+  const clientId = raw.slice(0, dot);
+  const secret = raw.slice(dot + 1);
+  if (clientId.length <= MACHINE_CREDENTIAL_PREFIX.length || secret.length === 0) return null;
+  return { clientId, secret };
+}
+
+/**
+ * Defense-in-depth for 04-cloud-auth.md §3's MCP MUST ("a machine credential
+ * … is never presented at /mcp … a department's /mcp credential is always
+ * the per-execution token"). Every request that carries machine-credential
+ * material MUST pass its target URL through this first — it throws rather
+ * than silently sending the credential, so a future refactor that threads a
+ * machine-credential-derived value into some OTHER call cannot leak it to
+ * the `/mcp` resource by accident. `tests/cloud.test.ts`'s "never at /mcp"
+ * suite (DoD box 4) asserts this directly, independent of any specific
+ * call site.
+ */
+export function assertNotMcpUrl(url: string): void {
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    // Not a parseable absolute URL — fail closed rather than let an
+    // unparseable target slip past the check.
+    throw new CloudError(`refusing to use a machine credential against an unparseable URL: ${url}`);
+  }
+  if (pathname === '/mcp' || pathname.startsWith('/mcp/')) {
+    throw new CloudError(`refusing to send a machine credential to an /mcp URL: ${url}`);
+  }
+}
+
 /** Short ABSOLUTE timeout for the loopback listener (07-approval-policy.md
  *  §8) — bounds the whole browser-flow attempt, not just the wait after the
  *  browser opens. 5 minutes covers a slow sign-in without leaving a loopback
@@ -274,9 +399,14 @@ const DEFAULT_OPEN_BROWSER_GRACE_MS = 5000;
 const USAGE =
   'Usage: pipeline cloud connect [--server <url>] [--project <slug>] [--org <slug>]\n' +
   '                              [--reauth] [--device] [--json]\n' +
+  '                              [--machine-token <token>]\n' +
   '  Authenticate and bind this project to the cloud control plane. Opens a\n' +
   '  browser by default (one approval, no typed code); falls back to a device\n' +
   '  code when no browser is reachable, or always with --device.\n' +
+  `  ${MACHINE_TOKEN_ENV}=<aip_m_…> is the documented no-human path (bots, CI,\n` +
+  '  agents): it suppresses every prompt and browser attempt — no TTY needed.\n' +
+  '  --machine-token works the same way but keeps the secret out of argv by\n' +
+  `  preferring ${MACHINE_TOKEN_ENV}. Combining either with --device is a usage error.\n` +
   '  Writes non-secret slugs to .claude/pipeline/cloud.json; the credential is\n' +
   '  stored separately in a secure per-user location (never in the project).\n';
 
@@ -290,6 +420,11 @@ export interface ConnectOptions {
    *  fallback trigger). */
   device: boolean;
   json: boolean;
+  /** The `aip_m_<client-id>.<secret>` machine credential (task a4). Argv is
+   *  world-readable in `ps` on Linux — `PIPELINE_MACHINE_TOKEN` is the
+   *  documented form; this flag exists and works but is never the
+   *  recommended path (see USAGE / MACHINE_TOKEN_ENV's doc comment). */
+  machineToken?: string;
 }
 
 export function parseConnectArgs(args: string[]): ConnectOptions | { error: string } {
@@ -326,6 +461,13 @@ export function parseConnectArgs(args: string[]): ConnectOptions | { error: stri
       out.reauth = true;
     } else if (a === '--device') {
       out.device = true;
+    } else if (a === '--machine-token' || a.startsWith('--machine-token=')) {
+      if (a.startsWith('--machine-token=')) out.machineToken = a.slice('--machine-token='.length);
+      else {
+        const v = takeValue('--machine-token', i++);
+        if (typeof v !== 'string') return v;
+        out.machineToken = v;
+      }
     } else if (a === '--json') {
       out.json = true;
     } else {
@@ -359,6 +501,21 @@ async function errorCode(res: HttpResponse): Promise<string | undefined> {
   try {
     const body = (await res.json()) as { error?: unknown };
     return typeof body.error === 'string' ? body.error : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Best-effort parse of an error body's `error_description` (RFC 6749 §5.2).
+ *  Used ONLY by the machine-credential exchange below: mesh-oauth/routes.ts's
+ *  `issueMachineCredentialToken` puts the ENTIRE user-facing message here
+ *  (04-cloud-auth.md §9's exact wording, reissue URL included) — every
+ *  reject reason collapses to this one string server-side, so relaying it
+ *  verbatim is correct, not a shortcut. */
+async function errorDescription(res: HttpResponse): Promise<string | undefined> {
+  try {
+    const body = (await res.json()) as { error_description?: unknown };
+    return typeof body.error_description === 'string' ? body.error_description : undefined;
   } catch {
     return undefined;
   }
@@ -528,6 +685,74 @@ async function exchangeAuthorizationCode(
   const parsed = (await res.json()) as TokenResponse;
   if (!parsed || !parsed.access_token) {
     throw new CloudError('token response was missing access_token');
+  }
+  return parsed;
+}
+
+// ---------------------------------------------------------------------------
+// Machine credential exchange (task a4) — 04-cloud-auth.md §3/§4's THIRD
+// rung of the selection ladder, checked before any of the browser/device
+// logic below ever runs (see `connect()`).
+// ---------------------------------------------------------------------------
+
+/**
+ * `POST /oauth/token` (grant_type=client_credentials, scope=machine:credential,
+ * resource=<server>/api) — the machine-credential exchange
+ * (mesh-oauth/routes.ts's `issueMachineCredentialToken`, read directly, see
+ * this file's module doc). HTTP Basic client auth with the split
+ * `client_id`/`secret` halves, mirroring `parseBasicAuth` server-side and the
+ * sibling pipeline-runner repo's own `core/mesh-oauth.ts#basicAuthHeader`
+ * convention for every other `client_credentials` caller in this product.
+ *
+ * `assertNotMcpUrl` runs before the request is built, on both URLs this
+ * function ever touches — defense in depth (DoD box 4): even though
+ * `resource`/the token endpoint are hardcoded constants today, a future edit
+ * that parameterized either could not silently start sending this
+ * credential's secret to `/mcp` without this guard firing first.
+ */
+async function exchangeMachineCredential(
+  deps: CloudDeps,
+  server: string,
+  rawToken: string,
+): Promise<TokenResponse> {
+  const split = splitMachineCredential(rawToken);
+  if (!split) {
+    throw new CloudError(
+      `the machine token is not in the expected ${MACHINE_CREDENTIAL_PREFIX}<client-id>.<secret> shape ` +
+        `— check ${MACHINE_TOKEN_ENV} (or --machine-token)`,
+    );
+  }
+
+  const tokenUrl = `${server}/oauth/token`;
+  const resource = `${server}/api`;
+  assertNotMcpUrl(tokenUrl);
+  assertNotMcpUrl(resource);
+
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    scope: MACHINE_CREDENTIAL_SCOPE,
+    resource,
+  }).toString();
+  const basic = `Basic ${Buffer.from(`${split.clientId}:${split.secret}`, 'utf8').toString('base64')}`;
+  const res = await doFetch(deps, tokenUrl, {
+    method: 'POST',
+    headers: { ...FORM_HEADERS, authorization: basic },
+    body,
+  });
+  if (res.status !== 200) {
+    // 04§9's "Machine token rejected" wording, relayed verbatim from the
+    // server's error_description when present (it always is for
+    // invalid_client — see issueMachineCredentialToken's doc). Falling back
+    // to a generic message only covers a response the server itself never
+    // actually sends today (e.g. a network intermediary mangling the body).
+    const description = await errorDescription(res);
+    if (description) throw new CloudError(description);
+    const code = await errorCode(res);
+    throw new CloudError(`machine credential was rejected (HTTP ${res.status}${code ? `: ${code}` : ''})`);
+  }
+  const parsed = (await res.json()) as TokenResponse;
+  if (!parsed || !parsed.access_token) {
+    throw new CloudError('machine credential token response was missing access_token');
   }
   return parsed;
 }
@@ -737,8 +962,132 @@ export function selectOrg(
 // connect
 // ---------------------------------------------------------------------------
 
-async function connect(deps: CloudDeps, opts: ConnectOptions): Promise<number> {
+/**
+ * The tail shared by every auth path once a credential is in hand and an org
+ * slug is known: derive the project slug, write the non-secret binding
+ * (idempotent), and print/emit the result. Factored out so the
+ * machine-credential branch (which never runs `fetchMe`/`selectOrg` — see
+ * `connectWithMachineCredential`'s doc) does not duplicate it.
+ */
+function writeBindingAndReport(
+  deps: CloudDeps,
+  opts: ConnectOptions,
+  server: string,
+  credPath: string,
+  orgSlug: string,
+  now: number,
+): number {
+  const project = opts.project && opts.project.length > 0 ? slugify(opts.project) : defaultProjectSlug(deps.cwd);
+  if (!project) {
+    throw new CloudError('could not derive a project slug from the directory — pass --project <slug>');
+  }
+
+  const cloudPath = cloudJsonPath(deps.cwd);
+  const previous: CloudBinding | null = readCloudBinding(deps.fs, cloudPath);
+  const binding: CloudBinding = {
+    server,
+    org: orgSlug,
+    project,
+    connected_at: new Date(now).toISOString(),
+  };
+  writeCloudBinding(deps.fs, cloudPath, binding);
+
+  const action = previous ? 'updated' : 'connected';
+  if (opts.json) {
+    deps.out(
+      JSON.stringify({
+        status: action,
+        server,
+        org: orgSlug,
+        project,
+        cloud_json: cloudPath,
+        credential_store: credPath,
+      }) + '\n',
+    );
+  } else {
+    if (previous) {
+      deps.out(`Already connected — updating the binding for this project.\n`);
+    }
+    deps.out(`Connected: org '${orgSlug}', project '${project}' on ${server}.\n`);
+    deps.out(`  Binding (no secrets):  ${cloudPath}\n`);
+    deps.out(`  Credential (secure):   ${credPath}\n`);
+  }
+  return 0;
+}
+
+/**
+ * The machine-credential branch of the connect flow (task a4,
+ * 04-cloud-auth.md §3/§4's THIRD, top rung — checked in `connect()` before
+ * ANY of the reuse/browser/device logic below it runs). No TTY, no prompt,
+ * no browser: `exchangeMachineCredential` is the only network call before
+ * the binding is written, besides the credential-store write itself.
+ *
+ * Deliberately does NOT call `fetchMe`/`selectOrg` — see this file's module
+ * doc "GAP FOUND READING THE SERVER": a machine credential has no human
+ * identity, so `/api/v1/me` 401s for it by construction, and the server
+ * gives the CLI no other way to map the credential to an org SLUG (only an
+ * opaque org_id UUID rides in the token's claims). `--org <slug>` is
+ * therefore how the operator — who minted the credential from that org's
+ * dashboard — tells the CLI what to write locally; it is not verified
+ * against the server (there is nothing to verify it against).
+ */
+async function connectWithMachineCredential(
+  deps: CloudDeps,
+  opts: ConnectOptions,
+  server: string,
+  machineToken: string,
+): Promise<number> {
+  const homeCtx = { platform: deps.platform, env: deps.env, homedir: deps.homedir };
+  const credPath = credentialFilePath(homeCtx);
+  const store = readCredentialStore(deps.fs, credPath);
+  const now = deps.now();
+  const say = (s: string): void => (opts.json ? deps.err(s) : deps.out(s));
+
+  const tok = await exchangeMachineCredential(deps, server, machineToken);
+
+  // Persist the secret immediately, before anything else (e.g. a missing
+  // --org) can fail — same "a verified auth is never thrown away" posture
+  // as the human paths below. RFC 6749 §4.4.3 / OAuth 2.1 §4.2: NO refresh
+  // token accompanies client_credentials — `tok.refresh_token` is never read
+  // here, even if a response somehow carried one; on the next expiry this
+  // branch just re-exchanges PIPELINE_MACHINE_TOKEN itself, exactly like the
+  // runner's own `client_credentials` client (pipeline-runner's
+  // execution-token-manager.ts) always does.
+  store.servers[server] = {
+    access_token: tok.access_token,
+    token_type: tok.token_type ?? 'bearer',
+    expires_at: tok.expires_in ? now + tok.expires_in * 1000 : undefined,
+  };
+  writeCredentialStore(deps.fs, credPath, store);
+  say('Authenticated with a machine credential. Credential stored securely (not in this project).\n');
+
+  if (!opts.org) {
+    throw new CloudError(
+      'a machine credential has no discoverable organization — pass --org <slug> (the org it was issued for)',
+    );
+  }
+  const orgSlug = opts.org;
+
+  const cred = store.servers[server];
+  if (cred) {
+    cred.org_slug = orgSlug;
+    writeCredentialStore(deps.fs, credPath, store);
+  }
+
+  return writeBindingAndReport(deps, opts, server, credPath, orgSlug, now);
+}
+
+async function connect(deps: CloudDeps, opts: ConnectOptions, machineToken: string | undefined): Promise<number> {
   const server = normalizeServerUrl(opts.server ?? deps.env[SERVER_ENV] ?? DEFAULT_SERVER);
+
+  // 04§4's selection ladder, THIRD and topmost rung: a machine credential's
+  // presence wins over everything below — no reused human credential, no
+  // browser, no device code (`runCloud` has already rejected combining it
+  // with --device as a usage error before `connect` is ever reached).
+  if (machineToken !== undefined) {
+    return await connectWithMachineCredential(deps, opts, server, machineToken);
+  }
+
   const homeCtx = { platform: deps.platform, env: deps.env, homedir: deps.homedir };
   const credPath = credentialFilePath(homeCtx);
   const store = readCredentialStore(deps.fs, credPath);
@@ -791,49 +1140,22 @@ async function connect(deps: CloudDeps, opts: ConnectOptions): Promise<number> {
     writeCredentialStore(deps.fs, credPath, store);
   }
 
-  // --- Determine the project slug (explicit flag, else the cwd's name).
-  const project = opts.project && opts.project.length > 0 ? slugify(opts.project) : defaultProjectSlug(deps.cwd);
-  if (!project) {
-    throw new CloudError('could not derive a project slug from the directory — pass --project <slug>');
-  }
-
-  // --- Write the NON-SECRET binding (idempotent — updates an existing one).
-  const cloudPath = cloudJsonPath(deps.cwd);
-  const previous: CloudBinding | null = readCloudBinding(deps.fs, cloudPath);
-  const binding: CloudBinding = {
-    server,
-    org: org.slug,
-    project,
-    connected_at: new Date(now).toISOString(),
-  };
-  writeCloudBinding(deps.fs, cloudPath, binding);
-
-  const action = previous ? 'updated' : 'connected';
-  if (opts.json) {
-    deps.out(
-      JSON.stringify({
-        status: action,
-        server,
-        org: org.slug,
-        project,
-        cloud_json: cloudPath,
-        credential_store: credPath,
-      }) + '\n',
-    );
-  } else {
-    if (previous) {
-      deps.out(`Already connected — updating the binding for this project.\n`);
-    }
-    deps.out(`Connected: org '${org.slug}', project '${project}' on ${server}.\n`);
-    deps.out(`  Binding (no secrets):  ${cloudPath}\n`);
-    deps.out(`  Credential (secure):   ${credPath}\n`);
-  }
-  return 0;
+  return writeBindingAndReport(deps, opts, server, credPath, org.slug, now);
 }
 
 // ---------------------------------------------------------------------------
 // CLI shell
 // ---------------------------------------------------------------------------
+
+/** The machine credential, from whichever source named it — the flag first
+ *  (an explicit, deliberate choice), else the documented env var. Blank
+ *  values (env set but empty) are treated as absent. */
+function resolveMachineToken(opts: ConnectOptions, env: Record<string, string | undefined>): string | undefined {
+  const fromFlag = opts.machineToken?.trim();
+  if (fromFlag) return fromFlag;
+  const fromEnv = env[MACHINE_TOKEN_ENV]?.trim();
+  return fromEnv && fromEnv.length > 0 ? fromEnv : undefined;
+}
 
 export async function runCloud(args: string[], deps: CloudDeps = realDeps): Promise<number> {
   const sub = args[0];
@@ -856,8 +1178,20 @@ export async function runCloud(args: string[], deps: CloudDeps = realDeps): Prom
     return 2;
   }
 
+  // 04§3: "Ambiguity is an error, not a guess: combining it with --device
+  // exits 2." Checked here — before any I/O — so it is a clean usage error
+  // regardless of whether the machine token came from the flag or the env
+  // var (DoD box 3 names the flag; the design's own rule names either).
+  const machineToken = resolveMachineToken(parsed, deps.env);
+  if (machineToken !== undefined && parsed.device) {
+    deps.err(
+      `pipeline cloud connect: --machine-token (or ${MACHINE_TOKEN_ENV}) cannot be combined with --device\n${USAGE}`,
+    );
+    return 2;
+  }
+
   try {
-    return await connect(deps, parsed);
+    return await connect(deps, parsed, machineToken);
   } catch (e) {
     if (e instanceof CloudError) {
       deps.err(`pipeline cloud connect: ${e.message}\n`);
