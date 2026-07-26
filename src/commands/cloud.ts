@@ -167,6 +167,7 @@ import {
   defaultProjectSlug,
   type CloudFs,
   type CloudBinding,
+  type CredentialStore,
   type StoredCredential,
 } from '../lib/cloud-config';
 import {
@@ -181,6 +182,8 @@ import {
   realSpawnBrowser,
   type SpawnFn,
 } from '../lib/loopback-oauth';
+import { ensureFreshCredential, type RefreshDeps } from '../lib/credential-refresh';
+import { protectCredentialFile } from '../lib/credential-protect';
 
 // ---------------------------------------------------------------------------
 // HTTP seam
@@ -963,6 +966,57 @@ export function selectOrg(
 // ---------------------------------------------------------------------------
 
 /**
+ * Persist the credential store AND apply the per-platform file protection
+ * (a5, 04-cloud-auth.md §6) in one call — every writer of the store in this
+ * file goes through this instead of calling `writeCredentialStore` directly,
+ * so no write site can forget the Windows ACL step. `writeCredentialStore`
+ * itself is durable (atomic write-then-rename, `chmod 0600` on every
+ * platform); `protectCredentialFile` adds the Windows-only ACL restriction
+ * that `chmod` cannot express there — see `lib/credential-protect.ts`.
+ */
+function persistCredential(deps: CloudDeps, credPath: string, store: CredentialStore): void {
+  writeCredentialStore(deps.fs, credPath, store);
+  protectCredentialFile(credPath, { platform: deps.platform, env: deps.env });
+}
+
+/** Adapt this file's `CloudDeps` into `credential-refresh.ts`'s narrower
+ *  `RefreshDeps` — the two side-effect seams are structurally compatible
+ *  (same fetch/fs/now/env/platform/homedir shape), just named/scoped
+ *  differently per module (lib/ must not depend on commands/, see
+ *  mesh-notify.ts's own note). */
+function refreshDepsFrom(deps: CloudDeps): RefreshDeps {
+  return { fetch: deps.fetch, fs: deps.fs, now: deps.now, platform: deps.platform, env: deps.env, homedir: deps.homedir };
+}
+
+/**
+ * Run the full interactive/device auth ladder (`obtainToken`), persist the
+ * resulting access+refresh token pair, and return the access token. Shared
+ * by both `connect()`'s "no usable stored credential at all" branch and its
+ * "a silent refresh failed" fallback, so the two paths cannot drift.
+ */
+async function obtainAndPersistToken(
+  deps: CloudDeps,
+  server: string,
+  opts: ConnectOptions,
+  say: (s: string) => void,
+  store: CredentialStore,
+  credPath: string,
+  now: number,
+): Promise<string> {
+  const tok = await obtainToken(deps, server, opts, say);
+  store.servers[server] = {
+    access_token: tok.access_token,
+    token_type: tok.token_type ?? 'bearer',
+    token_prefix: tok.token_prefix,
+    refresh_token: tok.refresh_token,
+    expires_at: tok.expires_in ? now + tok.expires_in * 1000 : undefined,
+  };
+  persistCredential(deps, credPath, store);
+  say('Authenticated. Credential stored securely (not in this project).\n');
+  return tok.access_token;
+}
+
+/**
  * The tail shared by every auth path once a credential is in hand and an org
  * slug is known: derive the project slug, write the non-secret binding
  * (idempotent), and print/emit the result. Factored out so the
@@ -1058,7 +1112,7 @@ async function connectWithMachineCredential(
     token_type: tok.token_type ?? 'bearer',
     expires_at: tok.expires_in ? now + tok.expires_in * 1000 : undefined,
   };
-  writeCredentialStore(deps.fs, credPath, store);
+  persistCredential(deps, credPath, store);
   say('Authenticated with a machine credential. Credential stored securely (not in this project).\n');
 
   if (!opts.org) {
@@ -1071,7 +1125,7 @@ async function connectWithMachineCredential(
   const cred = store.servers[server];
   if (cred) {
     cred.org_slug = orgSlug;
-    writeCredentialStore(deps.fs, credPath, store);
+    persistCredential(deps, credPath, store);
   }
 
   return writeBindingAndReport(deps, opts, server, credPath, orgSlug, now);
@@ -1097,7 +1151,8 @@ async function connect(deps: CloudDeps, opts: ConnectOptions, machineToken: stri
   // single clean JSON object; in human mode they go to stdout as usual.
   const say = (s: string): void => (opts.json ? deps.err(s) : deps.out(s));
 
-  // --- Authenticate: reuse a live stored credential, else run the device flow.
+  // --- Authenticate: reuse a live stored credential, silently REFRESH an
+  // expiring one (a5), else run the full interactive/device flow.
   const existing: StoredCredential | undefined = store.servers[server];
   const reusable =
     existing !== undefined &&
@@ -1108,23 +1163,37 @@ async function connect(deps: CloudDeps, opts: ConnectOptions, machineToken: stri
   if (reusable) {
     token = existing!.access_token;
     say(`Using the stored credential for ${server}.\n`);
+  } else if (existing !== undefined && !opts.reauth && existing.refresh_token) {
+    // 04§6: refresh-token rotation exists precisely so an expired access
+    // token does not always cost the user a new browser/device round trip.
+    // `ensureFreshCredential` is the ONE code path allowed to call the
+    // refresh grant (single-flight + the cross-process lock — see
+    // credential-refresh.ts); this command never calls it itself.
+    //
+    // A thrown CloudError here (an expired/reused refresh token — 04§9's
+    // "Your session was refreshed elsewhere" case — or a network error)
+    // falls back to a full interactive re-auth rather than surfacing the
+    // refresh failure as THIS command's own error: unlike a headless
+    // caller (lib/mesh-notify.ts), `pipeline cloud connect` always has a
+    // human present who can complete a fresh flow right now, and the user
+    // already re-ran the command the §9 message would have told them to.
+    try {
+      const refreshed = await ensureFreshCredential(refreshDepsFrom(deps), server);
+      token = refreshed.access_token;
+      // `ensureFreshCredential` already persisted the rotated pair to disk
+      // itself (under the lock). Mirror it into THIS function's in-memory
+      // `store` too — the org-enrichment write below persists `store`
+      // wholesale, and without this it would still hold the STALE
+      // pre-refresh credential read at the top of `connect()`, clobbering
+      // the just-rotated on-disk values right back to the old ones.
+      store.servers[server] = refreshed;
+      say(`Refreshed the stored session for ${server}.\n`);
+    } catch (e) {
+      if (!(e instanceof CloudError)) throw e;
+      token = await obtainAndPersistToken(deps, server, opts, say, store, credPath, now);
+    }
   } else {
-    const tok = await obtainToken(deps, server, opts, say);
-    token = tok.access_token;
-    // Persist the SECRET(s) immediately, with restrictive perms, before
-    // anything else can fail — so a verified auth is never thrown away.
-    // `refresh_token` is present on BOTH the browser flow (a2) and the RFC
-    // 8628 device grant (a3) as of this task — a5 depends on it being here
-    // to rotate, so it must never be dropped on the floor.
-    store.servers[server] = {
-      access_token: tok.access_token,
-      token_type: tok.token_type ?? 'bearer',
-      token_prefix: tok.token_prefix,
-      refresh_token: tok.refresh_token,
-      expires_at: tok.expires_in ? now + tok.expires_in * 1000 : undefined,
-    };
-    writeCredentialStore(deps.fs, credPath, store);
-    say('Authenticated. Credential stored securely (not in this project).\n');
+    token = await obtainAndPersistToken(deps, server, opts, say, store, credPath, now);
   }
 
   // --- Resolve the org slug from the identity endpoint (the only source).
@@ -1137,7 +1206,7 @@ async function connect(deps: CloudDeps, opts: ConnectOptions, machineToken: stri
   if (cred) {
     cred.org_slug = org.slug;
     if (me.user?.email) cred.user_email = me.user.email;
-    writeCredentialStore(deps.fs, credPath, store);
+    persistCredential(deps, credPath, store);
   }
 
   return writeBindingAndReport(deps, opts, server, credPath, org.slug, now);

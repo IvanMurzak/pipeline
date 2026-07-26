@@ -58,7 +58,9 @@ import {
   type CloudFs,
   type CredentialStore,
   type HomeContext,
+  type StoredCredential,
 } from './cloud-config';
+import { ensureFreshCredential, type RefreshDeps } from './credential-refresh';
 
 // ---------------------------------------------------------------------------
 // HTTP seam (deliberately local — lib/ must not depend on commands/; see
@@ -332,6 +334,16 @@ export interface PollResult {
   errors: string[];
 }
 
+/** Adapt `MeshNotifyDeps` into `credential-refresh.ts`'s `RefreshDeps` — the
+ *  two side-effect seams are structurally identical (fetch/fs/now/env/
+ *  platform/homedir); this daemon is exactly the "always-on supervisor"
+ *  04-cloud-auth.md §6 names, so it must never hand-roll its own refresh
+ *  call — a poll cycle racing an interactive `pipeline cloud connect` is the
+ *  precise concurrent-refresh scenario that revokes the token family. */
+function refreshDepsFrom(deps: MeshNotifyDeps): RefreshDeps {
+  return { fetch: deps.fetch, fs: deps.fs, now: deps.now, platform: deps.platform, env: deps.env, homedir: deps.homedir };
+}
+
 /** One full poll cycle: every stored server credential, every org the user
  *  belongs to on it, diffed against the journal's "seen" cursor. New or
  *  changed notify-worthy states are appended to the pending queue (durable —
@@ -346,9 +358,19 @@ export async function pollOnce(deps: MeshNotifyDeps): Promise<PollResult> {
   const errors: string[] = [];
   let serversPolled = 0;
 
-  for (const [server, cred] of Object.entries(store.servers)) {
-    if (cred.expires_at !== undefined && cred.expires_at <= now) {
-      errors.push(`${server}: stored credential expired — run 'pipeline cloud connect --reauth'`);
+  for (const server of Object.keys(store.servers)) {
+    let cred: StoredCredential;
+    try {
+      // a5: ensureFreshCredential is the ONLY code allowed to call the
+      // refresh grant (single-flight + the cross-process advisory lock —
+      // see lib/credential-refresh.ts). A throw here (expired with no
+      // refresh_token, or invalid_grant/reuse-detected — 04-cloud-auth.md
+      // §9's "Your session was refreshed elsewhere") is recorded below and
+      // this server is skipped for this cycle — never a crash, and never a
+      // refresh attempted outside the lock this daemon shares with the CLI.
+      cred = await ensureFreshCredential(refreshDepsFrom(deps), server);
+    } catch (e) {
+      errors.push(`${server}: ${e instanceof Error ? e.message : String(e)}`);
       continue;
     }
     const me = await fetchMe(deps, server, cred.access_token);

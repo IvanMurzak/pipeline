@@ -21,8 +21,11 @@ import {
   writeFileSync as fsWriteFileSync,
   mkdirSync as fsMkdirSync,
   chmodSync as fsChmodSync,
+  renameSync as fsRenameSync,
+  unlinkSync as fsUnlinkSync,
 } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
+import { randomBytes } from 'node:crypto';
 
 /** The control-plane API base used when neither --server nor env names one. */
 export const DEFAULT_SERVER = 'https://api.ai-pipeline.dev';
@@ -55,6 +58,15 @@ export interface CloudFs {
   writeFileSync(path: string, data: string, options?: { mode?: number }): void;
   mkdirSync(path: string, options: { recursive: boolean; mode?: number }): void;
   chmodSync(path: string, mode: number): void;
+  /** Atomic rename — the durability primitive DoD box 2 (a5) depends on:
+   *  same-filesystem rename is an OS-atomic metadata swap on both NTFS and
+   *  every POSIX filesystem, so a process killed before it completes leaves
+   *  the ORIGINAL file untouched, and one killed after leaves the NEW file
+   *  fully intact — `filePath` itself is never observed half-written. */
+  renameSync(oldPath: string, newPath: string): void;
+  /** Best-effort cleanup of an orphaned temp file (`writeFileAtomic` below).
+   *  Callers must tolerate ENOENT — the temp file may already be gone. */
+  unlinkSync(path: string): void;
 }
 
 export const realFs: CloudFs = {
@@ -65,6 +77,8 @@ export const realFs: CloudFs = {
     fsMkdirSync(p, options);
   },
   chmodSync: fsChmodSync,
+  renameSync: fsRenameSync,
+  unlinkSync: fsUnlinkSync,
 };
 
 // ---------------------------------------------------------------------------
@@ -81,9 +95,11 @@ export interface StoredCredential {
   /** The OAuth refresh token (a SECRET) — present when the credential came
    *  from the browser authorization_code flow (a2) or the RFC 8628 device
    *  grant (a3); absent for a credential minted by the legacy PAT-issuing
-   *  device flow, which never returns one. Rotation (single-flight,
-   *  family-reuse detection) is task a5's job — this field just makes sure
-   *  the value survives long enough for a5 to rotate it. */
+   *  device flow, or a machine credential (a4, `client_credentials` never
+   *  returns one), which never returns one. Rotated by `lib/credential-
+   *  refresh.ts`'s `ensureFreshCredential` (a5) — single-flight across every
+   *  process sharing this file, cross-process advisory lock, atomic
+   *  write-then-rename. */
   refresh_token?: string;
   /** Epoch ms when the token expires (absent = unknown/non-expiring). */
   expires_at?: number;
@@ -165,6 +181,15 @@ export function credentialFilePath(ctx: HomeContext): string {
   return join(credentialDir(ctx), 'credentials.json');
 }
 
+/** The cross-process advisory lock guarding the credential store's whole
+ *  read-refresh-write cycle (a5, 04-cloud-auth.md §6). Lives beside the
+ *  store in the same per-user directory — see `lib/credential-lock.ts` for
+ *  the locking mechanism and `lib/credential-refresh.ts` for the one code
+ *  path allowed to use it. */
+export function credentialLockPath(ctx: HomeContext): string {
+  return join(credentialDir(ctx), 'credentials.lock');
+}
+
 /** The project binding path — resolved against the consumer project's cwd. */
 export function cloudJsonPath(cwd: string): string {
   return join(cwd, '.claude', 'pipeline', 'cloud.json');
@@ -198,10 +223,48 @@ export function readCredentialStore(fs: CloudFs, filePath: string): CredentialSt
 }
 
 /**
- * Persist the credential store with restrictive perms: the directory is created
- * 0700 and the file written 0600, then chmod'd 0600 again to defeat umask and
- * to tighten a pre-existing file. (On Windows the mode is a near-no-op but the
- * call is harmless — tests assert the requested mode regardless of OS.)
+ * Write `data` durably: create a uniquely-named temp file IN THE SAME
+ * DIRECTORY (same filesystem — required for `renameSync` to be atomic; a
+ * cross-filesystem rename can silently fall back to copy+delete on some
+ * platforms, which would reopen the exact half-written-file window this
+ * exists to close) and rename it over `filePath`. A process killed at any
+ * point either: never created the temp file (original untouched), created
+ * it but never renamed (original untouched, an orphan temp file left
+ * behind — harmless, never read by anything), or completed the rename (new
+ * file fully in place). `filePath` itself is NEVER observed half-written
+ * (a5 DoD box 2).
+ */
+function writeFileAtomic(fs: CloudFs, filePath: string, data: string, mode: number): void {
+  const dir = dirname(filePath);
+  const tmpPath = join(dir, `.${basename(filePath)}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`);
+  try {
+    fs.writeFileSync(tmpPath, data, { mode });
+    fs.chmodSync(tmpPath, mode); // defeat umask before the rename makes it visible under the real name
+    fs.renameSync(tmpPath, filePath);
+  } catch (e) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      // best-effort cleanup only — surface the ORIGINAL error either way
+    }
+    throw e;
+  }
+}
+
+/**
+ * Persist the credential store durably and with restrictive perms: the
+ * directory is created 0700, the content lands via `writeFileAtomic` (write
+ * temp + rename — a5 DoD box 2), and the final path is chmod'd 0600 again to
+ * defeat umask and to tighten a pre-existing file at this path. On Windows,
+ * `chmod` only ever toggles the read-only DOS attribute — it does NOT
+ * restrict which OTHER accounts can read the file (NTFS uses ACLs, not POSIX
+ * mode bits). That is a SEPARATE, Windows-only control — see
+ * `lib/credential-protect.ts`'s `protectCredentialFile`, which every writer
+ * of this store (`commands/cloud.ts`, `lib/credential-refresh.ts`) calls
+ * explicitly right after this function, keyed off the CALLER's injected
+ * platform rather than the real OS — this function intentionally does not
+ * do it itself, so it stays a pure, always-safe-to-call primitive with no
+ * implicit dependency on `process.platform`.
  */
 export function writeCredentialStore(
   fs: CloudFs,
@@ -210,7 +273,7 @@ export function writeCredentialStore(
 ): void {
   const dir = dirname(filePath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(filePath, JSON.stringify(store, null, 2) + '\n', { mode: 0o600 });
+  writeFileAtomic(fs, filePath, JSON.stringify(store, null, 2) + '\n', 0o600);
   fs.chmodSync(filePath, 0o600);
 }
 

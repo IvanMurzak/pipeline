@@ -26,9 +26,9 @@ import {
   type CloudFs,
 } from '../src/lib/cloud-config';
 import type { SpawnFn } from '../src/lib/loopback-oauth';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { createServer as httpCreateServer, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
@@ -52,11 +52,14 @@ afterEach(() => {
 interface Recorded {
   writes: Array<{ path: string; mode?: number }>;
   chmods: Array<{ path: string; mode: number }>;
+  renames: Array<{ from: string; to: string }>;
 }
 
-/** Wrap the real fs over a tmp home + tmp project, recording modes. */
+/** Wrap the real fs over a tmp home + tmp project, recording modes + renames
+ *  (a5: `writeCredentialStore` now writes a temp file and renames it over
+ *  the final path — see the "atomic write-then-rename" describe block). */
 function recordingFs(): { fs: CloudFs; rec: Recorded } {
-  const rec: Recorded = { writes: [], chmods: [] };
+  const rec: Recorded = { writes: [], chmods: [], renames: [] };
   const fs: CloudFs = {
     existsSync: realFs.existsSync,
     readFileSync: realFs.readFileSync,
@@ -69,6 +72,11 @@ function recordingFs(): { fs: CloudFs; rec: Recorded } {
       rec.chmods.push({ path: p, mode });
       realFs.chmodSync(p, mode);
     },
+    renameSync: (from, to) => {
+      rec.renames.push({ from, to });
+      realFs.renameSync(from, to);
+    },
+    unlinkSync: realFs.unlinkSync,
   };
   return { fs, rec };
 }
@@ -341,7 +349,7 @@ describe('runCloud connect — happy path', () => {
     expect(out()).toContain('https://app.example.com/auth/device?user_code=WDJB-MJHT');
   });
 
-  test('credential file written with 0600 and chmod 0600; dir mkdir 0700', async () => {
+  test('credential file written atomically (temp file + rename), 0600, chmod 0600; dir mkdir 0700', async () => {
     const log: FetchLog[] = [];
     const fsPair = recordingFs();
     const { deps } = makeDeps(scriptedFetch({ log }), fsPair);
@@ -349,10 +357,33 @@ describe('runCloud connect — happy path', () => {
     await runCloud(['connect'], deps);
 
     const credPath = credentialFilePath({ platform: 'linux', env: deps.env, homedir: deps.homedir });
-    const credWrites = fsPair.rec.writes.filter((w) => w.path === credPath);
-    expect(credWrites.length).toBeGreaterThan(0);
-    for (const w of credWrites) expect(w.mode).toBe(0o600);
+    const credDir = dirname(credPath);
+
+    // a5: NOTHING is ever written directly to `credPath` — every write lands
+    // on a uniquely-named temp file in the SAME directory, mode 0600, which
+    // is then renamed over `credPath`. This is the write-then-rename
+    // durability guarantee (DoD box 2): `credPath` itself is only ever
+    // touched by an atomic rename, never a partial write.
+    expect(fsPair.rec.writes.some((w) => w.path === credPath)).toBe(false);
+    const tmpWrites = fsPair.rec.writes.filter(
+      (w) => dirname(w.path) === credDir && w.path !== credPath && w.path.includes('.tmp-'),
+    );
+    expect(tmpWrites.length).toBeGreaterThan(0);
+    for (const w of tmpWrites) expect(w.mode).toBe(0o600);
+
+    // Every one of those temp files was renamed onto credPath.
+    const credRenames = fsPair.rec.renames.filter((r) => r.to === credPath);
+    expect(credRenames.length).toBeGreaterThan(0);
+    expect(credRenames.every((r) => tmpWrites.some((w) => w.path === r.from))).toBe(true);
+
+    // chmod'd 0600 on both the temp file (before rename) and the final path
+    // (after) — belt-and-braces against umask / a pre-existing looser mode.
     expect(fsPair.rec.chmods.some((c) => c.path === credPath && c.mode === 0o600)).toBe(true);
+    expect(tmpWrites.every((w) => fsPair.rec.chmods.some((c) => c.path === w.path && c.mode === 0o600))).toBe(true);
+
+    // No orphan temp file survives — the rename consumed it.
+    expect(existsSync(tmpWrites[0]!.path)).toBe(false);
+    expect(existsSync(credPath)).toBe(true);
 
     // cloud.json is written WITHOUT a restrictive mode (it is meant to be committed).
     const cloudPath = cloudJsonPath(deps.cwd);
@@ -605,6 +636,117 @@ describe('runCloud connect — idempotency', () => {
     });
     expect(await runCloud(['connect', '--reauth'], second.deps)).toBe(0);
     expect(log2.some((l) => l.url.endsWith('/oauth/device_authorization'))).toBe(true);
+  });
+
+  test('an expired stored credential WITH a refresh_token is silently REFRESHED — no browser/device flow at all (a5)', async () => {
+    const fsPair = recordingFs();
+    const first = makeDeps(scriptedFetch({ log: [] }), fsPair);
+    expect(await runCloud(['connect'], first.deps)).toBe(0);
+
+    // Force the stored credential to look expired, keeping its refresh_token.
+    const credPath = credentialFilePath({ platform: 'linux', env: first.deps.env, homedir: first.deps.homedir });
+    const store = JSON.parse(readFileSync(credPath, 'utf-8'));
+    store.servers['https://api.ai-pipeline.dev'].expires_at = 1;
+    writeFileSync(credPath, JSON.stringify(store));
+
+    const log2: FetchLog[] = [];
+    const fetchImpl = async (url: string, init: HttpInit): Promise<HttpResponse> => {
+      log2.push({ url, init });
+      if (url.endsWith('/oauth/token')) {
+        const params = new URLSearchParams(init.body ?? '');
+        expect(params.get('grant_type')).toBe('refresh_token');
+        expect(params.get('refresh_token')).toBe(DEVICE_REFRESH_TOKEN);
+        return reply(200, {
+          access_token: 'at_refreshed_by_a5',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: 'rt_rotated_by_a5',
+        });
+      }
+      if (url.endsWith('/api/v1/me')) {
+        return reply(200, {
+          user: { id: 'u1', email: 'dev@example.com' },
+          orgs: [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'owner' }],
+          selectedOrgId: null,
+          selectedRole: null,
+        });
+      }
+      throw new Error(`unexpected fetch to ${url} — a silent refresh must never touch device/browser endpoints`);
+    };
+    const second = makeDeps(fetchImpl, fsPair, {
+      env: first.deps.env,
+      homedir: first.deps.homedir,
+      cwd: first.deps.cwd,
+    });
+    const code = await runCloud(['connect'], second.deps);
+    expect(code).toBe(0);
+    expect(log2.some((l) => l.url.endsWith('/oauth/device_authorization'))).toBe(false);
+    expect(second.out()).toContain('Refreshed the stored session');
+
+    const updated = JSON.parse(readFileSync(credPath, 'utf-8'));
+    expect(updated.servers['https://api.ai-pipeline.dev'].access_token).toBe('at_refreshed_by_a5');
+    expect(updated.servers['https://api.ai-pipeline.dev'].refresh_token).toBe('rt_rotated_by_a5');
+  });
+
+  test('a refresh that comes back invalid_grant (reuse-detected/family-revoked) falls back to a full device flow, not a failed command (a5)', async () => {
+    const fsPair = recordingFs();
+    const first = makeDeps(scriptedFetch({ log: [] }), fsPair);
+    expect(await runCloud(['connect'], first.deps)).toBe(0);
+
+    const credPath = credentialFilePath({ platform: 'linux', env: first.deps.env, homedir: first.deps.homedir });
+    const store = JSON.parse(readFileSync(credPath, 'utf-8'));
+    store.servers['https://api.ai-pipeline.dev'].expires_at = 1;
+    writeFileSync(credPath, JSON.stringify(store));
+
+    const log2: FetchLog[] = [];
+    let sawDeviceAuth = false;
+    const fetchImpl = async (url: string, init: HttpInit): Promise<HttpResponse> => {
+      log2.push({ url, init });
+      if (url.endsWith('/oauth/device_authorization')) {
+        sawDeviceAuth = true;
+        return reply(200, {
+          device_code: DEVICE_CODE,
+          user_code: 'FALLBACK-CODE',
+          verification_uri: 'https://app.example.com/auth/device',
+          expires_in: 900,
+          interval: 5,
+        });
+      }
+      if (url.endsWith('/oauth/token')) {
+        const params = new URLSearchParams(init.body ?? '');
+        if (params.get('grant_type') === 'refresh_token') {
+          return reply(400, {
+            error: 'invalid_grant',
+            error_description: 'refresh token reuse detected — the token family has been revoked',
+          });
+        }
+        return reply(200, {
+          access_token: SECRET_TOKEN,
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: DEVICE_REFRESH_TOKEN,
+          scope: '',
+        });
+      }
+      if (url.endsWith('/api/v1/me')) {
+        return reply(200, {
+          user: { id: 'u1', email: 'dev@example.com' },
+          orgs: [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'owner' }],
+          selectedOrgId: null,
+          selectedRole: null,
+        });
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    };
+    const second = makeDeps(fetchImpl, fsPair, {
+      env: first.deps.env,
+      homedir: first.deps.homedir,
+      cwd: first.deps.cwd,
+    });
+    const code = await runCloud(['connect'], second.deps);
+    expect(code).toBe(0); // a clean fallback, not a failure of THIS command
+    expect(sawDeviceAuth).toBe(true);
+    expect(second.out()).not.toContain('Refreshed the stored session');
   });
 });
 
