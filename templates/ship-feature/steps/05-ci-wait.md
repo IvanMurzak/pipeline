@@ -1,5 +1,10 @@
 ---
 step_id: ci-wait
+# permission-mode: bypassPermissions — this step shells out to the bundled
+# `pipeline ci-wait` gate, which itself polls `gh` (Steps §1). Headless runs
+# have no human to approve a Bash call, and the default acceptEdits mode
+# gates Bash, so without this the step is auto-denied on a clean machine.
+permission-mode: bypassPermissions
 ---
 
 # 05 — Wait for CI

@@ -1,3 +1,12 @@
+---
+# permission-mode: bypassPermissions — this step shells out to `bun` to run
+# the bundled bm25_retrieve.ts script (see Steps §1). Headless runs have no
+# human to approve a Bash call, and the default acceptEdits mode gates Bash
+# (it only auto-accepts edits), so without this the step is auto-denied on a
+# clean machine.
+permission-mode: bypassPermissions
+---
+
 # 01 — Retrieve candidates
 
 ## Goal

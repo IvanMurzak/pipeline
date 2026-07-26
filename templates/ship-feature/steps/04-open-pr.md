@@ -1,5 +1,10 @@
 ---
 step_id: open-pr
+# permission-mode: bypassPermissions — this step shells out to `git push`
+# and the `gh` CLI (pr list/view/create; Steps §1-3). Headless runs have no
+# human to approve a Bash call, and the default acceptEdits mode gates Bash,
+# so without this the step is auto-denied on a clean machine.
+permission-mode: bypassPermissions
 ---
 
 # 04 — Open (or reuse) the pull request

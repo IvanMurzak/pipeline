@@ -1,5 +1,11 @@
 ---
 step_id: implement
+# permission-mode: bypassPermissions — this step shells out to `git` (switch/
+# add/commit) and runs the project's own build/test command (Steps §1-4).
+# Headless runs have no human to approve a Bash call, and the default
+# acceptEdits mode gates Bash (it only auto-accepts edits), so without this
+# the step is auto-denied on a clean machine.
+permission-mode: bypassPermissions
 ---
 
 # 02 — Implement the feature

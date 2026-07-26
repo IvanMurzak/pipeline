@@ -1,5 +1,11 @@
 ---
 step_id: review
+# permission-mode: bypassPermissions — this step shells out to `git diff`
+# (Steps §1) to read the feature branch's diff; that is still a Bash
+# invocation even though it mutates nothing. Headless runs have no human to
+# approve a Bash call, and the default acceptEdits mode gates Bash, so
+# without this the step is auto-denied on a clean machine.
+permission-mode: bypassPermissions
 ---
 
 # 03 — Self-review the diff

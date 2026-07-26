@@ -22,6 +22,7 @@ import {
   type ExecutorRunner,
 } from '../src/commands/drive';
 import { stepRecordSchemaJson } from '../src/lib/step-schema';
+import { templateDir } from '../src/lib/templates';
 import type { GitResult, GitRunner } from '../src/lib/git';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -343,6 +344,53 @@ test('resolvePermissionMode: step frontmatter beats manifest, manifest beats acc
   writeFileSync(step, '---\npermission-mode: inherit\n---\n# a\n');
   expect(resolvePermissionMode(step, root)).toBeNull();
 }, 30000);
+
+// Regression guard (simplified-onboarding x1): a clean-machine `pipeline
+// init` runs the bundled support-answer template headlessly via `pipeline
+// drive`. Its 01-retrieve step shells out to `bun` to run the bundled BM25
+// script — with no permission-mode anywhere, resolvePermissionMode fell back
+// to 'acceptEdits', which auto-accepts EDITS but still gates Bash, so the
+// step's only Bash call was auto-denied ("This command requires approval")
+// with no human able to grant it. The fix declares `permission-mode:
+// bypassPermissions` on the step's own frontmatter. This test pins that: if
+// the frontmatter is ever dropped or the key silently stops being read, this
+// fails instead of the regression coming back silently (the existing test
+// suite would not catch it — it never exercised the bundled template files).
+test('resolvePermissionMode: bundled support-answer 01-retrieve resolves to a mode that permits Bash execution', () => {
+  const root = templateDir('support-answer');
+  const step = join(root, 'steps', '01-retrieve.md');
+  const mode = resolvePermissionMode(step, root);
+  expect(mode).toBe('bypassPermissions');
+  // Guard the underlying regression condition directly too: neither of the
+  // values that gate headless Bash (acceptEdits, the fallback default; or
+  // null/inherit) may come back as the resolved mode.
+  expect(mode).not.toBeNull();
+  expect(mode).not.toBe('acceptEdits');
+});
+
+// Scoping guard: the read-only support-answer steps (02-select, 03-answer)
+// never shell out, so they must NOT carry the grant — resolvePermissionMode
+// falls through to the manifest/default exactly as before the fix.
+test('resolvePermissionMode: bundled support-answer read-only steps are untouched', () => {
+  const root = templateDir('support-answer');
+  expect(resolvePermissionMode(join(root, 'steps', '02-select.md'), root)).toBe('acceptEdits');
+  expect(resolvePermissionMode(join(root, 'steps', '03-answer.md'), root)).toBe('acceptEdits');
+});
+
+// Scoping guard: ship-feature's steps that shell out to git/gh/the CI gate
+// (implement, review, open-pr, ci-wait, merge) all carry the grant; the
+// purely-planning first step (which only reads via Read/Grep/Glob, no
+// prescribed shell command) is left on the default.
+test('resolvePermissionMode: bundled ship-feature steps — grant only where the step shells out', () => {
+  const root = templateDir('ship-feature');
+  const mode = (rel: string) => resolvePermissionMode(join(root, 'steps', rel), root);
+  expect(mode('01-plan.md')).toBe('acceptEdits');
+  expect(mode('02-implement.md')).toBe('bypassPermissions');
+  expect(mode('03-review.md')).toBe('bypassPermissions');
+  expect(mode('04-open-pr.md')).toBe('bypassPermissions');
+  expect(mode('05-ci-wait.md')).toBe('bypassPermissions');
+  expect(mode('06-merge.md')).toBe('bypassPermissions');
+});
 
 // --- end-to-end drives --------------------------------------------------------
 

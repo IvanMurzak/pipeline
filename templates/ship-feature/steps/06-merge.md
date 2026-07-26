@@ -1,5 +1,12 @@
 ---
 step_id: merge
+# permission-mode: bypassPermissions — on approval this step shells out to
+# `gh pr merge` (Steps §2). Headless runs have no human to approve a Bash
+# call, and the default acceptEdits mode gates Bash, so without this the
+# step is auto-denied on a clean machine (the merge itself still requires an
+# explicit human answer via needs-input/HALT — this only unblocks the Bash
+# call once that answer is "merge").
+permission-mode: bypassPermissions
 ---
 
 # 06 — Merge on human approval
