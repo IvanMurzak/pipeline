@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   parseInitArgs,
+  parseUiStartOutput,
   runInit,
   type InitDeps,
   type ShellResult,
@@ -548,5 +549,111 @@ describe('the next-action line', () => {
     await runInit(['--dir', proj, '--run'], h.deps);
     expect(h.stdout()).toContain('Restart Claude Code to load the plugin.');
     expect(h.stdout()).not.toContain('/pipeline:design');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseUiStartOutput — the `pipeline ui --json` stdout parsing this bug is
+// about. Every test above injects a fake `startUi` via the harness, so none
+// of them ever exercise the real captured-stdout parsing that
+// `defaultStartUi` (the real InitDeps.startUi) does. `pipeline ui --json`
+// actually pretty-prints (`JSON.stringify(obj, null, 2)` — see
+// src/commands/ui.ts's final `process.stdout.write`), NOT single-line, so a
+// naive "parse the last line" (the original bug) always fails on real output.
+// These tests feed parseUiStartOutput real captured (code, stdout) shapes
+// directly, with no daemon spawned.
+// ---------------------------------------------------------------------------
+
+describe('parseUiStartOutput (pipeline ui --json stdout parsing)', () => {
+  test('real pretty-printed multi-line JSON (JSON.stringify(obj, null, 2), as ui.ts actually prints) → url and port come out', () => {
+    // Captured verbatim from a real `pipeline ui --json` run.
+    const stdout =
+      '{\n' +
+      '  "url": "http://127.0.0.1:56981/",\n' +
+      '  "host": "127.0.0.1",\n' +
+      '  "port": 56981,\n' +
+      '  "pid": 100588,\n' +
+      '  "started": false,\n' +
+      '  "restarted": false,\n' +
+      '  "registered": true\n' +
+      '}\n';
+    const result = parseUiStartOutput(0, stdout);
+    expect(result.ok).toBe(true);
+    expect(result.url).toBe('http://127.0.0.1:56981/');
+    expect(result.url).toContain('56981'); // the resolved port, not a literal
+  });
+
+  test('single-line JSON shape too, so the fix is not accidentally shape-specific', () => {
+    const stdout =
+      JSON.stringify({
+        url: 'http://127.0.0.1:51734/',
+        host: '127.0.0.1',
+        port: 51734,
+        pid: 4242,
+        started: true,
+        restarted: false,
+        registered: false,
+      }) + '\n';
+    const result = parseUiStartOutput(0, stdout);
+    expect(result.ok).toBe(true);
+    expect(result.url).toBe('http://127.0.0.1:51734/');
+  });
+
+  test('leading non-JSON noise lines ahead of the pretty-printed object are tolerated', () => {
+    const stdout =
+      'Warning: something printed a stray line first\n' +
+      'another stray line\n' +
+      '{\n' +
+      '  "url": "http://127.0.0.1:60000/",\n' +
+      '  "host": "127.0.0.1",\n' +
+      '  "port": 60000,\n' +
+      '  "pid": 1,\n' +
+      '  "started": true,\n' +
+      '  "restarted": false,\n' +
+      '  "registered": false\n' +
+      '}\n';
+    const result = parseUiStartOutput(0, stdout);
+    expect(result.ok).toBe(true);
+    expect(result.url).toBe('http://127.0.0.1:60000/');
+  });
+
+  test('UI explicitly disabled (single-line {"enabled":false}) → ok, disabled, no url — unchanged behavior', () => {
+    const result = parseUiStartOutput(0, '{"enabled":false}\n');
+    expect(result).toEqual({ ok: true, disabled: true });
+  });
+
+  test('unparseable output on exit 0 → ok:false, with an HONEST detail (not "did not start — exited 0")', () => {
+    const result = parseUiStartOutput(0, 'not json at all\n');
+    expect(result.ok).toBe(false);
+    expect(result.url).toBeUndefined();
+    // This is the exact self-contradiction the bug report called out: a
+    // detail that reads as failure while also saying "exited 0" (which is
+    // success) is dishonest. The new detail must still be distinguishable
+    // from a genuine non-zero exit (see next test) rather than reusing the
+    // old "pipeline ui exited ${code}" wording for this case.
+    expect(result.detail).not.toBe('pipeline ui exited 0');
+    expect(result.detail).toMatch(/no readable|no url|could not/i);
+  });
+
+  test('malformed JSON (unbalanced/invalid braces) → ok:false, never throws', () => {
+    const result = parseUiStartOutput(0, '{ this is not valid json }\n');
+    expect(result.ok).toBe(false);
+    expect(result.url).toBeUndefined();
+  });
+
+  test('genuine non-zero exit → ok:false with a message distinguishable from the exit-0-no-url case', () => {
+    const zeroExitResult = parseUiStartOutput(0, 'garbage\n');
+    const nonZeroResult = parseUiStartOutput(1, 'garbage\n');
+    expect(nonZeroResult.ok).toBe(false);
+    expect(nonZeroResult.detail).toContain('1');
+    expect(nonZeroResult.detail).not.toBe(zeroExitResult.detail);
+  });
+
+  test('non-zero exit still reports failure even when well-formed JSON with a url is present', () => {
+    const stdout = JSON.stringify({ url: 'http://127.0.0.1:9/', host: '127.0.0.1', port: 9 }) + '\n';
+    const result = parseUiStartOutput(1, stdout);
+    expect(result.ok).toBe(false);
+    expect(result.url).toBeUndefined();
+    expect(result.detail).toContain('1');
   });
 });

@@ -215,18 +215,56 @@ async function captureStdout<T>(fn: () => Promise<T>): Promise<{ result: T; stdo
   }
 }
 
+interface UiJsonShape {
+  enabled?: boolean;
+  url?: string;
+}
+
+/** Find and parse the JSON object `pipeline ui --json` printed to its
+ *  captured stdout. `runUi` prints either a single-line object (the
+ *  disabled-UI case, `JSON.stringify({enabled:false})`) or a pretty-printed
+ *  MULTI-LINE object (`JSON.stringify({...}, null, 2)` on the success path —
+ *  see src/commands/ui.ts's final `process.stdout.write`), so the JSON is not
+ *  reliably on one line, let alone the last one. This tries a whole-string
+ *  parse first (covers the single-line shape and the common case where the
+ *  JSON is the only thing printed), then falls back to slicing from the
+ *  first `{` to the last `}` in the buffer (covers the pretty-printed shape
+ *  and tolerates stray non-JSON lines before or after it). Uses JSON.parse
+ *  for the actual parsing either way — this only locates the substring to
+ *  hand it. Returns null when no valid JSON object could be found. */
+export function extractUiJson(stdout: string): UiJsonShape | null {
+  const trimmed = stdout.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed) as UiJsonShape;
+  } catch {
+    // Not a single well-formed JSON value — fall through to the bracket scan
+    // below, which handles pretty-printed output and/or surrounding noise.
+  }
+  const first = trimmed.indexOf('{');
+  const last = trimmed.lastIndexOf('}');
+  if (first === -1 || last === -1 || last < first) return null;
+  try {
+    return JSON.parse(trimmed.slice(first, last + 1)) as UiJsonShape;
+  } catch {
+    return null;
+  }
+}
+
+/** Turn `pipeline ui --json`'s captured (exit code, stdout) into a
+ *  UiStartResult. Split out from defaultStartUi so tests can exercise the
+ *  parsing against real captured output shapes without spawning a daemon. */
+export function parseUiStartOutput(code: number, stdout: string): UiStartResult {
+  const parsed = extractUiJson(stdout);
+  if (parsed?.enabled === false) return { ok: true, disabled: true };
+  if (code === 0 && typeof parsed?.url === 'string') return { ok: true, url: parsed.url };
+  if (code !== 0) return { ok: false, detail: `pipeline ui exited ${code}` };
+  return { ok: false, detail: 'pipeline ui exited 0 but printed no readable dashboard URL' };
+}
+
 async function defaultStartUi(): Promise<UiStartResult> {
   const { result: code, stdout } = await captureStdout(() => runUi(['--json']));
-  const lastLine = stdout.trim().split('\n').pop() ?? '';
-  let parsed: { enabled?: boolean; url?: string } = {};
-  try {
-    parsed = JSON.parse(lastLine) as { enabled?: boolean; url?: string };
-  } catch {
-    // fall through — treated as a plain failure below
-  }
-  if (parsed.enabled === false) return { ok: true, disabled: true };
-  if (code === 0 && typeof parsed.url === 'string') return { ok: true, url: parsed.url };
-  return { ok: false, detail: `pipeline ui exited ${code}` };
+  return parseUiStartOutput(code, stdout);
 }
 
 async function defaultPromptYesNo(promptText: string): Promise<boolean> {
