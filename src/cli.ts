@@ -55,6 +55,17 @@ function usage(): string {
     'Usage: pipeline <command> [options]',
     '',
     'Commands:',
+    '  init [<template>] [--no-plugin] [--no-ui] [--no-run] [--run] [--yes|-y]',
+    '       [--dir <path>] [--json]',
+    '      Local-first setup in one command: install the Claude Code plugin,',
+    '      clone a starter pipeline (default: support-answer), start the local',
+    '      dashboard, and offer to run it. Every step is idempotent — a re-run',
+    '      prints ✓ per already-satisfied step. --json is non-interactive and',
+    '      declines the optional run unless --run is also given. A missing',
+    '      `claude` on PATH skips the plugin install AND the run (exit 0);',
+    '      everything else about init still runs. Exit 0 success · 1 a step',
+    '      failed (bun missing, or the starter run failed) · 2 usage.',
+    '',
     '  clone <name> [--force] [--dir <path>] [--list] [--json]',
     '      Copy a bundled ready-made pipeline template into',
     '      ./.claude/pipeline/<name>/ (relative to the current directory, or',
@@ -275,6 +286,13 @@ async function main(argv: string[]): Promise<number> {
       return runHash(rest);
     case 'clone':
       return runClone(rest);
+    case 'init': {
+      // Lazy import (mirrors `drive`/`gc`): `init` composes clone + ui +
+      // drive + a `claude` shell-out — keep the hot `next` loop's per-spawn
+      // startup cost unchanged.
+      const { runInit } = await import('./commands/init');
+      return runInit(rest);
+    }
     case 'plan':
       return runPlan(rest);
     case 'match':
