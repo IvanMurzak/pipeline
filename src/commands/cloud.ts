@@ -149,7 +149,8 @@
 // subprocess spawn, the loopback HTTP server) is injected via CloudDeps so
 // tests drive the whole flow with zero real browser/OS interaction.
 
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
+import { createInterface } from 'node:readline';
 import type { Server } from 'node:http';
 import {
   CloudError,
@@ -184,6 +185,14 @@ import {
 } from '../lib/loopback-oauth';
 import { ensureFreshCredential, type RefreshDeps } from '../lib/credential-refresh';
 import { protectCredentialFile } from '../lib/credential-protect';
+import {
+  enrolRunner,
+  isRunnerServiceInstalled,
+  realShell,
+  RUNNER_PACKAGE,
+  type RunnerEnrolDeps,
+  type ShellRunner,
+} from '../lib/runner-enrol';
 
 // ---------------------------------------------------------------------------
 // HTTP seam
@@ -249,6 +258,58 @@ export interface CloudDeps {
    *  in production; tests inject a small value to exercise a hung opener
    *  without a real wait. */
   openBrowserGraceMs?: number;
+
+  // ---- Runner enrolment (task a6) — all OPTIONAL, `realDeps` needs no
+  // changes (defaults below apply real spawnSync / node:os / a TTY-aware
+  // prompt whenever these are `undefined`).
+
+  /** Shells `pipeline-runner <args>` / `bun add -g <pkg>` (lib/runner-enrol.ts).
+   *  Defaults to a real `child_process.spawnSync`. Test seam — production
+   *  code MUST NOT write pipeline-runner's own config store directly (see
+   *  runner-enrol.ts's module doc); every test exercising enrolment scripts
+   *  this instead of touching a real binary. */
+  runnerShell?: ShellRunner;
+  /** This machine's hostname — task a6's default runner name (overridden by
+   *  `--runner-name`). Defaults to `node:os`'s `hostname()`, guarded against
+   *  throwing. */
+  hostname?: () => string;
+  /** Ask a yes/no question (task a6's "Also run cloud pipelines on this
+   *  machine?" prompt). Defaults to a TTY-aware real prompt: a real TTY asks
+   *  and waits; a non-TTY prints the assumed default (yes) and resolves
+   *  immediately, mirroring `commands/init.ts`'s own `defaultPromptYesNo`. */
+  promptYesNo?: (promptText: string) => Promise<boolean>;
+}
+
+function realHostname(): string {
+  try {
+    return hostname();
+  } catch {
+    return 'this-machine';
+  }
+}
+
+/** Mirrors `commands/init.ts`'s `defaultPromptYesNo` — duplicated rather
+ *  than imported (commands/ files deliberately don't depend on each other
+ *  here; each owns its own small seam, same posture credential-refresh.ts
+ *  documents for lib/ not depending on commands/). */
+async function defaultPromptYesNo(promptText: string): Promise<boolean> {
+  if (!process.stdin.isTTY) {
+    process.stdout.write(`${promptText}y\n`);
+    return true;
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+  return await new Promise<boolean>((resolvePromise) => {
+    let answered = false;
+    rl.question(promptText, (answer) => {
+      answered = true;
+      rl.close();
+      const a = answer.trim().toLowerCase();
+      resolvePromise(a === '' || a === 'y' || a === 'yes');
+    });
+    rl.on('close', () => {
+      if (!answered) resolvePromise(true); // EOF with no input — default yes
+    });
+  });
 }
 
 export const realDeps: CloudDeps = {
@@ -266,6 +327,9 @@ export const realDeps: CloudDeps = {
   err: (s) => {
     process.stderr.write(s);
   },
+  runnerShell: realShell,
+  hostname: realHostname,
+  promptYesNo: defaultPromptYesNo,
 };
 
 // ---------------------------------------------------------------------------
@@ -403,6 +467,7 @@ const USAGE =
   'Usage: pipeline cloud connect [--server <url>] [--project <slug>] [--org <slug>]\n' +
   '                              [--reauth] [--device] [--json]\n' +
   '                              [--machine-token <token>]\n' +
+  '                              [--runner | --no-runner] [--runner-name <name>]\n' +
   '  Authenticate and bind this project to the cloud control plane. Opens a\n' +
   '  browser by default (one approval, no typed code); falls back to a device\n' +
   '  code when no browser is reachable, or always with --device.\n' +
@@ -411,7 +476,14 @@ const USAGE =
   '  --machine-token works the same way but keeps the secret out of argv by\n' +
   `  preferring ${MACHINE_TOKEN_ENV}. Combining either with --device is a usage error.\n` +
   '  Writes non-secret slugs to .claude/pipeline/cloud.json; the credential is\n' +
-  '  stored separately in a secure per-user location (never in the project).\n';
+  '  stored separately in a secure per-user location (never in the project).\n' +
+  '\n' +
+  '  After connecting, asks "Also run cloud pipelines on this machine?" and,\n' +
+  '  if yes, mints + registers + installs this machine as a runner — no\n' +
+  '  dashboard visit, no token to copy (task a6). --runner-name overrides the\n' +
+  '  default (this machine\'s hostname); --no-runner skips the prompt; --runner\n' +
+  '  answers it yes without asking (also re-enrols after an earlier decline).\n' +
+  '  --json declines runner enrolment unless --runner is also given.\n';
 
 export interface ConnectOptions {
   server?: string;
@@ -428,10 +500,18 @@ export interface ConnectOptions {
    *  documented form; this flag exists and works but is never the
    *  recommended path (see USAGE / MACHINE_TOKEN_ENV's doc comment). */
   machineToken?: string;
+  /** Skip the runner-enrolment prompt entirely (task a6). */
+  noRunner: boolean;
+  /** Answer the runner-enrolment prompt "yes" without asking — the
+   *  re-entry point after an earlier decline (task a6 DoD box 2), and the
+   *  ONLY way `--json` opts back into enrolment (D27). */
+  runner: boolean;
+  /** Overrides the default runner name (this machine's hostname). */
+  runnerName?: string;
 }
 
 export function parseConnectArgs(args: string[]): ConnectOptions | { error: string } {
-  const out: ConnectOptions = { reauth: false, device: false, json: false };
+  const out: ConnectOptions = { reauth: false, device: false, json: false, noRunner: false, runner: false };
   const takeValue = (flag: string, i: number): string | { error: string } => {
     const v = args[i + 1];
     if (v === undefined || v.startsWith('--')) return { error: `${flag} requires a value` };
@@ -471,12 +551,24 @@ export function parseConnectArgs(args: string[]): ConnectOptions | { error: stri
         if (typeof v !== 'string') return v;
         out.machineToken = v;
       }
+    } else if (a === '--no-runner') {
+      out.noRunner = true;
+    } else if (a === '--runner') {
+      out.runner = true;
+    } else if (a === '--runner-name' || a.startsWith('--runner-name=')) {
+      if (a.startsWith('--runner-name=')) out.runnerName = a.slice('--runner-name='.length);
+      else {
+        const v = takeValue('--runner-name', i++);
+        if (typeof v !== 'string') return v;
+        out.runnerName = v;
+      }
     } else if (a === '--json') {
       out.json = true;
     } else {
       return { error: `unknown argument '${a}'` };
     }
   }
+  if (out.runner && out.noRunner) return { error: 'cannot combine --runner and --no-runner' };
   return out;
 }
 
@@ -1017,6 +1109,92 @@ async function obtainAndPersistToken(
 }
 
 /**
+ * Task a6 (04-cloud-auth.md §5, D11): after a SUCCESSFUL connect, fold
+ * runner enrolment in — no dashboard visit, no token reveal, no separate
+ * `register` invocation. Called from both `connect()` and
+ * `connectWithMachineCredential()`, after `writeBindingAndReport` has
+ * already printed/emitted the connect result, so this function's own output
+ * always comes AFTER it. Never throws and never changes the overall exit
+ * code: runner enrolment is an OPTIONAL upgrade layered on an
+ * already-successful `cloud connect` — a failed mint/install/register must
+ * not turn a successful project-link into a failed command.
+ *
+ * `--json` DECLINES enrolment unless `--runner` is also given (D27 — the
+ * same inversion `a1`'s `--json` uses for its optional run): checked FIRST,
+ * before touching `deps.out`/`deps.err`/`deps.fetch`/`deps.runnerShell` at
+ * all, so a bare `--json` connect's stdout stays exactly the single JSON
+ * object `writeBindingAndReport` already printed. When `--runner` IS given
+ * alongside `--json`, every line below routes through `say` — which, in
+ * json mode, is stderr — so stdout is UNCHANGED either way; this is why the
+ * connect JSON payload carries no `runner` field.
+ */
+async function maybeEnrolRunner(
+  deps: CloudDeps,
+  opts: ConnectOptions,
+  server: string,
+  accessToken: string,
+  orgId: string | undefined,
+): Promise<void> {
+  if (opts.noRunner) return;
+  if (opts.json && !opts.runner) return;
+
+  const say = (s: string): void => (opts.json ? deps.err(s) : deps.out(s));
+  const runnerDeps: RunnerEnrolDeps = {
+    shell: deps.runnerShell ?? realShell,
+    fetch: deps.fetch,
+    out: say,
+    err: say,
+  };
+  const name =
+    opts.runnerName && opts.runnerName.length > 0 ? opts.runnerName : (deps.hostname ?? realHostname)();
+
+  // "One supervisor service per machine" (D26) — checked BEFORE the prompt,
+  // so a machine that already has one never even sees "Also run cloud
+  // pipelines on this machine?" (DoD box 3: a silent no-op, not a re-ask).
+  if (isRunnerServiceInstalled(runnerDeps)) {
+    say(`✓ Runner '${name}' already connected\n`);
+    return;
+  }
+
+  if (!opts.runner) {
+    const proceed = await (deps.promptYesNo ?? defaultPromptYesNo)(
+      '  Also run cloud pipelines on this machine? [Y/n] ',
+    );
+    if (!proceed) {
+      say('  No runner registered on this machine. Set one up later:\n');
+      say(`    bun add -g ${RUNNER_PACKAGE}\n`);
+      say(`    pipeline-runner register --url ${server} --token <token>   (mint one in the dashboard → Runners)\n`);
+      say('  Or re-run:  pipeline cloud connect --runner\n');
+      return;
+    }
+  }
+
+  const outcome = await enrolRunner(runnerDeps, { server, accessToken, orgId, name });
+  switch (outcome.status) {
+    case 'connected':
+      say(`✓ Runner '${outcome.name}' connected, starts on boot\n`);
+      break;
+    case 'connected-no-service':
+      say(
+        `✓ Runner '${outcome.name}' registered, but the background service could not be installed: ${outcome.detail}\n`,
+      );
+      say('  Run `pipeline-runner service install` to retry, or `pipeline-runner start` to run it in the foreground.\n');
+      break;
+    case 'install-failed':
+      say(`⚠ Could not install ${RUNNER_PACKAGE}: ${outcome.detail}\n`);
+      say(`  Install it yourself, then run:  pipeline cloud connect --runner\n`);
+      break;
+    case 'mint-failed':
+      say(`⚠ Could not connect a runner: ${outcome.detail}\n`);
+      break;
+    case 'register-failed':
+      say(`⚠ Runner credential minted, but registration failed: ${outcome.detail}\n`);
+      say('  Re-run:  pipeline cloud connect --runner\n');
+      break;
+  }
+}
+
+/**
  * The tail shared by every auth path once a credential is in hand and an org
  * slug is known: derive the project slug, write the non-secret binding
  * (idempotent), and print/emit the result. Factored out so the
@@ -1128,7 +1306,13 @@ async function connectWithMachineCredential(
     persistCredential(deps, credPath, store);
   }
 
-  return writeBindingAndReport(deps, opts, server, credPath, orgSlug, now);
+  const code = writeBindingAndReport(deps, opts, server, credPath, orgSlug, now);
+  // Machine-credential path (task a6): no org UUID is known here — only the
+  // slug the operator passed via --org — so `maybeEnrolRunner` mints without
+  // an `X-Org-Id` header; the token's own claim carries the org (see this
+  // file's module doc's "GAP FOUND READING THE SERVER").
+  await maybeEnrolRunner(deps, opts, server, tok.access_token, undefined);
+  return code;
 }
 
 async function connect(deps: CloudDeps, opts: ConnectOptions, machineToken: string | undefined): Promise<number> {
@@ -1209,7 +1393,13 @@ async function connect(deps: CloudDeps, opts: ConnectOptions, machineToken: stri
     persistCredential(deps, credPath, store);
   }
 
-  return writeBindingAndReport(deps, opts, server, credPath, org.slug, now);
+  const code = writeBindingAndReport(deps, opts, server, credPath, org.slug, now);
+  // task a6: `org.id` is a UUID here (from /api/v1/me), so it rides as
+  // X-Org-Id on the mint request — required for a device-grant token (not
+  // org-bound in its own claims) and harmless for a browser-flow token
+  // (already org-bound, and guaranteed to agree since it's the same org).
+  await maybeEnrolRunner(deps, opts, server, token, org.id);
+  return code;
 }
 
 // ---------------------------------------------------------------------------

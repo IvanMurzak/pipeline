@@ -26,6 +26,7 @@ import {
   type CloudFs,
 } from '../src/lib/cloud-config';
 import type { SpawnFn } from '../src/lib/loopback-oauth';
+import type { ShellRunner } from '../src/lib/runner-enrol';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -208,6 +209,18 @@ function makeDeps(
     err: (s) => {
       errBuf += s;
     },
+    // task a6 defaults: NEITHER a real subprocess NOR a real prompt may ever
+    // run from a test. `runnerShell` reports "pipeline-runner not installed"
+    // (spawn ENOENT shape, code 127) so `isRunnerServiceInstalled` reads
+    // false and the enrolment path proceeds to `promptYesNo`, which defaults
+    // to DECLINING — so every one of the ~40 pre-existing connect tests below
+    // (none of which pass --runner or opt into the a6 describe blocks) hits
+    // the silent "no runner registered" branch and never touches the network
+    // or a real binary. Tests that DO want to exercise enrolment override
+    // these three explicitly (see the "runner enrolment (task a6)" block).
+    runnerShell: () => ({ code: 127, stdout: '', stderr: '' }),
+    promptYesNo: async () => false,
+    hostname: () => 'test-host',
     ...restOverrides,
   };
   return { deps, out: () => outBuf, err: () => errBuf, clock: () => clock };
@@ -243,7 +256,13 @@ function fakeChild(): EventEmitter {
 
 describe('parseConnectArgs', () => {
   test('defaults', () => {
-    expect(parseConnectArgs([])).toEqual({ reauth: false, device: false, json: false });
+    expect(parseConnectArgs([])).toEqual({
+      reauth: false,
+      device: false,
+      json: false,
+      noRunner: false,
+      runner: false,
+    });
   });
   test('all flags (space + equals forms)', () => {
     expect(
@@ -255,6 +274,8 @@ describe('parseConnectArgs', () => {
       reauth: true,
       device: true,
       json: true,
+      noRunner: false,
+      runner: false,
     });
   });
   test('missing value is an error', () => {
@@ -262,6 +283,42 @@ describe('parseConnectArgs', () => {
   });
   test('unknown argument is an error', () => {
     expect(parseConnectArgs(['--bogus'])).toEqual({ error: "unknown argument '--bogus'" });
+  });
+
+  // task a6
+  test('--no-runner', () => {
+    const r = parseConnectArgs(['--no-runner']);
+    expect(r).toEqual({ reauth: false, device: false, json: false, noRunner: true, runner: false });
+  });
+  test('--runner', () => {
+    const r = parseConnectArgs(['--runner']);
+    expect(r).toEqual({ reauth: false, device: false, json: false, noRunner: false, runner: true });
+  });
+  test('--runner-name <name> (space + equals forms)', () => {
+    expect(parseConnectArgs(['--runner-name', 'my-box'])).toEqual({
+      reauth: false,
+      device: false,
+      json: false,
+      noRunner: false,
+      runner: false,
+      runnerName: 'my-box',
+    });
+    expect(parseConnectArgs(['--runner-name=my-box'])).toEqual({
+      reauth: false,
+      device: false,
+      json: false,
+      noRunner: false,
+      runner: false,
+      runnerName: 'my-box',
+    });
+  });
+  test('--runner-name with no value is an error', () => {
+    expect(parseConnectArgs(['--runner-name'])).toEqual({ error: '--runner-name requires a value' });
+  });
+  test('--runner + --no-runner together is a usage error', () => {
+    expect(parseConnectArgs(['--runner', '--no-runner'])).toEqual({
+      error: 'cannot combine --runner and --no-runner',
+    });
   });
 });
 
@@ -983,6 +1040,356 @@ describe('runCloud connect — browser flow selection ladder', () => {
     expect(cred.servers['https://api.ai-pipeline.dev'].org_slug).toBe('acme');
     expect(out().includes(SECRET_TOKEN)).toBe(false);
     expect(out().includes('rt_persisted_by_a3')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Runner enrolment folded into `cloud connect` (task a6) — 04-cloud-auth.md
+// §5, D11: after a successful connect, "Also run cloud pipelines on this
+// machine? [Y/n]", then mint + register + install the service. No dashboard
+// visit, no token displayed. The mint HTTP call and the install/register/
+// service-install mechanics are unit-tested directly in
+// tests/runner-enrol.test.ts; these prove `runCloud` WIRES them up — the
+// prompt, the `--runner`/`--no-runner`/`--runner-name` flags, the already-
+// connected no-op, and D27's --json inversion.
+// ---------------------------------------------------------------------------
+
+const A6_RUNNER_CLIENT_ID = 'runner-row-abc123';
+const A6_RUNNER_CLIENT_SECRET = 'aipc_SUPER_SECRET_RUNNER_0123456789';
+const A6_RUNNER_LEGACY_TOKEN = 'aipr_LEGACY_SECRET_should_never_be_used_9876543210';
+
+/** Completes the (fallback) device flow immediately and, in addition to the
+ *  usual /oauth/device_authorization, /oauth/token, /api/v1/me trio, serves
+ *  `POST /api/v1/runners` — the mint call task a6 adds. Any OTHER URL still
+ *  throws (inherited from `scriptedFetch`), so a regression that calls
+ *  something unexpected fails loudly. */
+function fetchWithRunnerMint(opts: {
+  log: FetchLog[];
+  mintStatus?: number;
+  mintErrorBody?: unknown;
+  includeLegacyToken?: boolean;
+}) {
+  const base = scriptedFetch({ log: opts.log });
+  return async (url: string, init: HttpInit): Promise<HttpResponse> => {
+    if (url.endsWith('/api/v1/runners')) {
+      opts.log.push({ url, init });
+      if (opts.mintStatus && opts.mintStatus !== 201) {
+        return reply(opts.mintStatus, opts.mintErrorBody ?? { error: 'forbidden' });
+      }
+      return reply(201, {
+        runner: { id: A6_RUNNER_CLIENT_ID },
+        clientId: A6_RUNNER_CLIENT_ID,
+        clientSecret: A6_RUNNER_CLIENT_SECRET,
+        credentialMode: 'dual',
+        ...(opts.includeLegacyToken ? { token: A6_RUNNER_LEGACY_TOKEN } : {}),
+      });
+    }
+    return base(url, init);
+  };
+}
+
+interface A6ShellCall {
+  cmd: string;
+  args: string[];
+  env?: Record<string, string>;
+}
+
+/** A scriptable `pipeline-runner`/`bun` shell fake — every call is recorded
+ *  so tests can assert exactly what ran (and, for the security test, what
+ *  did NOT appear in argv). */
+function fakeRunnerShell(opts: {
+  installed?: boolean;
+  cliAvailable?: boolean;
+  registerCode?: number;
+  registerStderr?: string;
+  serviceCode?: number;
+  serviceStderr?: string;
+  bunCode?: number;
+  bunStderr?: string;
+}): { shell: ShellRunner; calls: A6ShellCall[] } {
+  const calls: A6ShellCall[] = [];
+  const shell: ShellRunner = (cmd, args, env) => {
+    calls.push({ cmd, args, env });
+    if (cmd === 'pipeline-runner' && args[0] === '--version') {
+      return opts.cliAvailable === false
+        ? { code: 127, stdout: '', stderr: '' }
+        : { code: 0, stdout: 'pipeline-runner 0.1.0\n', stderr: '' };
+    }
+    if (cmd === 'pipeline-runner' && args[0] === 'service' && args[1] === 'status') {
+      return opts.installed
+        ? { code: 0, stdout: '[pipeline-runner] pipeline-runner.service: running (enabled)\n', stderr: '' }
+        : { code: 0, stdout: '[pipeline-runner] pipeline-runner.service is not installed\n', stderr: '' };
+    }
+    if (cmd === 'bun' && args[0] === 'add') {
+      return { code: opts.bunCode ?? 0, stdout: '', stderr: opts.bunStderr ?? '' };
+    }
+    if (cmd === 'pipeline-runner' && args[0] === 'register') {
+      return { code: opts.registerCode ?? 0, stdout: '', stderr: opts.registerStderr ?? '' };
+    }
+    if (cmd === 'pipeline-runner' && args[0] === 'service' && args[1] === 'install') {
+      return { code: opts.serviceCode ?? 0, stdout: '', stderr: opts.serviceStderr ?? '' };
+    }
+    return { code: 1, stdout: '', stderr: `test double: unexpected shell call: ${cmd} ${args.join(' ')}` };
+  };
+  return { shell, calls };
+}
+
+describe('runCloud connect — runner enrolment (task a6)', () => {
+  test('DoD box 3: an already-enrolled machine is a silent no-op with the stated message — no prompt, no mint', async () => {
+    const log: FetchLog[] = [];
+    const { shell, calls } = fakeRunnerShell({ installed: true });
+    let promptCalled = false;
+    const { deps, out } = makeDeps(fetchWithRunnerMint({ log }), recordingFs(), {
+      runnerShell: shell,
+      promptYesNo: async () => {
+        promptCalled = true;
+        return true;
+      },
+      hostname: () => 'ivan-desktop',
+    });
+
+    const code = await runCloud(['connect'], deps);
+
+    expect(code).toBe(0);
+    expect(out()).toContain("✓ Runner 'ivan-desktop' already connected");
+    expect(promptCalled).toBe(false);
+    expect(log.some((l) => l.url.endsWith('/api/v1/runners'))).toBe(false);
+    expect(calls.some((c) => c.args[0] === 'register')).toBe(false);
+  });
+
+  test('DoD box 2: declining leaves the project linked and no runner registered, and prints the two manual commands', async () => {
+    const log: FetchLog[] = [];
+    const { shell, calls } = fakeRunnerShell({ installed: false });
+    const { deps, out } = makeDeps(fetchWithRunnerMint({ log }), recordingFs(), {
+      runnerShell: shell,
+      promptYesNo: async () => false,
+    });
+
+    const code = await runCloud(['connect'], deps);
+
+    expect(code).toBe(0);
+    expect(existsSync(cloudJsonPath(deps.cwd))).toBe(true); // project still linked
+    expect(out()).toContain('bun add -g @baizor/pipeline-runner');
+    expect(out()).toContain('pipeline-runner register --url');
+    expect(out()).toContain('pipeline cloud connect --runner');
+    expect(calls.some((c) => c.args[0] === 'register')).toBe(false);
+    expect(log.some((l) => l.url.endsWith('/api/v1/runners'))).toBe(false);
+  });
+
+  test('DoD box 2: re-running with --runner enrols it without asking, installs the package on demand (command shown first), registers, installs the service', async () => {
+    const log: FetchLog[] = [];
+    const { shell, calls } = fakeRunnerShell({ installed: false, cliAvailable: false });
+    let promptCalled = false;
+    const { deps, out } = makeDeps(fetchWithRunnerMint({ log }), recordingFs(), {
+      runnerShell: shell,
+      promptYesNo: async () => {
+        promptCalled = true;
+        return true;
+      },
+      hostname: () => 'ivan-desktop',
+    });
+
+    const code = await runCloud(['connect', '--runner'], deps);
+
+    expect(code).toBe(0);
+    expect(promptCalled).toBe(false); // --runner skips asking entirely
+
+    // DoD box 4: the on-demand install shows its command before running it.
+    expect(out()).toContain('Installing the runner:');
+    expect(out()).toContain('$ bun add -g @baizor/pipeline-runner');
+    expect(calls.some((c) => c.cmd === 'bun' && c.args.join(' ') === 'add -g @baizor/pipeline-runner')).toBe(true);
+
+    const mintCall = log.find((l) => l.url.endsWith('/api/v1/runners'));
+    expect(mintCall).toBeDefined();
+    expect(JSON.parse(mintCall!.init.body ?? '{}').name).toBe('ivan-desktop');
+    expect(mintCall!.init.headers['authorization']).toBe(`Bearer ${SECRET_TOKEN}`);
+
+    const registerCall = calls.find((c) => c.cmd === 'pipeline-runner' && c.args[0] === 'register');
+    expect(registerCall).toBeDefined();
+    expect(registerCall!.args).toEqual([
+      'register',
+      '--url',
+      'https://api.ai-pipeline.dev',
+      '--client-id',
+      A6_RUNNER_CLIENT_ID,
+    ]);
+    expect(registerCall!.env?.PIPELINE_RUNNER_OAUTH_CLIENT_SECRET).toBe(A6_RUNNER_CLIENT_SECRET);
+
+    expect(
+      calls.some((c) => c.cmd === 'pipeline-runner' && c.args[0] === 'service' && c.args[1] === 'install'),
+    ).toBe(true);
+    expect(out()).toContain("✓ Runner 'ivan-desktop' connected, starts on boot");
+  });
+
+  test('--runner-name overrides the hostname default', async () => {
+    const log: FetchLog[] = [];
+    const { shell } = fakeRunnerShell({ installed: false });
+    const { deps, out } = makeDeps(fetchWithRunnerMint({ log }), recordingFs(), {
+      runnerShell: shell,
+      hostname: () => 'should-not-be-used',
+    });
+
+    const code = await runCloud(['connect', '--runner', '--runner-name', 'my-ci-box'], deps);
+
+    expect(code).toBe(0);
+    const mintCall = log.find((l) => l.url.endsWith('/api/v1/runners'));
+    expect(JSON.parse(mintCall!.init.body ?? '{}').name).toBe('my-ci-box');
+    expect(out()).toContain("✓ Runner 'my-ci-box' connected, starts on boot");
+  });
+
+  test('--no-runner skips the prompt entirely — zero shell calls, zero mint calls', async () => {
+    const log: FetchLog[] = [];
+    const { shell, calls } = fakeRunnerShell({ installed: false });
+    let promptCalled = false;
+    const { deps } = makeDeps(fetchWithRunnerMint({ log }), recordingFs(), {
+      runnerShell: shell,
+      promptYesNo: async () => {
+        promptCalled = true;
+        return true;
+      },
+    });
+
+    const code = await runCloud(['connect', '--no-runner'], deps);
+
+    expect(code).toBe(0);
+    expect(promptCalled).toBe(false);
+    expect(calls.length).toBe(0);
+    expect(log.some((l) => l.url.endsWith('/api/v1/runners'))).toBe(false);
+  });
+
+  test('D27: --json without --runner declines enrolment entirely — stdout is still exactly the one connect JSON object', async () => {
+    const log: FetchLog[] = [];
+    const { shell, calls } = fakeRunnerShell({ installed: false });
+    let promptCalled = false;
+    const { deps, out } = makeDeps(fetchWithRunnerMint({ log }), recordingFs(), {
+      runnerShell: shell,
+      promptYesNo: async () => {
+        promptCalled = true;
+        return true;
+      },
+    });
+
+    const code = await runCloud(['connect', '--json'], deps);
+
+    expect(code).toBe(0);
+    const obj = JSON.parse(out()); // throws if stdout carries anything but the one object
+    expect(obj.status).toBe('connected');
+    expect(promptCalled).toBe(false);
+    expect(calls.length).toBe(0);
+    expect(log.some((l) => l.url.endsWith('/api/v1/runners'))).toBe(false);
+  });
+
+  test('D27: --json --runner opts back in — enrols without a prompt; connect JSON on stdout is unchanged, runner progress goes to stderr only', async () => {
+    const log: FetchLog[] = [];
+    const { shell } = fakeRunnerShell({ installed: false });
+    const { deps, out, err } = makeDeps(fetchWithRunnerMint({ log }), recordingFs(), {
+      runnerShell: shell,
+      hostname: () => 'ci-box-3',
+    });
+
+    const code = await runCloud(['connect', '--json', '--runner'], deps);
+
+    expect(code).toBe(0);
+    const obj = JSON.parse(out());
+    expect(obj.status).toBe('connected');
+    expect(err()).toContain("✓ Runner 'ci-box-3' connected, starts on boot");
+    expect(log.some((l) => l.url.endsWith('/api/v1/runners'))).toBe(true);
+  });
+
+  test('package install failure is non-fatal: connect still exits 0, no register/service-install attempted', async () => {
+    const log: FetchLog[] = [];
+    const { shell, calls } = fakeRunnerShell({ installed: false, cliAvailable: false, bunCode: 1, bunStderr: 'network unreachable' });
+    const { deps, out } = makeDeps(fetchWithRunnerMint({ log }), recordingFs(), {
+      runnerShell: shell,
+      promptYesNo: async () => true,
+    });
+
+    const code = await runCloud(['connect'], deps);
+
+    expect(code).toBe(0);
+    expect(out()).toContain('Could not install @baizor/pipeline-runner');
+    expect(out()).toContain('network unreachable');
+    expect(log.some((l) => l.url.endsWith('/api/v1/runners'))).toBe(false); // never even tried to mint
+    expect(calls.some((c) => c.args[0] === 'register')).toBe(false);
+  });
+
+  test('mint 403 (non-admin caller) is non-fatal: connect still exits 0, actionable warning, no register attempted', async () => {
+    const log: FetchLog[] = [];
+    const { shell, calls } = fakeRunnerShell({ installed: false });
+    const { deps, out } = makeDeps(fetchWithRunnerMint({ log, mintStatus: 403 }), recordingFs(), {
+      runnerShell: shell,
+      promptYesNo: async () => true,
+    });
+
+    const code = await runCloud(['connect'], deps);
+
+    expect(code).toBe(0);
+    expect(out()).toContain('admin role');
+    expect(calls.some((c) => c.args[0] === 'register')).toBe(false);
+  });
+
+  test('register failure is non-fatal: connect still exits 0, tells the user to re-run with --runner', async () => {
+    const log: FetchLog[] = [];
+    const { shell, calls } = fakeRunnerShell({ installed: false, registerCode: 1, registerStderr: 'runner credential was not accepted' });
+    const { deps, out } = makeDeps(fetchWithRunnerMint({ log }), recordingFs(), {
+      runnerShell: shell,
+      promptYesNo: async () => true,
+    });
+
+    const code = await runCloud(['connect'], deps);
+
+    expect(code).toBe(0);
+    expect(out()).toContain('registration failed');
+    expect(out()).toContain('pipeline cloud connect --runner');
+    expect(
+      calls.some((c) => c.cmd === 'pipeline-runner' && c.args[0] === 'service' && c.args[1] === 'install'),
+    ).toBe(false);
+  });
+
+  test('service-install failure is non-fatal: reports "registered but service could not be installed", still exits 0', async () => {
+    const log: FetchLog[] = [];
+    const { shell } = fakeRunnerShell({ installed: false, serviceCode: 1, serviceStderr: 'permission denied' });
+    const { deps, out } = makeDeps(fetchWithRunnerMint({ log }), recordingFs(), {
+      runnerShell: shell,
+      promptYesNo: async () => true,
+      hostname: () => 'ivan-desktop',
+    });
+
+    const code = await runCloud(['connect'], deps);
+
+    expect(code).toBe(0);
+    expect(out()).toContain("Runner 'ivan-desktop' registered, but the background service could not be installed");
+    expect(out()).toContain('permission denied');
+  });
+
+  // -------------------------------------------------------------------
+  // SECURITY — DoD: "No token may ever be printed." Covers the FULL
+  // `runCloud` invocation (connect + enrolment together), not just
+  // `enrolRunner` in isolation (see tests/runner-enrol.test.ts for that).
+  // -------------------------------------------------------------------
+  test('SECURITY: the minted runner client secret and legacy token never appear in stdout or stderr, nor in any shelled argv, across the whole run', async () => {
+    const log: FetchLog[] = [];
+    const { shell, calls } = fakeRunnerShell({ installed: false });
+    const { deps, out, err } = makeDeps(fetchWithRunnerMint({ log, includeLegacyToken: true }), recordingFs(), {
+      runnerShell: shell,
+      promptYesNo: async () => true,
+    });
+
+    const code = await runCloud(['connect'], deps);
+
+    expect(code).toBe(0);
+    expect(out()).not.toContain(A6_RUNNER_CLIENT_SECRET);
+    expect(err()).not.toContain(A6_RUNNER_CLIENT_SECRET);
+    expect(out()).not.toContain(A6_RUNNER_LEGACY_TOKEN);
+    expect(err()).not.toContain(A6_RUNNER_LEGACY_TOKEN);
+    // Argv is world-readable via `ps` on Linux — the secret must ride ONLY
+    // in the register subprocess's env override, never in any command's args.
+    for (const c of calls) {
+      expect(c.args.join(' ')).not.toContain(A6_RUNNER_CLIENT_SECRET);
+      expect(c.args.join(' ')).not.toContain(A6_RUNNER_LEGACY_TOKEN);
+    }
+    const registerCall = calls.find((c) => c.cmd === 'pipeline-runner' && c.args[0] === 'register');
+    expect(registerCall?.env?.PIPELINE_RUNNER_OAUTH_CLIENT_SECRET).toBe(A6_RUNNER_CLIENT_SECRET);
   });
 });
 
