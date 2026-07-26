@@ -21,9 +21,13 @@ import {
   cloudJsonPath,
   type CloudFs,
 } from '../src/lib/cloud-config';
+import type { SpawnFn } from '../src/lib/loopback-oauth';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer as httpCreateServer, type Server } from 'node:http';
+import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 
 const SECRET_TOKEN = 'pat_SUPER_SECRET_abcdef0123456789';
 const DEVICE_CODE = 'device-code-xyz';
@@ -152,6 +156,10 @@ function makeDeps(
   let outBuf = '';
   let errBuf = '';
   let clock = 1_000_000;
+  // `env` is merged (not replaced) so a test overriding just e.g.
+  // SSH_CONNECTION doesn't lose PIPELINE_CLOUD_HOME — every OTHER override
+  // key still fully replaces the default, as before.
+  const { env: envOverride, ...restOverrides } = overrides;
   const deps: CloudDeps = {
     fetch: fetchImpl,
     fs: fsPair.fs,
@@ -159,7 +167,14 @@ function makeDeps(
     sleep: async (ms) => {
       clock += ms;
     },
-    env: { PIPELINE_CLOUD_HOME: home },
+    env: { PIPELINE_CLOUD_HOME: home, ...envOverride },
+    // Default platform is 'linux' with no DISPLAY set, which — by design —
+    // already trips the browser flow's pre-flight fallback for every EXISTING
+    // device-flow test below (a real, deliberate consequence of a2: those
+    // tests now implicitly also cover "headless environment falls back to
+    // the device code"). Tests that want to exercise the browser flow itself
+    // override `platform` to 'darwin'/'win32' (see the "browser loopback
+    // flow" describe block) to bypass the Linux-specific checks.
     platform: 'linux',
     homedir: home,
     cwd: proj,
@@ -169,9 +184,33 @@ function makeDeps(
     err: (s) => {
       errBuf += s;
     },
-    ...overrides,
+    ...restOverrides,
   };
   return { deps, out: () => outBuf, err: () => errBuf, clock: () => clock };
+}
+
+/** Wraps `node:http.createServer` so a test can assert the loopback listener
+ *  was actually closed — the security-critical guarantee this task's DoD
+ *  calls out by name ("the listener is closed on every exit path"). */
+function spyLoopbackServer(): { createServer: () => Server; closed: () => boolean } {
+  let didClose = false;
+  const createServer = (): Server => {
+    const real = httpCreateServer();
+    const originalClose = real.close.bind(real);
+    real.close = ((cb?: (err?: Error) => void) => {
+      didClose = true;
+      return originalClose(cb);
+    }) as typeof real.close;
+    return real;
+  };
+  return { createServer, closed: () => didClose };
+}
+
+/** A minimal fake child process satisfying just what `openBrowser` uses
+ *  (`.on('error', …)` / `.on('exit', …)`) — cast to `SpawnFn`'s return type
+ *  at the call site, same pattern as loopback-oauth.test.ts. */
+function fakeChild(): EventEmitter {
+  return new EventEmitter();
 }
 
 // ---------------------------------------------------------------------------
@@ -180,14 +219,17 @@ function makeDeps(
 
 describe('parseConnectArgs', () => {
   test('defaults', () => {
-    expect(parseConnectArgs([])).toEqual({ reauth: false, json: false });
+    expect(parseConnectArgs([])).toEqual({ reauth: false, device: false, json: false });
   });
   test('all flags (space + equals forms)', () => {
-    expect(parseConnectArgs(['--server', 'https://x', '--project=p', '--org', 'o', '--reauth', '--json'])).toEqual({
+    expect(
+      parseConnectArgs(['--server', 'https://x', '--project=p', '--org', 'o', '--reauth', '--device', '--json']),
+    ).toEqual({
       server: 'https://x',
       project: 'p',
       org: 'o',
       reauth: true,
+      device: true,
       json: true,
     });
   });
@@ -444,6 +486,231 @@ describe('runCloud connect — idempotency', () => {
     });
     expect(await runCloud(['connect', '--reauth'], second.deps)).toBe(0);
     expect(log2.some((l) => l.url.endsWith('/auth/device/start'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runCloud — browser loopback (PKCE) flow + the selection ladder (a2)
+// ---------------------------------------------------------------------------
+//
+// The low-level listener (state/path/timeout rejection, closure on every
+// exit path) is tested exhaustively against a REAL loopback socket in
+// loopback-oauth.test.ts. These tests prove the higher layer: `runCloud`
+// actually WIRES that listener up, picks browser vs. device correctly per
+// 04-cloud-auth.md §1.2/§4, prints the documented one-line reasons, and —
+// for the one full happy-path test — that a real PKCE round trip against a
+// scripted token endpoint produces a stored, working credential.
+//
+// The "fake browser" in these tests is the injected `spawn`: instead of
+// launching a real OS browser, it performs a REAL `fetch()` back to the
+// CLI's own real loopback listener, exactly as a browser completing the
+// OAuth redirect would. This proves every piece EXCEPT an actual OS window
+// opening and an actual human clicking Approve against production — see the
+// PR description for exactly which DoD boxes that leaves as "awaiting a
+// live run".
+
+describe('runCloud connect — browser flow selection ladder', () => {
+  test('default test env (linux, no DISPLAY) falls back to device flow with the documented reason', async () => {
+    const log: FetchLog[] = [];
+    const { deps, out } = makeDeps(scriptedFetch({ log }), recordingFs());
+    const code = await runCloud(['connect'], deps);
+    expect(code).toBe(0);
+    expect(out()).toContain('No browser available here — falling back to a device code.');
+    expect(log.some((l) => l.url.endsWith('/auth/device/start'))).toBe(true);
+  });
+
+  test('--device skips the browser silently (no fallback reason line) and uses the device flow', async () => {
+    const log: FetchLog[] = [];
+    // platform 'darwin' would otherwise sail straight through every
+    // pre-flight check — proving --device wins regardless.
+    const { deps, out } = makeDeps(scriptedFetch({ log }), recordingFs(), { platform: 'darwin' });
+    const code = await runCloud(['connect', '--device'], deps);
+    expect(code).toBe(0);
+    expect(out()).not.toContain('falling back');
+    expect(log.some((l) => l.url.endsWith('/auth/device/start'))).toBe(true);
+    expect(log.some((l) => l.url.endsWith('/oauth/authorize'))).toBe(false);
+  });
+
+  test('SSH_CONNECTION with no DISPLAY falls back with the SSH-specific reason', async () => {
+    const log: FetchLog[] = [];
+    const { deps, out } = makeDeps(scriptedFetch({ log }), recordingFs(), {
+      env: { SSH_CONNECTION: '10.0.0.1 22 10.0.0.2 22' },
+    });
+    const code = await runCloud(['connect'], deps);
+    expect(code).toBe(0);
+    expect(out()).toContain('Connected over SSH with no browser to open — falling back to a device code.');
+    expect(log.some((l) => l.url.endsWith('/auth/device/start'))).toBe(true);
+  });
+
+  test('an unbindable loopback port falls back with the documented message', async () => {
+    const log: FetchLog[] = [];
+    class FailingServer extends EventEmitter {
+      listen(): this {
+        queueMicrotask(() => this.emit('error', new Error('EADDRNOTAVAIL (simulated)')));
+        return this;
+      }
+      close(cb?: () => void): this {
+        cb?.();
+        return this;
+      }
+    }
+    const { deps, out } = makeDeps(scriptedFetch({ log }), recordingFs(), {
+      platform: 'darwin', // bypass the Linux-only pre-flight checks entirely
+      createLoopbackServer: () => new FailingServer() as unknown as Server,
+    });
+    const code = await runCloud(['connect'], deps);
+    expect(code).toBe(0);
+    expect(out()).toContain('Could not open a local callback port — falling back to a device code.');
+    expect(log.some((l) => l.url.endsWith('/auth/device/start'))).toBe(true);
+  });
+
+  test('a browser opener that exits non-zero falls back, prints why, and closes the listener it had already bound', async () => {
+    const log: FetchLog[] = [];
+    const spawnFn: SpawnFn = () => {
+      const child = fakeChild();
+      queueMicrotask(() => child.emit('exit', 1));
+      return child as unknown as ReturnType<SpawnFn>;
+    };
+    const spy = spyLoopbackServer();
+    const { deps, out } = makeDeps(scriptedFetch({ log }), recordingFs(), {
+      platform: 'darwin',
+      spawn: spawnFn,
+      createLoopbackServer: spy.createServer,
+    });
+    const code = await runCloud(['connect'], deps);
+    expect(code).toBe(0);
+    expect(out()).toContain('Could not open your browser — falling back to a device code.');
+    expect(log.some((l) => l.url.endsWith('/auth/device/start'))).toBe(true);
+    expect(spy.closed()).toBe(true);
+  });
+
+  test('a browser opener that hangs (never emits exit/error) does not hang the CLI forever', async () => {
+    // Simulates the known real-world `xdg-open` failure mode: the launcher
+    // subprocess never reports back. `openBrowserGraceMs` bounds the wait,
+    // and `loopbackTimeoutMs` bounds the subsequent wait on the listener —
+    // together the command still reaches a clean terminal state instead of
+    // hanging indefinitely.
+    const spawnFn: SpawnFn = () => fakeChild() as unknown as ReturnType<SpawnFn>; // never emits anything
+    const spy = spyLoopbackServer();
+    const { deps, err } = makeDeps(scriptedFetch({ log: [] }), recordingFs(), {
+      platform: 'darwin',
+      spawn: spawnFn,
+      createLoopbackServer: spy.createServer,
+      openBrowserGraceMs: 30,
+      loopbackTimeoutMs: 30,
+    });
+    const code = await runCloud(['connect'], deps);
+    expect(code).toBe(1);
+    expect(err()).toContain('timed out waiting for browser approval');
+    expect(spy.closed()).toBe(true);
+  });
+
+  test('a wrong-state callback from the "browser" is a hard failure, NOT a silent fallback to device', async () => {
+    // Simulates a stray/malicious local request racing the real browser:
+    // the "browser" hits the CLI's REAL loopback listener but with the
+    // wrong `state`. 07-approval-policy.md §8: this ends the whole attempt
+    // rather than silently retrying or downgrading to the device flow.
+    const spawnFn: SpawnFn = (_cmd, args) => {
+      const child = fakeChild();
+      const url = new URL(args[args.length - 1]!);
+      const redirectUri = url.searchParams.get('redirect_uri')!;
+      queueMicrotask(async () => {
+        try {
+          await fetch(`${redirectUri}?code=X&state=WRONG_STATE`);
+        } finally {
+          child.emit('exit', 0);
+        }
+      });
+      return child as unknown as ReturnType<SpawnFn>;
+    };
+    const { deps, err } = makeDeps(scriptedFetch({ log: [] }), recordingFs(), {
+      platform: 'darwin',
+      spawn: spawnFn,
+    });
+    const code = await runCloud(['connect'], deps);
+    expect(code).toBe(1);
+    expect(err()).toContain('ignored an unexpected callback');
+  });
+
+  test('full browser flow: fake browser drives the REAL loopback listener + a genuine PKCE round trip', async () => {
+    const log: FetchLog[] = [];
+    let capturedRedirectUri = '';
+    let capturedCodeChallenge = '';
+
+    const spawnFn: SpawnFn = (_cmd, args) => {
+      const child = fakeChild();
+      const url = new URL(args[args.length - 1]!);
+      capturedRedirectUri = url.searchParams.get('redirect_uri')!;
+      capturedCodeChallenge = url.searchParams.get('code_challenge')!;
+      const state = url.searchParams.get('state')!;
+      // (`scope` absence is asserted independently and safely in
+      // loopback-oauth.test.ts's `buildAuthorizeUrl` suite — an assertion
+      // failure THIS deep inside the spawn callback would be swallowed by
+      // `openBrowser`'s own try/catch rather than surfacing as a clean test
+      // failure, so it deliberately isn't duplicated here.)
+      queueMicrotask(async () => {
+        try {
+          await fetch(`${capturedRedirectUri}?code=FAKE_AUTH_CODE&state=${encodeURIComponent(state)}`);
+        } finally {
+          child.emit('exit', 0);
+        }
+      });
+      return child as unknown as ReturnType<SpawnFn>;
+    };
+
+    const fetchImpl = async (url: string, init: HttpInit): Promise<HttpResponse> => {
+      log.push({ url, init });
+      if (url.endsWith('/oauth/token')) {
+        const params = new URLSearchParams(init.body ?? '');
+        expect(params.get('grant_type')).toBe('authorization_code');
+        expect(params.get('code')).toBe('FAKE_AUTH_CODE');
+        expect(params.get('client_id')).toBe('ai-pipeline-cli');
+        expect(params.get('redirect_uri')).toBe(capturedRedirectUri);
+        expect(params.get('resource')).toBe('https://api.ai-pipeline.dev/api');
+        // Genuine PKCE binding: re-derive S256(verifier) and confirm it
+        // equals the challenge actually sent to /oauth/authorize.
+        const verifier = params.get('code_verifier') ?? '';
+        const rederived = createHash('sha256').update(verifier, 'ascii').digest('base64url');
+        expect(rederived).toBe(capturedCodeChallenge);
+        return reply(200, {
+          access_token: SECRET_TOKEN,
+          token_type: 'bearer',
+          expires_in: 3600,
+          refresh_token: 'rt_should_be_ignored_by_a2',
+          scope: '',
+        });
+      }
+      if (url.endsWith('/api/v1/me')) {
+        return reply(200, {
+          user: { id: 'u1', email: 'dev@example.com' },
+          orgs: [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'owner' }],
+          selectedOrgId: null,
+          selectedRole: null,
+        });
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    };
+
+    const fsPair = recordingFs();
+    const spy = spyLoopbackServer();
+    const { deps, out } = makeDeps(fetchImpl, fsPair, {
+      platform: 'darwin',
+      spawn: spawnFn,
+      createLoopbackServer: spy.createServer,
+    });
+
+    const code = await runCloud(['connect'], deps);
+    expect(code).toBe(0);
+    expect(out()).toContain('Opening your browser to authorize');
+    expect(log.some((l) => l.url.endsWith('/oauth/token'))).toBe(true);
+    expect(log.some((l) => l.url.endsWith('/auth/device/start'))).toBe(false);
+    expect(spy.closed()).toBe(true); // closed even on the SUCCESS path
+
+    const credPath = credentialFilePath({ platform: 'darwin', env: deps.env, homedir: deps.homedir });
+    const cred = JSON.parse(readFileSync(credPath, 'utf-8'));
+    expect(cred.servers['https://api.ai-pipeline.dev'].access_token).toBe(SECRET_TOKEN);
+    expect(cred.servers['https://api.ai-pipeline.dev'].org_slug).toBe('acme');
+    expect(out().includes(SECRET_TOKEN)).toBe(false);
   });
 });
 
