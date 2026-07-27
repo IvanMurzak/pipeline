@@ -245,11 +245,15 @@ export type RegisterOutcome =
  * a slug held by a retired department shows up as a 409 on the POST — 05 §5's
  * "slug taken" row, whose message this reproduces.
  */
-export async function registerOrUpdateDepartment(
-  deps: ServeDeps,
-  ctx: CloudContext,
-  request: DepartmentRegistrationRequest,
-): Promise<RegisterOutcome> {
+/**
+ * `GET /api/v1/departments` — every non-retired department in the org (the
+ * cloud never returns a retired one, `service.ts`: "DELETE is final, not a
+ * filterable state"). Extracted from `registerOrUpdateDepartment` (a9) for
+ * a10, which needs the SAME list-and-match to resolve a slug to an id for
+ * `status`/`stop`/`retire` — none of which a department folder stores
+ * locally (a9's "writes nothing inside the department folder" rule, D-14).
+ */
+export async function listDepartments(deps: ServeDeps, ctx: CloudContext): Promise<ListOutcome> {
   const list = await cloudRequest(deps, ctx, 'GET', '/api/v1/departments');
   if (list.networkError !== undefined) {
     return { ok: false, message: offlineMessage(ctx.server, list.networkError) };
@@ -258,9 +262,47 @@ export async function registerOrUpdateDepartment(
     return { ok: false, message: describeHttpFailure('list the departments in this org', list) };
   }
   const rawList = list.body?.['departments'];
-  const existing = (Array.isArray(rawList) ? rawList : [])
-    .map(toRecord)
-    .find((d): d is DepartmentRecord => d !== null && d.slug === request.slug && !d.retired);
+  const departments = (Array.isArray(rawList) ? rawList : []).filter(
+    (d): d is Record<string, unknown> => typeof d === 'object' && d !== null,
+  );
+  return { ok: true, departments: departments.map(toRecord).filter((d): d is DepartmentRecord => d !== null) };
+}
+
+export type ListOutcome = { ok: true; departments: DepartmentRecord[] } | { ok: false; message: string };
+
+/**
+ * Resolve `department.yml`'s `name` to the cloud's department id, by slug —
+ * the ONLY lookup path a10's `status`/`stop`/`retire` have when the local
+ * binding heuristic (`resolveLocalDepartmentId`, below) finds no match, e.g.
+ * a machine that has never served this department itself but wants to
+ * `retire` it, or `status` before the first `serve`.
+ */
+export async function findDepartmentBySlug(
+  deps: ServeDeps,
+  ctx: CloudContext,
+  slug: string,
+): Promise<{ ok: true; department: DepartmentRecord } | { ok: false; message: string; notFound?: boolean }> {
+  const list = await listDepartments(deps, ctx);
+  if (!list.ok) return list;
+  const found = list.departments.find((d) => d.slug === slug);
+  if (found === undefined) {
+    return {
+      ok: false,
+      notFound: true,
+      message: `no department named '${slug}' in ${ctx.orgSlug} — it has never been served, or was retired`,
+    };
+  }
+  return { ok: true, department: found };
+}
+
+export async function registerOrUpdateDepartment(
+  deps: ServeDeps,
+  ctx: CloudContext,
+  request: DepartmentRegistrationRequest,
+): Promise<RegisterOutcome> {
+  const list = await listDepartments(deps, ctx);
+  if (!list.ok) return list;
+  const existing = list.departments.find((d) => d.slug === request.slug && !d.retired);
 
   if (existing === undefined) {
     const created = await cloudRequest(deps, ctx, 'POST', '/api/v1/departments', request);
@@ -631,13 +673,17 @@ export async function claimInstall(
  * What `serve` ended up being able to say. The first three are 05 §5/§6's own
  * vocabulary; `not-registered` is the machine-readable form of "we stopped
  * before step 4 succeeded", which the human path renders as an error message
- * rather than a status line.
+ * rather than a status line. `stopped` is a10's own addition — a DELIBERATE
+ * operator action (`pipeline department stop`), distinct from
+ * `registered-not-serving` (which always names a REASON something is broken)
+ * because nothing here is broken: the registration and install both stay
+ * exactly as `serve` left them, and `serve` brings it straight back.
  *
  * A department that is registered but cannot take work is
  * `registered-not-serving` and says why — never a bare `online`, which is the
  * exact lie 05 §5's closing line forbids.
  */
-export type ServeState = 'online' | 'waiting-approval' | 'registered-not-serving' | 'not-registered';
+export type ServeState = 'online' | 'waiting-approval' | 'registered-not-serving' | 'not-registered' | 'stopped';
 
 /** The one-line status marker for each state, matching 05 §5's transcript
  *  (`● unity-review — online, ready for work`) and §5's closing rule
@@ -652,6 +698,8 @@ export function renderState(state: ServeState, slug: string, reason?: string): s
       return `○ ${slug} — registered — not serving${reason ? ` (${reason})` : ''}`;
     case 'not-registered':
       return `✗ ${slug} — not registered${reason ? ` (${reason})` : ''}`;
+    case 'stopped':
+      return `○ ${slug} — stopped on this machine${reason ? ` (${reason})` : ''}`;
   }
 }
 
@@ -667,3 +715,343 @@ export function engineIsServable(engine: string): boolean {
 export const SERVABLE_ENGINES: readonly string[] = ENGINES.filter((e) =>
   SERVABLE_ADAPTER_IDS.includes(e.adapterId),
 ).map((e) => e.engine);
+
+// ---------------------------------------------------------------------------
+// a10 — resolving a department's ID WITHOUT the cloud
+// ---------------------------------------------------------------------------
+//
+// A department folder never stores its own id (a9's "writes nothing inside
+// the department folder" rule — a fresh `git clone` must stay a fresh git
+// clone). `status`/`stop` still need it: `status` to ask the cloud about
+// THIS department specifically, `stop` to tell `pipeline-runner unbind` which
+// entry to remove. The id lives in exactly two places — the cloud, and
+// pipeline-runner's OWN binding store (b1) — and DoD box 1 ("status works
+// with the network down") rules out depending on the first.
+//
+// The trick: `serve` already computed exactly what THIS machine would bind
+// for THIS manifest (`runtimeBindingFor`, above) and handed it to
+// `pipeline-runner bind --department <id> …`. Re-deriving that SAME binding
+// right now and finding which bound department id it belongs to is a pure,
+// local, id-free lookup — matched on `cwd` (the department folder's own
+// absolute path, which by construction cannot be shared by two DIFFERENT
+// `department.yml` files) with `adapterId`/`command` as a sanity check, never
+// on `args`/`lifecycle` (a hand-edited `--arg` at bind time must not defeat
+// the match). Reads THROUGH `pipeline-runner`'s own CLI — `bindings --json`,
+// `unbind` — never by touching `departments.json` directly (the same rule
+// `bindRuntime`/`ensureSupervisor` already keep, D26 applied to reads too).
+
+/** The subset of a bound `RuntimeConfig` (pipeline-runner's
+ *  `department/adapter.ts`) that `bindings --json` prints per entry and this
+ *  module's match needs — see `bindingMatches` below. */
+interface NarrowedBindingJson {
+  adapterId?: unknown;
+  command?: unknown;
+  cwd?: unknown;
+}
+
+export interface LocalBindingsSnapshot {
+  /** Where `pipeline-runner` reads its binding file from — reported even when
+   *  empty, since "where would this write" is what an operator asks next. */
+  path: string;
+  source: 'file' | 'env' | 'none' | string;
+  /** b1's own refusal (07 §8 — wrong perms/owner) when the store could not be
+   *  trusted at all. Bindings are always empty in that case (fail closed). */
+  refusal: string | null;
+  departments: Record<string, NarrowedBindingJson>;
+}
+
+export type ReadLocalBindingsOutcome =
+  | { ok: true; snapshot: LocalBindingsSnapshot }
+  | { ok: false; message: string };
+
+/** `pipeline-runner bindings --json` — b1's read surface for the store this
+ *  module never opens by hand. Note that `bindings --json` itself exits 1
+ *  when the store is REFUSED (b1's own convention); the JSON on stdout still
+ *  carries the reason in that case, so this reads stdout regardless of the
+ *  exit code and only treats "no output at all" (spawn failure, ENOENT) as a
+ *  hard failure. */
+export function readLocalBindings(shell: ShellRunner): ReadLocalBindingsOutcome {
+  const r = shell(RUNNER_CLI_BIN, ['bindings', '--json']);
+  if (r.code === 127) {
+    return { ok: false, message: '`pipeline-runner` is not installed on this machine.' };
+  }
+  if (r.stdout.trim().length === 0) {
+    return { ok: false, message: (r.stderr || `pipeline-runner bindings exited ${r.code} with no output`).trim() };
+  }
+  try {
+    const parsed = JSON.parse(r.stdout) as Partial<LocalBindingsSnapshot>;
+    const departments =
+      typeof parsed.departments === 'object' && parsed.departments !== null && !Array.isArray(parsed.departments)
+        ? (parsed.departments as Record<string, NarrowedBindingJson>)
+        : {};
+    return {
+      ok: true,
+      snapshot: {
+        path: typeof parsed.path === 'string' ? parsed.path : '',
+        source: typeof parsed.source === 'string' ? parsed.source : 'none',
+        refusal: typeof parsed.refusal === 'string' ? parsed.refusal : null,
+        departments,
+      },
+    };
+  } catch {
+    return { ok: false, message: 'could not read this machine’s runtime bindings (unexpected `pipeline-runner bindings --json` output)' };
+  }
+}
+
+/** True when `candidate` (one entry of `bindings --json`) is what THIS
+ *  machine would write for `expected` right now — see the section doc above
+ *  for why `cwd` alone is already a unique key and why `args`/`lifecycle` are
+ *  deliberately excluded. */
+function bindingMatches(expected: RuntimeBinding, candidate: NarrowedBindingJson): boolean {
+  return (
+    typeof candidate.cwd === 'string' &&
+    candidate.cwd === expected.cwd &&
+    candidate.adapterId === expected.adapterId &&
+    candidate.command === expected.command
+  );
+}
+
+export interface LocalDepartmentLookup {
+  /** Null when the store is empty/refused/unreadable, or nothing matches. */
+  departmentId: string | null;
+  /** Whether THIS department is currently accepting offers on this machine —
+   *  i.e. whether `departmentId` is non-null. Named separately because a
+   *  caller's first question is usually this, not the id itself. */
+  bound: boolean;
+  /** Set when the binding store could not be read AT ALL — distinct from
+   *  "readable, but nothing matches" (`departmentId: null`, this unset). */
+  error?: string;
+  /** The store's own refusal (07 §8), when the file exists but was refused. */
+  refusal?: string;
+}
+
+/** Resolve THIS manifest to a department id by asking `pipeline-runner`
+ *  what it currently has bound — zero network, zero filesystem access
+ *  outside `pipeline-runner`'s own CLI. Never throws. */
+export function resolveLocalDepartmentId(shell: ShellRunner, expected: RuntimeBinding): LocalDepartmentLookup {
+  const read = readLocalBindings(shell);
+  if (!read.ok) return { departmentId: null, bound: false, error: read.message };
+  const { snapshot } = read;
+  if (snapshot.refusal !== null) return { departmentId: null, bound: false, refusal: snapshot.refusal };
+  for (const [id, candidate] of Object.entries(snapshot.departments)) {
+    if (bindingMatches(expected, candidate)) return { departmentId: id, bound: true };
+  }
+  return { departmentId: null, bound: false };
+}
+
+export type UnbindOutcome = { ok: true; wasBound: boolean } | { ok: false; message: string };
+
+/** `stop` (a10): the exact inverse of `bindRuntime` — shells `pipeline-runner
+ *  unbind`, which stops new offers being accepted and signals a running
+ *  supervisor to reload, WITHOUT killing whatever is already in flight (b1's
+ *  own doc: "executions already running for it are NOT cancelled; they
+ *  finish on their own terms") — precisely 05 §5's "finish in-flight tasks,
+ *  refuse new offers". Never touches the cloud registration. */
+export function unbindRuntime(shell: ShellRunner, departmentId: string): UnbindOutcome {
+  const r = shell(RUNNER_CLI_BIN, ['unbind', '--department', departmentId]);
+  if (r.code !== 0) {
+    return {
+      ok: false,
+      message:
+        r.code === 127
+          ? '`pipeline-runner` is not installed on this machine.'
+          : (r.stderr || r.stdout || `exit ${r.code}`).trim(),
+    };
+  }
+  // b1's own wording for the idempotent no-op case (`... was not bound ...`).
+  return { ok: true, wasBound: !/was not bound/i.test(r.stdout) };
+}
+
+// ---------------------------------------------------------------------------
+// a10 — the cloud reads `status` needs, and the one write `retire` needs
+// ---------------------------------------------------------------------------
+
+export interface DepartmentProfile {
+  id: string;
+  slug: string;
+  enabled: boolean;
+  retired: boolean;
+  online: boolean;
+  manifestDigest: string | null;
+}
+
+function toProfile(raw: unknown): DepartmentProfile | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r['id'] !== 'string' || typeof r['slug'] !== 'string') return null;
+  return {
+    id: r['id'],
+    slug: r['slug'],
+    enabled: r['enabled'] !== false,
+    retired: r['retired'] === true,
+    online: r['online'] === true,
+    manifestDigest: typeof r['manifestDigest'] === 'string' ? r['manifestDigest'] : null,
+  };
+}
+
+/** `GET /api/v1/departments/:id` — "the same source as the card" (06 §6):
+ *  online-ness, `enabled`, and the department's CURRENT `manifestDigest` (the
+ *  authority `status`'s stale-digest check compares an install against). */
+export async function fetchDepartmentProfile(
+  deps: ServeDeps,
+  ctx: CloudContext,
+  departmentId: string,
+): Promise<{ ok: true; profile: DepartmentProfile } | { ok: false; message: string }> {
+  const res = await cloudRequest(deps, ctx, 'GET', `/api/v1/departments/${departmentId}`);
+  if (res.networkError !== undefined) return { ok: false, message: offlineMessage(ctx.server, res.networkError) };
+  if (res.status !== 200) return { ok: false, message: describeHttpFailure('read this department', res) };
+  const profile = toProfile(res.body?.['department']);
+  if (profile === null) return { ok: false, message: 'the department profile response was malformed' };
+  return { ok: true, profile };
+}
+
+export interface InstallSummary {
+  id: string;
+  runnerId: string;
+  /** The digest THIS install most recently claimed (`serve`'s step 8) — may
+   *  lag the department's current one when another machine re-served an edit
+   *  and this one has not (05 §5 "several machines serving one department"). */
+  manifestDigest: string | null;
+  pendingApproval: boolean;
+  state: string;
+}
+
+function toInstallSummary(raw: unknown): InstallSummary | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r['id'] !== 'string' || typeof r['runnerId'] !== 'string') return null;
+  return {
+    id: r['id'],
+    runnerId: r['runnerId'],
+    manifestDigest: typeof r['manifestDigest'] === 'string' ? r['manifestDigest'] : null,
+    pendingApproval: r['pendingApproval'] === true,
+    state: typeof r['state'] === 'string' ? r['state'] : 'active',
+  };
+}
+
+/** `GET /api/v1/departments/:id/installs` — every machine that has claimed
+ *  this department. `status` looks up THIS runner's own row (by
+ *  `readRunnerIdentity().runnerId`) to decide the stale-digest flag. */
+export async function fetchInstalls(
+  deps: ServeDeps,
+  ctx: CloudContext,
+  departmentId: string,
+): Promise<{ ok: true; installs: InstallSummary[] } | { ok: false; message: string }> {
+  const res = await cloudRequest(deps, ctx, 'GET', `/api/v1/departments/${departmentId}/installs`);
+  if (res.networkError !== undefined) return { ok: false, message: offlineMessage(ctx.server, res.networkError) };
+  if (res.status !== 200) return { ok: false, message: describeHttpFailure('list this department’s installs', res) };
+  const raw = res.body?.['installs'];
+  const installs = (Array.isArray(raw) ? raw : []).map(toInstallSummary).filter((i): i is InstallSummary => i !== null);
+  return { ok: true, installs };
+}
+
+export interface DeptUsage {
+  departments: { limit: number | null; used: number; remaining: number | null };
+  dailyActions: { limit: number | null; used: number; remaining: number | null; resetAt: string | null };
+}
+
+function toCeiling(raw: unknown): { limit: number | null; used: number; remaining: number | null } {
+  const r = typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  return {
+    limit: typeof r['limit'] === 'number' ? r['limit'] : null,
+    used: typeof r['used'] === 'number' ? r['used'] : 0,
+    remaining: typeof r['remaining'] === 'number' ? r['remaining'] : null,
+  };
+}
+
+/** `GET /api/v1/dept-usage` (task c8, D30) — the ONLY source `status`'s
+ *  budget line reads: every number printed is exactly what this endpoint
+ *  returns, with no client-side arithmetic (a10 DoD's explicit rule) beyond
+ *  formatting `resetAt` for display. `null` means unlimited (Pro, Team). */
+export async function fetchDeptUsage(
+  deps: ServeDeps,
+  ctx: CloudContext,
+): Promise<{ ok: true; usage: DeptUsage } | { ok: false; message: string }> {
+  const res = await cloudRequest(deps, ctx, 'GET', '/api/v1/dept-usage');
+  if (res.networkError !== undefined) return { ok: false, message: offlineMessage(ctx.server, res.networkError) };
+  if (res.status !== 200) return { ok: false, message: describeHttpFailure('read the department usage budget', res) };
+  const dailyRaw =
+    typeof res.body?.['daily_actions'] === 'object' && res.body?.['daily_actions'] !== null
+      ? (res.body['daily_actions'] as Record<string, unknown>)
+      : {};
+  return {
+    ok: true,
+    usage: {
+      departments: toCeiling(res.body?.['departments']),
+      dailyActions: { ...toCeiling(dailyRaw), resetAt: typeof dailyRaw['reset_at'] === 'string' ? dailyRaw['reset_at'] : null },
+    },
+  };
+}
+
+export interface DeptTaskSummary {
+  id: string;
+  contextId: string;
+  originPrincipal: string;
+  state: string;
+  createdAt: string;
+  updatedAt: string;
+  deadlineAt: string | null;
+}
+
+function toTaskSummary(raw: unknown): DeptTaskSummary | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r['id'] !== 'string' || typeof r['state'] !== 'string') return null;
+  return {
+    id: r['id'],
+    contextId: typeof r['contextId'] === 'string' ? r['contextId'] : '',
+    originPrincipal: typeof r['originPrincipal'] === 'string' ? r['originPrincipal'] : '',
+    state: r['state'],
+    createdAt: typeof r['createdAt'] === 'string' ? r['createdAt'] : '',
+    updatedAt: typeof r['updatedAt'] === 'string' ? r['updatedAt'] : '',
+    deadlineAt: typeof r['deadlineAt'] === 'string' ? r['deadlineAt'] : null,
+  };
+}
+
+/** `GET /api/v1/dept-tasks?department_id=<id>` — server-side filtered, so
+ *  `status` never fetches (or leaks, across departments sharing a machine)
+ *  another department's tasks to compute its own counts. */
+export async function fetchDeptTasks(
+  deps: ServeDeps,
+  ctx: CloudContext,
+  departmentId: string,
+): Promise<{ ok: true; tasks: DeptTaskSummary[] } | { ok: false; message: string }> {
+  const res = await cloudRequest(deps, ctx, 'GET', `/api/v1/dept-tasks?department_id=${encodeURIComponent(departmentId)}`);
+  if (res.networkError !== undefined) return { ok: false, message: offlineMessage(ctx.server, res.networkError) };
+  if (res.status !== 200) return { ok: false, message: describeHttpFailure('list this department’s tasks', res) };
+  const raw = res.body?.['tasks'];
+  const tasks = (Array.isArray(raw) ? raw : []).map(toTaskSummary).filter((t): t is DeptTaskSummary => t !== null);
+  return { ok: true, tasks };
+}
+
+export type RetireOutcome =
+  | { ok: true; slug: string; failedTaskCount: number }
+  | { ok: false; message: string; notFound?: boolean; forbidden?: boolean };
+
+/** `DELETE /api/v1/departments/:id` (owner-only, D13) — 05 §5/§6's "retire":
+ *  soft-delete plus fail every open task with a stated reason
+ *  (06-department-registry.md §6). `retire`'s command layer is what enforces
+ *  the `--yes`/confirmation gate; this function only ever performs the call
+ *  once that gate has already passed. */
+export async function retireDepartmentRequest(
+  deps: ServeDeps,
+  ctx: CloudContext,
+  departmentId: string,
+): Promise<RetireOutcome> {
+  const res = await cloudRequest(deps, ctx, 'DELETE', `/api/v1/departments/${departmentId}`);
+  if (res.networkError !== undefined) return { ok: false, message: offlineMessage(ctx.server, res.networkError) };
+  if (res.status === 403) {
+    return {
+      ok: false,
+      forbidden: true,
+      message: `retiring this department needs the owner role in ${ctx.orgSlug} (DELETE is owner-only).`,
+    };
+  }
+  if (res.status === 404) {
+    return { ok: false, notFound: true, message: 'department not found (already retired?)' };
+  }
+  if (res.status !== 200) return { ok: false, message: describeHttpFailure('retire this department', res) };
+  const department = toRecord(res.body?.['department']);
+  const failedTaskCount = typeof res.body?.['failed_task_count'] === 'number' ? res.body['failed_task_count'] : 0;
+  return { ok: true, slug: department?.slug ?? '', failedTaskCount };
+}

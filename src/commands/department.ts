@@ -87,7 +87,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { hostname as osHostname } from 'node:os';
+import { homedir as osHomedir, hostname as osHostname } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import {
   buildRegistrationRequest,
@@ -109,14 +109,42 @@ import {
   claimInstall,
   departmentUrlFor,
   ensureSupervisor,
+  fetchDeptTasks,
+  fetchDeptUsage,
+  fetchDepartmentProfile,
+  fetchInstalls,
+  findDepartmentBySlug,
   registerOrUpdateDepartment,
   renderState,
+  resolveLocalDepartmentId,
+  retireDepartmentRequest,
   runtimeBindingFor,
+  unbindRuntime,
   type CloudContext,
+  type DeptTaskSummary,
+  type DeptUsage,
+  type DepartmentProfile,
+  type InstallSummary,
+  type ServeDeps,
   type ServeFetch,
   type ServeHttpResponse,
   type ServeState,
 } from '../lib/department-serve';
+// a10: the silent (never-interactive) credential read `status` uses — the
+// SAME store `cloud connect`/`serve` write, read WITHOUT the interactive
+// ladder so a routine, possibly-scripted `status` call never pops a browser
+// or a device code. `ensureFreshCredential` is the one function in this
+// package allowed to call the refresh grant (a5's single-flight rule).
+import { ensureFreshCredential, type RefreshDeps } from '../lib/credential-refresh';
+import {
+  credentialFilePath,
+  DEFAULT_SERVER,
+  normalizeServerUrl,
+  readCredentialStore,
+  realFs,
+  SERVER_ENV,
+  type CloudFs,
+} from '../lib/cloud-config';
 import {
   enrolRunner,
   isRunnerServiceInstalled,
@@ -967,6 +995,19 @@ export interface ServeCommandDeps {
    * pin a clonable repo to one org and one server.
    */
   authenticate: (opts: ApiAuthOptions) => Promise<ApiAuth>;
+  /**
+   * a10 (`retire`): whether this process can actually prompt someone right
+   * now. Optional — production defaults to `defaultIsInteractive` (a real
+   * TTY); `--json` overrides it to `false` regardless (D27), so this is only
+   * ever consulted for the plain-text path. Injected (rather than reading
+   * `process.stdin.isTTY` inline) so the "refuses without --yes when
+   * non-interactive" DoD box is testable without faking a real terminal.
+   */
+  isInteractive?: () => boolean;
+  /** a10 (`retire`): the confirmation prompt shown when `--yes` was not
+   *  passed and `isInteractive()` is true. Optional — production reads one
+   *  line from stdin (`defaultConfirm`). */
+  confirm?: (message: string) => Promise<boolean>;
 }
 
 function realHostname(): string {
@@ -1408,10 +1449,920 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
 const RUNNER_CLI_BIN_HINT = 'pipeline-runner start';
 
 // ---------------------------------------------------------------------------
+// Shared: resolve `manifest.name` to a department id (task a10)
+// ---------------------------------------------------------------------------
+
+/**
+ * `status`/`stop`/`retire` all need a department id, and a10 builds on a9's
+ * hard rule that a department folder is a clonable git repo and stores none
+ * of its own — the id lives only in the cloud and in `pipeline-runner`'s own
+ * binding store (b1). Resolution order: THIS machine's own binding first
+ * (zero network — see `department-serve.ts`'s "a10" section doc for why
+ * `cwd` alone is already a unique local key), the cloud's slug list
+ * otherwise. `stop` calls `resolveLocalDepartmentId` directly (it has no use
+ * for the cloud fallback — see its own doc); this shared helper is for the
+ * two verbs that DO have (or, for `retire`, must have) a live credential.
+ */
+async function resolveDepartmentId(
+  shell: ShellRunner,
+  manifest: DepartmentManifest,
+  manifestDir: string,
+  cloud: { deps: ServeDeps; ctx: CloudContext } | null,
+): Promise<{ ok: true; departmentId: string; source: 'local' | 'cloud' } | { ok: false; message: string }> {
+  const bindingResult = runtimeBindingFor(manifest, { manifestDir });
+  if (bindingResult.ok) {
+    const local = resolveLocalDepartmentId(shell, bindingResult.binding);
+    if (local.departmentId !== null) return { ok: true, departmentId: local.departmentId, source: 'local' };
+  }
+  if (cloud === null) {
+    return {
+      ok: false,
+      message: `'${manifest.name}' is not bound on this machine, and no cloud connection is available to look it up by name`,
+    };
+  }
+  const found = await findDepartmentBySlug(cloud.deps, cloud.ctx, manifest.name);
+  if (!found.ok) return { ok: false, message: found.message };
+  return { ok: true, departmentId: found.department.id, source: 'cloud' };
+}
+
+// ---------------------------------------------------------------------------
+// `stop` — 05 §5's "stop" verb (task a10)
+// ---------------------------------------------------------------------------
+//
+// Deliberately, ENTIRELY LOCAL: "finish in-flight tasks, refuse new offers,
+// report offline, leave the registration intact" (05 §5) describes exactly
+// what `pipeline-runner unbind` already does (b1's own doc: "executions
+// already running for it are NOT cancelled; they finish on their own
+// terms") and NOTHING that touches the cloud — no HTTP call, no
+// authentication ladder. This is the most literal reading of "leave the
+// registration intact": `stop` never asks the control plane about the
+// registration at all, so there is structurally nothing it could change.
+// It also makes `stop` (unlike `serve`/`retire`) work with the network
+// down by construction, not by a fallback path.
+
+interface StopArgs {
+  file?: string;
+  json: boolean;
+  help: boolean;
+  unknownFlag?: string;
+  extra?: string;
+}
+
+const STOP_USAGE = 'Usage: pipeline department stop [--file <path>] [--json]';
+
+function parseStopArgs(args: string[]): StopArgs {
+  const out: StopArgs = { json: false, help: false };
+  const take = (i: number) => args[i + 1];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const eq = (p: string) => (a.startsWith(p + '=') ? a.slice(p.length + 1) : undefined);
+    if (a === '--json') out.json = true;
+    else if (a === '--help' || a === '-h') out.help = true;
+    else if (a === '--file') out.file = take(i++);
+    else if (eq('--file') !== undefined) out.file = eq('--file');
+    else if (a === '--') continue;
+    else if (a.startsWith('-')) out.unknownFlag = a;
+    else if (out.extra === undefined) out.extra = a;
+  }
+  return out;
+}
+
+function stopHelpText(): string {
+  return (
+    `${STOP_USAGE}\n\n` +
+    'Finish in-flight tasks, refuse new offers, and report offline — WITHOUT\n' +
+    'touching the cloud registration, so `pipeline department serve` brings it\n' +
+    'straight back with no re-registration and no re-approval.\n\n' +
+    'Local only: unbinds this department from the pipeline-runner supervisor on\n' +
+    'THIS machine (`pipeline-runner unbind`). Never contacts the control plane —\n' +
+    'a department served from another machine is unaffected, and this works with\n' +
+    'the network down.\n\n' +
+    'Options:\n' +
+    `  --file <path>  The manifest (default: ./${DEPARTMENT_MANIFEST_FILENAME}).\n` +
+    '  --json         Print the result as JSON.\n' +
+    '  --help, -h     Show this help.\n'
+  );
+}
+
+export function runDepartmentStop(args: string[], deps: ServeCommandDeps = realServeDeps()): number {
+  const a = parseStopArgs(args);
+  const say = (s: string): void => (a.json ? deps.err(s) : deps.out(s));
+
+  if (a.help) {
+    deps.out(stopHelpText());
+    return 0;
+  }
+  if (a.unknownFlag !== undefined) {
+    deps.err(`pipeline department stop: unknown flag '${a.unknownFlag}'\n${STOP_USAGE}\n`);
+    return 2;
+  }
+  if (a.extra !== undefined) {
+    deps.err(`pipeline department stop: unexpected argument '${a.extra}'\n${STOP_USAGE}\n`);
+    return 2;
+  }
+
+  const filePath = a.file !== undefined ? resolve(deps.cwd, a.file) : join(deps.cwd, DEPARTMENT_MANIFEST_FILENAME);
+  const inspection = inspectManifestFile(filePath);
+  if (inspection.fatal !== undefined || inspection.manifest === null) {
+    if (a.json) deps.out(JSON.stringify(buildJsonResult(filePath, inspection.findings), null, 2) + '\n');
+    else if (inspection.fatal !== undefined) deps.err(`pipeline department stop: ${inspection.fatal}\n`);
+    else printHuman(deps.err, filePath, null, inspection.findings);
+    return 2;
+  }
+  const manifest = inspection.manifest;
+  const manifestDir = dirname(filePath);
+
+  const bindingResult = runtimeBindingFor(manifest, { manifestDir });
+  if (!bindingResult.ok) {
+    deps.err(`pipeline department stop: ${bindingResult.message}\n`);
+    return 1;
+  }
+  const local = resolveLocalDepartmentId(deps.shell, bindingResult.binding);
+  if (local.error !== undefined) {
+    deps.err(`pipeline department stop: ${local.error}\n`);
+    return 1;
+  }
+  if (local.refusal !== undefined) {
+    deps.err(`pipeline department stop: the runtime binding store was refused — ${local.refusal}\n`);
+    return 1;
+  }
+  if (local.departmentId === null) {
+    // Idempotent, matching `serve`'s own ethos: asking to stop something
+    // that is not running here is success, not an error.
+    if (a.json) {
+      deps.out(JSON.stringify({ ok: true, stopped: false, slug: manifest.name }, null, 2) + '\n');
+    } else {
+      deps.out(`'${manifest.name}' is not currently being served on this machine — nothing to stop.\n`);
+    }
+    return 0;
+  }
+
+  const result = unbindRuntime(deps.shell, local.departmentId);
+  if (!result.ok) {
+    deps.err(`pipeline department stop: could not unbind — ${result.message}\n`);
+    return 1;
+  }
+  say(`${renderState('stopped', manifest.name)}\n`);
+  say('In-flight tasks finish on their own; new offers are refused on this machine.\n');
+  say('Registration is untouched — `pipeline department serve` brings it straight back.\n');
+  if (a.json) {
+    deps.out(
+      JSON.stringify({ ok: true, stopped: true, slug: manifest.name, departmentId: local.departmentId }, null, 2) + '\n',
+    );
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// `retire` — 05 §5's "retire" verb (task a10)
+// ---------------------------------------------------------------------------
+
+function defaultIsInteractive(): boolean {
+  return process.stdin.isTTY === true;
+}
+
+/** A single stdin prompt, `y`/`yes` (case-insensitive) accepted, anything
+ *  else (including a blank line — Enter alone must never confirm a
+ *  destructive action) declined. */
+async function defaultConfirm(message: string): Promise<boolean> {
+  const { createInterface } = await import('node:readline/promises');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question(`${message} `);
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
+  }
+}
+
+interface RetireArgs {
+  file?: string;
+  org?: string;
+  server?: string;
+  machineToken?: string;
+  device: boolean;
+  reauth: boolean;
+  yes: boolean;
+  json: boolean;
+  help: boolean;
+  unknownFlag?: string;
+  extra?: string;
+}
+
+const RETIRE_USAGE =
+  'Usage: pipeline department retire [--yes] [--file <path>] [--org <slug>] [--server <url>]\n' +
+  '                                  [--device] [--reauth] [--machine-token <token>] [--json]';
+
+function parseRetireArgs(args: string[]): RetireArgs {
+  const out: RetireArgs = { device: false, reauth: false, yes: false, json: false, help: false };
+  const take = (i: number) => args[i + 1];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? '';
+    const eq = (p: string) => (a.startsWith(p + '=') ? a.slice(p.length + 1) : undefined);
+    if (a === '--json') out.json = true;
+    else if (a === '--help' || a === '-h') out.help = true;
+    else if (a === '--yes' || a === '-y') out.yes = true;
+    else if (a === '--device') out.device = true;
+    else if (a === '--reauth') out.reauth = true;
+    else if (a === '--file') out.file = take(i++);
+    else if (eq('--file') !== undefined) out.file = eq('--file');
+    else if (a === '--org') out.org = take(i++);
+    else if (eq('--org') !== undefined) out.org = eq('--org');
+    else if (a === '--server') out.server = take(i++);
+    else if (eq('--server') !== undefined) out.server = eq('--server');
+    else if (a === '--machine-token') out.machineToken = take(i++);
+    else if (eq('--machine-token') !== undefined) out.machineToken = eq('--machine-token');
+    else if (a === '--') continue;
+    else if (a.startsWith('-')) out.unknownFlag = a;
+    else out.extra = a;
+  }
+  return out;
+}
+
+function retireHelpText(): string {
+  return (
+    `${RETIRE_USAGE}\n\n` +
+    'The unpublish verb: stop, then soft-delete this department from the org and\n' +
+    'fail its open tasks with a stated reason (06-department-registry.md §6).\n' +
+    'Requires the owner role.\n\n' +
+    'Refused without --yes unless running interactively — this is destructive and\n' +
+    'irreversible from the CLI. --json always counts as non-interactive (D27).\n\n' +
+    'Options:\n' +
+    '  --yes, -y              Confirm without prompting.\n' +
+    `  --file <path>          The manifest (default: ./${DEPARTMENT_MANIFEST_FILENAME}).\n` +
+    '  --org <slug>           Which org to retire from (required with a machine\n' +
+    '                         credential, which has no discoverable org).\n' +
+    '  --server <url>         Control-plane base URL.\n' +
+    '  --device / --reauth    Passed to the authentication ladder.\n' +
+    `  --machine-token <t>    ${MACHINE_TOKEN_ENV} is the documented form.\n` +
+    '  --json                 Emit one JSON object on stdout; progress to stderr.\n' +
+    '  --help, -h             Show this help.\n'
+  );
+}
+
+export async function runDepartmentRetire(args: string[], deps: ServeCommandDeps = realServeDeps()): Promise<number> {
+  const a = parseRetireArgs(args);
+  const say = (s: string): void => (a.json ? deps.err(s) : deps.out(s));
+
+  if (a.help) {
+    deps.out(retireHelpText());
+    return 0;
+  }
+  if (a.unknownFlag !== undefined) {
+    deps.err(`pipeline department retire: unknown flag '${a.unknownFlag}'\n${RETIRE_USAGE}\n`);
+    return 2;
+  }
+  if (a.extra !== undefined) {
+    deps.err(`pipeline department retire: unexpected argument '${a.extra}'\n${RETIRE_USAGE}\n`);
+    return 2;
+  }
+  const machineToken = (a.machineToken ?? deps.env[MACHINE_TOKEN_ENV] ?? '').trim();
+  if (machineToken.length > 0 && a.device) {
+    deps.err(
+      `pipeline department retire: --machine-token (or ${MACHINE_TOKEN_ENV}) cannot be combined with --device\n${RETIRE_USAGE}\n`,
+    );
+    return 2;
+  }
+
+  const filePath = a.file !== undefined ? resolve(deps.cwd, a.file) : join(deps.cwd, DEPARTMENT_MANIFEST_FILENAME);
+  const inspection = inspectManifestFile(filePath);
+  if (inspection.fatal !== undefined || inspection.manifest === null) {
+    if (a.json) deps.out(JSON.stringify(buildJsonResult(filePath, inspection.findings), null, 2) + '\n');
+    else if (inspection.fatal !== undefined) deps.err(`pipeline department retire: ${inspection.fatal}\n`);
+    else printHuman(deps.err, filePath, null, inspection.findings);
+    return 2;
+  }
+  const manifest = inspection.manifest;
+  const manifestDir = dirname(filePath);
+
+  // D27: `--json` always implies non-interactive, product-wide. Otherwise
+  // "interactive" means this process could actually show a prompt and read
+  // an answer right now.
+  const isInteractive = !a.json && (deps.isInteractive ?? defaultIsInteractive)();
+  if (!a.yes) {
+    if (!isInteractive) {
+      deps.err(
+        `pipeline department retire: refusing to retire '${manifest.name}' without --yes (not running interactively)\n` +
+          '  This soft-deletes the department and fails every open task. Pass --yes to confirm.\n',
+      );
+      return 1;
+    }
+    const confirm = deps.confirm ?? defaultConfirm;
+    const confirmed = await confirm(
+      `Retire '${manifest.name}'? This soft-deletes it and fails every open task. Type 'yes' to confirm:`,
+    );
+    if (!confirmed) {
+      deps.out('Aborted — nothing was retired.\n');
+      return 1;
+    }
+  }
+
+  let auth: ApiAuth;
+  try {
+    auth = await deps.authenticate({
+      ...(a.server !== undefined ? { server: a.server } : {}),
+      ...(a.org !== undefined ? { org: a.org } : {}),
+      ...(machineToken.length > 0 ? { machineToken } : {}),
+      device: a.device,
+      reauth: a.reauth,
+      json: a.json,
+    });
+  } catch (e) {
+    deps.err(`pipeline department retire: ${(e as Error).message}\n`);
+    return 1;
+  }
+  const ctx: CloudContext = {
+    server: auth.server,
+    accessToken: auth.accessToken,
+    orgSlug: auth.orgSlug,
+    ...(auth.orgId !== undefined ? { orgId: auth.orgId } : {}),
+  };
+  say(
+    auth.userEmail
+      ? `✓ Authorized as ${auth.userEmail}    org: ${auth.orgSlug}\n`
+      : `✓ Authorized      org: ${auth.orgSlug}\n`,
+  );
+
+  const resolved = await resolveDepartmentId(deps.shell, manifest, manifestDir, { deps, ctx });
+  if (!resolved.ok) {
+    deps.err(`pipeline department retire: ${resolved.message}\n`);
+    return 1;
+  }
+
+  // 05 §5/§6: "retire is stop, then remove" — best-effort local unbind first.
+  // Never fatal: the DELETE below is the actual state change, and a machine
+  // that never served this department locally (retiring one served
+  // elsewhere) has nothing to unbind.
+  const bindingResult = runtimeBindingFor(manifest, { manifestDir });
+  if (bindingResult.ok) {
+    const local = resolveLocalDepartmentId(deps.shell, bindingResult.binding);
+    if (local.departmentId !== null) unbindRuntime(deps.shell, local.departmentId);
+  }
+
+  const result = await retireDepartmentRequest(deps, ctx, resolved.departmentId);
+  if (!result.ok) {
+    deps.err(`pipeline department retire: ${result.message}\n`);
+    return 1;
+  }
+  say(`✓ Retired ${result.slug || manifest.name} from ${ctx.orgSlug}.\n`);
+  say(
+    result.failedTaskCount > 0
+      ? `  ${result.failedTaskCount} open task${result.failedTaskCount === 1 ? '' : 's'} failed with reason "department retired".\n`
+      : '  No open tasks were affected.\n',
+  );
+  if (a.json) {
+    deps.out(
+      JSON.stringify(
+        { ok: true, slug: result.slug || manifest.name, org: ctx.orgSlug, failedTaskCount: result.failedTaskCount },
+        null,
+        2,
+      ) + '\n',
+    );
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// `status` — 05 §6 (task a10)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every side effect `status` performs — its OWN shape, deliberately distinct
+ * from `ServeCommandDeps`. `status` NEVER runs the interactive authentication
+ * ladder: a routine, possibly-scripted, possibly-`--follow` diagnostic
+ * command must never pop a browser or a device code. It needs the
+ * credential-READ seam instead (`fs`/`platform`/`homedir`/`now`, mirroring
+ * `lib/mesh-notify.ts`'s `MeshNotifyDeps`, which has the identical "headless,
+ * silent-or-nothing" requirement) so it can reuse an already-live credential
+ * through `ensureFreshCredential` — the ONE function allowed to call the
+ * refresh grant (a5) — and fall back to a local-only view for everything
+ * else (DoD box 1: "status works with the network down").
+ */
+export interface StatusCommandDeps {
+  shell: ShellRunner;
+  fetch: ServeFetch;
+  out: (s: string) => void;
+  err: (s: string) => void;
+  env: Record<string, string | undefined>;
+  /** Where a bare `status` looks for `department.yml`. */
+  cwd: string;
+  fs: CloudFs;
+  platform: string;
+  homedir: string;
+  now: () => number;
+  /** Injectable so `--follow` is testable without a real timer. */
+  sleep: (ms: number) => Promise<void>;
+}
+
+export function realStatusDeps(): StatusCommandDeps {
+  return {
+    shell: realShell,
+    fetch: async (url, init) => (await fetch(url, init as RequestInit)) as unknown as ServeHttpResponse,
+    out: (s) => {
+      process.stdout.write(s);
+    },
+    err: (s) => {
+      process.stderr.write(s);
+    },
+    env: process.env,
+    cwd: process.cwd(),
+    fs: realFs,
+    platform: process.platform,
+    homedir: osHomedir(),
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  };
+}
+
+interface StatusArgs {
+  file?: string;
+  follow: boolean;
+  json: boolean;
+  help: boolean;
+  org?: string;
+  server?: string;
+  unknownFlag?: string;
+  extra?: string;
+}
+
+const STATUS_USAGE =
+  'Usage: pipeline department status [--follow] [--json] [--file <path>] [--org <slug>] [--server <url>]';
+
+function parseStatusArgs(args: string[]): StatusArgs {
+  const out: StatusArgs = { follow: false, json: false, help: false };
+  const take = (i: number) => args[i + 1];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const eq = (p: string) => (a.startsWith(p + '=') ? a.slice(p.length + 1) : undefined);
+    if (a === '--follow') out.follow = true;
+    else if (a === '--json') out.json = true;
+    else if (a === '--help' || a === '-h') out.help = true;
+    else if (a === '--file') out.file = take(i++);
+    else if (eq('--file') !== undefined) out.file = eq('--file');
+    else if (a === '--org') out.org = take(i++);
+    else if (eq('--org') !== undefined) out.org = eq('--org');
+    else if (a === '--server') out.server = take(i++);
+    else if (eq('--server') !== undefined) out.server = eq('--server');
+    else if (a === '--') continue;
+    else if (a.startsWith('-')) out.unknownFlag = a;
+    else if (out.extra === undefined) out.extra = a;
+  }
+  return out;
+}
+
+function statusHelpText(): string {
+  return (
+    `${STATUS_USAGE}\n\n` +
+    'Show what this department is doing: state, the plan budget, and recent\n' +
+    "tasks — from the control plane when a live credential is already stored,\n" +
+    'from this machine’s own binding state when it is not. Never triggers an\n' +
+    'interactive sign-in (run `pipeline cloud connect` first for the full view).\n\n' +
+    'Options:\n' +
+    '  --follow       Keep printing an updated snapshot every few seconds until\n' +
+    '                 interrupted.\n' +
+    `  --file <path>  The manifest (default: ./${DEPARTMENT_MANIFEST_FILENAME}).\n` +
+    '  --org <slug>   Which org to read, if the stored credential fits more than\n' +
+    '                 one.\n' +
+    '  --server <url> Control-plane base URL.\n' +
+    '  --json         Print one JSON object per snapshot.\n' +
+    '  --help, -h     Show this help.\n'
+  );
+}
+
+// ---- silent (never-interactive) credential reuse --------------------------
+
+interface MeOrgLite {
+  id: string;
+  slug: string;
+}
+
+function parseMeOrgs(raw: unknown): MeOrgLite[] {
+  if (!Array.isArray(raw)) return [];
+  const out: MeOrgLite[] = [];
+  for (const o of raw) {
+    if (typeof o === 'object' && o !== null) {
+      const r = o as Record<string, unknown>;
+      if (typeof r['id'] === 'string' && typeof r['slug'] === 'string') out.push({ id: r['id'], slug: r['slug'] });
+    }
+  }
+  return out;
+}
+
+/** `GET /api/v1/me` — the SAME identity call `cloud connect`/`mesh-notify`
+ *  make, duplicated in shape rather than imported (`lib/` must not depend on
+ *  `commands/`, and this is a one-off read not worth a shared module — the
+ *  same call this file already makes twice elsewhere, `mesh-notify.ts`'s
+ *  `fetchMe` and `cloud.ts`'s own). */
+async function fetchMeOrgs(deps: Pick<StatusCommandDeps, 'fetch'>, server: string, accessToken: string): Promise<MeOrgLite[] | null> {
+  try {
+    const res = await deps.fetch(`${server}/api/v1/me`, {
+      method: 'GET',
+      headers: { accept: 'application/json', authorization: `Bearer ${accessToken}` },
+    });
+    if (res.status !== 200) return null;
+    const body = (await res.json()) as { orgs?: unknown };
+    return parseMeOrgs(body.orgs);
+  } catch {
+    return null;
+  }
+}
+
+interface SilentAuth {
+  server: string;
+  accessToken: string;
+  orgSlug: string;
+  orgId: string;
+}
+
+/**
+ * Best-effort, NEVER-interactive auth: reuse a stored, live (or silently
+ * refreshable) credential; `null` for anything else — nothing stored, an
+ * expired credential with no refresh token, a refresh that needs a fresh
+ * sign-in (`ensureFreshCredential`'s `REAUTH_REQUIRED_MESSAGE`), the server
+ * being unreachable, or an ambiguous org. `status` treats `null` exactly like
+ * "offline" (DoD box 1) — it renders what it can locally and never pretends
+ * to be more than that.
+ */
+async function trySilentAuth(
+  deps: StatusCommandDeps,
+  opts: { server?: string; org?: string },
+): Promise<SilentAuth | null> {
+  const server = normalizeServerUrl(opts.server ?? deps.env[SERVER_ENV] ?? DEFAULT_SERVER);
+  const refreshDeps: RefreshDeps = {
+    fetch: deps.fetch,
+    fs: deps.fs,
+    now: deps.now,
+    platform: deps.platform,
+    env: deps.env,
+    homedir: deps.homedir,
+  };
+  let accessToken: string;
+  let storedOrgSlug: string | undefined;
+  try {
+    const cred = await ensureFreshCredential(refreshDeps, server);
+    accessToken = cred.access_token;
+    storedOrgSlug = cred.org_slug;
+  } catch {
+    return null;
+  }
+  const orgs = await fetchMeOrgs(deps, server, accessToken);
+  if (orgs === null || orgs.length === 0) return null;
+  const wanted = opts.org ?? storedOrgSlug;
+  const org = (wanted !== undefined ? orgs.find((o) => o.slug === wanted) : undefined) ?? (orgs.length === 1 ? orgs[0] : undefined);
+  if (org === undefined) return null;
+  return { server, accessToken, orgSlug: org.slug, orgId: org.id };
+}
+
+// ---- gather + render --------------------------------------------------------
+
+interface StatusCloudView {
+  orgSlug: string;
+  profile: DepartmentProfile;
+  thisInstall: InstallSummary | null;
+  /** True when THIS runner's claimed digest lags the department's current
+   *  one (05 §5: "several machines serving one department" §6: "a machine
+   *  whose digest differs … shows ⚠ serving an older manifest"). */
+  staleDigest: boolean;
+  usage: DeptUsage | null;
+  usageError?: string;
+  tasks: DeptTaskSummary[] | null;
+  tasksError?: string;
+}
+
+interface StatusSnapshot {
+  slug: string;
+  localDigest: string;
+  /** Whether THIS machine currently accepts offers for this department
+   *  (`resolveLocalDepartmentId`) — known with the network down. */
+  boundLocally: boolean;
+  localBindError?: string;
+  cloud: StatusCloudView | null;
+  cloudError?: string;
+  warnings: string[];
+}
+
+/**
+ * Gather one snapshot. Local facts first (always available), then — only if
+ * a credential is already usable, silently — everything the cloud can add.
+ * Never throws: every failure narrows what is reported, never crashes the
+ * command (DoD box 1).
+ */
+async function gatherStatusSnapshot(
+  deps: StatusCommandDeps,
+  manifest: DepartmentManifest,
+  manifestDir: string,
+  opts: { org?: string; server?: string },
+): Promise<StatusSnapshot> {
+  const warnings: string[] = [];
+  const request = buildRegistrationRequest(manifest);
+
+  let boundLocally = false;
+  let localBindError: string | undefined;
+  let localDepartmentId: string | null = null;
+  const bindingResult = runtimeBindingFor(manifest, { manifestDir });
+  if (bindingResult.ok) {
+    const local = resolveLocalDepartmentId(deps.shell, bindingResult.binding);
+    boundLocally = local.bound;
+    localDepartmentId = local.departmentId;
+    localBindError = local.error ?? local.refusal;
+  } else {
+    localBindError = bindingResult.message;
+  }
+
+  const base = {
+    slug: request.slug,
+    localDigest: request.manifest_digest,
+    boundLocally,
+    ...(localBindError !== undefined ? { localBindError } : {}),
+    warnings,
+  };
+
+  const auth = await trySilentAuth(deps, opts);
+  if (auth === null) return { ...base, cloud: null };
+
+  const ctx: CloudContext = { server: auth.server, accessToken: auth.accessToken, orgSlug: auth.orgSlug, orgId: auth.orgId };
+  const serveDeps: ServeDeps = { fetch: deps.fetch, shell: deps.shell };
+
+  let departmentId = localDepartmentId;
+  if (departmentId === null) {
+    const found = await findDepartmentBySlug(serveDeps, ctx, manifest.name);
+    if (!found.ok) return { ...base, cloud: null, cloudError: found.message };
+    departmentId = found.department.id;
+  }
+
+  const profileResult = await fetchDepartmentProfile(serveDeps, ctx, departmentId);
+  if (!profileResult.ok) return { ...base, cloud: null, cloudError: profileResult.message };
+  const profile = profileResult.profile;
+
+  let thisInstall: InstallSummary | null = null;
+  let staleDigest = false;
+  const identity = readRunnerIdentity({ shell: deps.shell });
+  if (identity?.runnerId) {
+    const installsResult = await fetchInstalls(serveDeps, ctx, departmentId);
+    if (installsResult.ok) {
+      thisInstall = installsResult.installs.find((i) => i.runnerId === identity.runnerId) ?? null;
+      if (thisInstall !== null && thisInstall.manifestDigest !== null && thisInstall.manifestDigest !== profile.manifestDigest) {
+        staleDigest = true;
+      }
+    } else {
+      warnings.push(`could not read this runner's install: ${installsResult.message}`);
+    }
+  }
+
+  const usageResult = await fetchDeptUsage(serveDeps, ctx);
+  const tasksResult = await fetchDeptTasks(serveDeps, ctx, departmentId);
+
+  return {
+    ...base,
+    cloud: {
+      orgSlug: ctx.orgSlug,
+      profile,
+      thisInstall,
+      staleDigest,
+      usage: usageResult.ok ? usageResult.usage : null,
+      ...(usageResult.ok ? {} : { usageError: usageResult.message }),
+      tasks: tasksResult.ok ? tasksResult.tasks : null,
+      ...(tasksResult.ok ? {} : { tasksError: tasksResult.message }),
+    },
+  };
+}
+
+const TASK_STATE_ICON: Record<string, string> = {
+  SUBMITTED: '•',
+  WORKING: '▶',
+  COMPLETED: '✓',
+  FAILED: '✗',
+  CANCELED: '✗',
+  INPUT_REQUIRED: '⏸',
+  REJECTED: '✗',
+  AUTH_REQUIRED: '⏸',
+};
+const TASK_STATE_LABEL: Record<string, string> = {
+  SUBMITTED: 'queued',
+  WORKING: 'running',
+  COMPLETED: 'done',
+  FAILED: 'failed',
+  CANCELED: 'canceled',
+  INPUT_REQUIRED: "waiting for the sender's answer",
+  REJECTED: 'rejected',
+  AUTH_REQUIRED: 'waiting for authorization',
+};
+
+function isSameUtcDay(iso: string, now: Date): boolean {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return false;
+  return (
+    d.getUTCFullYear() === now.getUTCFullYear() &&
+    d.getUTCMonth() === now.getUTCMonth() &&
+    d.getUTCDate() === now.getUTCDate()
+  );
+}
+
+function hhmm(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '--:--';
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** The first 8 hex characters of a UUID, dashes stripped — matches 05 §6's
+ *  own transcript (`8f3c`, `9d11`, …), just longer for less collision risk in
+ *  a busy department's history. */
+function shortId(id: string): string {
+  return id.replace(/-/g, '').slice(0, 8);
+}
+
+function shortDigest(d: string | null): string {
+  if (d === null) return '—';
+  return d.length > 19 ? `${d.slice(0, 19)}…` : d;
+}
+
+/**
+ * 05 §6's `Free plan · department 1 of 3 · 47 of 100 actions used today
+ * (resets 00:00 UTC)` line, built ENTIRELY from `GET /api/v1/dept-usage`'s
+ * own numbers (a10 DoD: "no client-side arithmetic on quotas") — this
+ * function only formats, it never computes a limit/used/remaining figure
+ * itself. "Free plan" is inferred from boundedness, never asserted from a
+ * plan name this endpoint does not return: D30 is explicit that Free is the
+ * only plan bounded on either axis, so a bounded response can only be Free —
+ * but this deliberately never claims "Pro"/"Team" for an unbounded one, since
+ * nothing here actually says which unlimited plan applies.
+ */
+function formatBudgetLine(usage: DeptUsage): string {
+  const deptPart =
+    usage.departments.limit !== null
+      ? `department ${usage.departments.used} of ${usage.departments.limit}`
+      : `department ${usage.departments.used} used (unlimited)`;
+  const dailyPart =
+    usage.dailyActions.limit !== null
+      ? `${usage.dailyActions.used} of ${usage.dailyActions.limit} actions used today` +
+        (usage.dailyActions.resetAt !== null ? ` (resets ${usage.dailyActions.resetAt})` : '')
+      : `${usage.dailyActions.used} actions used today (unlimited)`;
+  const bounded = usage.departments.limit !== null || usage.dailyActions.limit !== null;
+  return `${bounded ? 'Free plan · ' : ''}${deptPart} · ${dailyPart}`;
+}
+
+function renderStatusHuman(out: (s: string) => void, snapshot: StatusSnapshot, now: Date): void {
+  if (snapshot.cloud === null) {
+    const marker = snapshot.boundLocally ? '●' : '○';
+    const headline = snapshot.boundLocally ? 'accepting tasks on this machine' : 'not bound on this machine';
+    out(`${marker} ${snapshot.slug} — ${headline} (offline — no cloud connection)\n`);
+    if (snapshot.localBindError !== undefined) out(`  ⚠ ${snapshot.localBindError}\n`);
+    if (snapshot.cloudError !== undefined) out(`  (${snapshot.cloudError})\n`);
+    out(
+      '  Department id, sender, engine, budget and task history all need the\n' +
+        '  control plane — they show as — until it is reachable.\n',
+    );
+    return;
+  }
+
+  const { cloud } = snapshot;
+  const tasks = cloud.tasks ?? [];
+  const running = tasks.filter((t) => t.state === 'WORKING').length;
+  const completedToday = tasks.filter((t) => t.state === 'COMPLETED' && isSameUtcDay(t.updatedAt, now)).length;
+
+  let marker: string;
+  let headline: string;
+  if (cloud.profile.retired) {
+    marker = '✗';
+    headline = 'retired';
+  } else if (!cloud.profile.enabled) {
+    marker = '○';
+    headline = 'disabled by an admin';
+  } else if (cloud.profile.online) {
+    marker = '●';
+    headline = `online · ${running} running · ${completedToday} completed today`;
+  } else if (cloud.thisInstall?.pendingApproval === true) {
+    marker = '⏸';
+    headline = 'waiting for an admin to approve';
+  } else {
+    marker = '○';
+    headline = `registered — not serving${snapshot.boundLocally ? '' : ' (stopped on this machine)'}`;
+  }
+  out(`${marker} ${snapshot.slug} — ${headline}\n`);
+
+  if (cloud.usage !== null) out(`${formatBudgetLine(cloud.usage)}\n`);
+  else if (cloud.usageError !== undefined) out(`  (budget unavailable: ${cloud.usageError})\n`);
+
+  if (cloud.staleDigest) {
+    out(
+      `⚠ serving an older manifest — this machine claimed ${shortDigest(cloud.thisInstall!.manifestDigest)}, ` +
+        `the department is now at ${shortDigest(cloud.profile.manifestDigest)}. Run \`pipeline department serve\` to update.\n`,
+    );
+  }
+  for (const w of snapshot.warnings) out(`⚠ ${w}\n`);
+
+  if (cloud.tasks === null) {
+    out(`\n  (task history unavailable: ${cloud.tasksError ?? 'unknown error'})\n`);
+    return;
+  }
+  if (tasks.length === 0) {
+    out('\n  No tasks yet.\n');
+    return;
+  }
+  out('\n');
+  for (const t of [...tasks].sort((x, y) => x.updatedAt.localeCompare(y.updatedAt))) {
+    const icon = TASK_STATE_ICON[t.state] ?? '•';
+    const label = TASK_STATE_LABEL[t.state] ?? t.state;
+    out(`${hhmm(t.updatedAt)}  ${shortId(t.id)}  ${t.originPrincipal || '—'}  ${icon} ${label}\n`);
+  }
+}
+
+function toStatusJson(snapshot: StatusSnapshot, now: Date): Record<string, unknown> {
+  if (snapshot.cloud === null) {
+    return {
+      ok: true,
+      slug: snapshot.slug,
+      localDigest: snapshot.localDigest,
+      boundLocally: snapshot.boundLocally,
+      cloud: null,
+      ...(snapshot.localBindError !== undefined ? { localBindError: snapshot.localBindError } : {}),
+      ...(snapshot.cloudError !== undefined ? { cloudError: snapshot.cloudError } : {}),
+    };
+  }
+  const { cloud } = snapshot;
+  const tasks = cloud.tasks ?? [];
+  return {
+    ok: true,
+    slug: snapshot.slug,
+    localDigest: snapshot.localDigest,
+    boundLocally: snapshot.boundLocally,
+    cloud: {
+      org: cloud.orgSlug,
+      online: cloud.profile.online,
+      enabled: cloud.profile.enabled,
+      retired: cloud.profile.retired,
+      manifestDigest: cloud.profile.manifestDigest,
+      staleDigest: cloud.staleDigest,
+      thisInstallDigest: cloud.thisInstall?.manifestDigest ?? null,
+      pendingApproval: cloud.thisInstall?.pendingApproval ?? false,
+      usage: cloud.usage,
+      ...(cloud.usageError !== undefined ? { usageError: cloud.usageError } : {}),
+      running: tasks.filter((t) => t.state === 'WORKING').length,
+      completedToday: tasks.filter((t) => t.state === 'COMPLETED' && isSameUtcDay(t.updatedAt, now)).length,
+      tasks: cloud.tasks,
+      ...(cloud.tasksError !== undefined ? { tasksError: cloud.tasksError } : {}),
+    },
+    warnings: snapshot.warnings,
+  };
+}
+
+/** Poll interval for `--follow` — frequent enough to feel live, far below any
+ *  rate limit (the endpoints this hits are plain org-member reads). */
+const STATUS_FOLLOW_INTERVAL_MS = 5000;
+
+/**
+ * `pipeline department status` — 05 §6. `maxIterations` is a TEST-ONLY hook
+ * (mirrors `lib/mesh-notify.ts`'s `PollLoopOptions.maxIterations`) so
+ * `--follow` is verifiable without an infinite loop or a real timer; a real
+ * invocation runs until interrupted.
+ */
+export async function runDepartmentStatus(
+  args: string[],
+  deps: StatusCommandDeps = realStatusDeps(),
+  maxIterations: number = Number.POSITIVE_INFINITY,
+): Promise<number> {
+  const a = parseStatusArgs(args);
+  if (a.help) {
+    deps.out(statusHelpText());
+    return 0;
+  }
+  if (a.unknownFlag !== undefined) {
+    deps.err(`pipeline department status: unknown flag '${a.unknownFlag}'\n${STATUS_USAGE}\n`);
+    return 2;
+  }
+  if (a.extra !== undefined) {
+    deps.err(`pipeline department status: unexpected argument '${a.extra}'\n${STATUS_USAGE}\n`);
+    return 2;
+  }
+
+  const filePath = a.file !== undefined ? resolve(deps.cwd, a.file) : join(deps.cwd, DEPARTMENT_MANIFEST_FILENAME);
+  const inspection = inspectManifestFile(filePath);
+  if (inspection.fatal !== undefined || inspection.manifest === null) {
+    if (a.json) deps.out(JSON.stringify(buildJsonResult(filePath, inspection.findings), null, 2) + '\n');
+    else if (inspection.fatal !== undefined) deps.err(`pipeline department status: ${inspection.fatal}\n`);
+    else printHuman(deps.err, filePath, null, inspection.findings);
+    return 2;
+  }
+  const manifest = inspection.manifest;
+  const manifestDir = dirname(filePath);
+  const cloudOpts = { ...(a.org !== undefined ? { org: a.org } : {}), ...(a.server !== undefined ? { server: a.server } : {}) };
+
+  const iterations = a.follow ? maxIterations : 1;
+  for (let i = 0; i < iterations; i++) {
+    const snapshot = await gatherStatusSnapshot(deps, manifest, manifestDir, cloudOpts);
+    const now = new Date(deps.now());
+    if (a.json) deps.out(JSON.stringify(toStatusJson(snapshot, now), null, 2) + '\n');
+    else renderStatusHuman(deps.out, snapshot, now);
+    if (a.follow && i + 1 < iterations) await deps.sleep(STATUS_FOLLOW_INTERVAL_MS);
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Dispatcher: `pipeline department <verb> [args]`
 // ---------------------------------------------------------------------------
 
-const VERBS = 'new, validate, serve';
+const VERBS = 'new, validate, serve, status, stop, retire';
 
 export async function runDepartment(args: string[]): Promise<number> {
   const verb = args[0];
@@ -1423,6 +2374,12 @@ export async function runDepartment(args: string[]): Promise<number> {
       return runDepartmentValidate(rest);
     case 'serve':
       return await runDepartmentServe(rest);
+    case 'status':
+      return await runDepartmentStatus(rest);
+    case 'stop':
+      return runDepartmentStop(rest);
+    case 'retire':
+      return await runDepartmentRetire(rest);
     case undefined:
       process.stderr.write(`pipeline department: a verb is required (${VERBS})\n`);
       return 2;
