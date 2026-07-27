@@ -125,17 +125,35 @@ describe('buildAuthorizeUrl', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildOpenBrowserCommand', () => {
-  test('darwin -> open', () => {
+  test('darwin -> open (regression: must stay untouched by the win32 `&`-escaping fix)', () => {
     expect(buildOpenBrowserCommand('darwin', 'https://x')).toEqual({ cmd: 'open', args: ['https://x'] });
   });
-  test('linux -> xdg-open', () => {
+  test('linux -> xdg-open (regression: must stay untouched by the win32 `&`-escaping fix)', () => {
     expect(buildOpenBrowserCommand('linux', 'https://x')).toEqual({ cmd: 'xdg-open', args: ['https://x'] });
   });
-  test('win32 -> cmd /c start "" <url>', () => {
+  test('darwin/linux are never `&`-escaped even when the URL contains `&`', () => {
+    const url = 'https://x/oauth/authorize?client_id=cli&state=abc';
+    expect(buildOpenBrowserCommand('darwin', url)).toEqual({ cmd: 'open', args: [url] });
+    expect(buildOpenBrowserCommand('linux', url)).toEqual({ cmd: 'xdg-open', args: [url] });
+  });
+  test('win32, no `&` in the URL -> cmd /c start "" <url>, unchanged', () => {
     expect(buildOpenBrowserCommand('win32', 'https://x')).toEqual({
       cmd: 'cmd.exe',
       args: ['/c', 'start', '', 'https://x'],
     });
+  });
+  test('win32 escapes `&` as `^&` — every real authorize URL contains `&`, and unescaped it is cmd.exe\'s OWN command separator: `cmd /c start "" <url>` re-parses the argument list as a command line, so `client_id=cli&state=abc` would run `state=abc` as a second command and exit non-zero (this is x5\'s bug; this assertion FAILS against the pre-fix code, which passed the URL through raw)', () => {
+    expect(buildOpenBrowserCommand('win32', 'https://x/oauth/authorize?client_id=cli&state=abc')).toEqual({
+      cmd: 'cmd.exe',
+      args: ['/c', 'start', '', 'https://x/oauth/authorize?client_id=cli^&state=abc'],
+    });
+  });
+  test('win32 escapes every `&` when a realistic authorize URL has several (client_id, redirect_uri, resource, state)', () => {
+    const url =
+      'https://api.example.com/oauth/authorize?client_id=cli&redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fcallback&response_type=code&code_challenge=CHALLENGE&code_challenge_method=S256&resource=https%3A%2F%2Fapi.example.com%2Fapi&state=STATE';
+    const escaped =
+      'https://api.example.com/oauth/authorize?client_id=cli^&redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fcallback^&response_type=code^&code_challenge=CHALLENGE^&code_challenge_method=S256^&resource=https%3A%2F%2Fapi.example.com%2Fapi^&state=STATE';
+    expect(buildOpenBrowserCommand('win32', url)).toEqual({ cmd: 'cmd.exe', args: ['/c', 'start', '', escaped] });
   });
   test('unknown platform -> null', () => {
     expect(buildOpenBrowserCommand('sunos', 'https://x')).toBeNull();

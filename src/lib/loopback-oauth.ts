@@ -360,7 +360,32 @@ export function buildOpenBrowserCommand(platform: string, url: string): OpenBrow
     case 'win32':
       // `cmd /c start "" <url>` — the empty title argument stops `start`
       // from treating a quoted URL as the window title.
-      return { cmd: 'cmd.exe', args: ['/c', 'start', '', url] };
+      //
+      // `&` MUST be escaped as `^&` here. `cmd.exe` re-parses this whole
+      // argument list as a command line, and `&` is ITS command separator
+      // (`a & b` runs `a` then `b`) — not something `start`/the URL ever
+      // sees. Every authorize URL this builds carries `client_id`,
+      // `redirect_uri`, `code_challenge`, `code_challenge_method`,
+      // `resource` and `state` joined by literal `&`, so this branch is
+      // reached on EVERY real invocation, not just an edge case: unescaped,
+      // `cmd` truncates the URL at the first `&` and tries to run the next
+      // `key=value` pair as its own command, which fails and exits non-zero
+      // — silently degrading the whole flow to the device-code fallback on
+      // every Windows run. `^` is `cmd`'s own escape character, so `^&`
+      // reaches `start`/the URL as a literal `&`. Two alternatives were
+      // tried and rejected: quoting the URL (`start "" "<url>"`) makes the
+      // child hang instead of exiting, and `explorer.exe <url>` never exits
+      // at all — both break the "wait for the exit code" contract
+      // `openBrowser` depends on. No other cmd metacharacter (`|<>()"^%`)
+      // can occur here: `client_id`/`response_type`/`code_challenge_method`
+      // are fixed literals, `code_challenge`/`state` are unpadded base64url
+      // (`[A-Za-z0-9_-]` only), and `redirect_uri`/`resource` are
+      // percent-encoded by `URLSearchParams` before this ever runs, so any
+      // `%XX` that reaches `cmd` is plain hex digits — verified live against
+      // this exact `spawn('cmd.exe', ['/c', ...])` shape that stray `%3A`-
+      // style sequences pass through unexpanded (no coincidentally-matching
+      // env var) and round-trip byte-for-byte.
+      return { cmd: 'cmd.exe', args: ['/c', 'start', '', url.replace(/&/g, '^&')] };
     case 'linux':
       return { cmd: 'xdg-open', args: [url] };
     default:
