@@ -163,6 +163,50 @@ export function isRunnerServiceInstalled(deps: Pick<RunnerEnrolDeps, 'shell'>): 
   return !combined.includes('not installed');
 }
 
+/** What this machine's `pipeline-runner` identity says about itself — the
+ *  non-secret half only. `runnerId` is the server-assigned row id persisted
+ *  from `register_ack`; it is exactly what the install claim needs
+ *  (`mesh-registry/routes.ts`'s `runner_id`, a UUID). */
+export interface RunnerIdentity {
+  runnerId: string | null;
+  baseUrl: string | null;
+}
+
+/**
+ * Read this machine's runner identity by shelling `pipeline-runner status`
+ * (task a9 / D26: another package's config store is READ through its own CLI,
+ * never by parsing its files from here — the same rule that makes `register`
+ * and `bind` shell-outs).
+ *
+ * `status` prints `describeIdentity()`'s JSON — every secret field replaced by
+ * the literal `<redacted>` before it is ever written, so this call cannot
+ * surface a credential even by accident. It exits 1 with a stated message when
+ * no identity is configured, which is the ordinary "this machine has never
+ * been enrolled" case and returns `null` here rather than an error.
+ *
+ * `runnerId` is `null` when an identity exists but has never completed a
+ * register round trip (`register --store-only`, or a `register` whose
+ * connection failed): there is a config file, but no server-assigned id to
+ * claim an install with. Callers must treat that as "not enrolled yet",
+ * because it is.
+ */
+export function readRunnerIdentity(deps: Pick<RunnerEnrolDeps, 'shell'>): RunnerIdentity | null {
+  const r = deps.shell(RUNNER_CLI_BIN, ['status']);
+  if (r.code !== 0) return null;
+  try {
+    const parsed = JSON.parse(r.stdout) as { runner_id?: unknown; base_url?: unknown };
+    return {
+      runnerId: typeof parsed.runner_id === 'string' && parsed.runner_id.length > 0 ? parsed.runner_id : null,
+      baseUrl: typeof parsed.base_url === 'string' && parsed.base_url.length > 0 ? parsed.base_url : null,
+    };
+  } catch {
+    // A `status` that exited 0 but printed something we cannot read is the
+    // same actionable state as no identity at all: the caller re-enrols, and
+    // `register` overwrites the unreadable file with a good one.
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Mint (POST /api/v1/runners)
 // ---------------------------------------------------------------------------
@@ -270,6 +314,13 @@ export type RunnerEnrolStatus =
 export interface RunnerEnrolOutcome {
   status: RunnerEnrolStatus;
   name: string;
+  /** The server-assigned runner id, present on every outcome that got as far
+   *  as a successful mint. `pipeline department serve` (a9) needs it: the
+   *  install claim is `POST /departments/:id/installs { runner_id, … }`
+   *  (`mesh-registry/routes.ts`), so without it a freshly-enrolled machine has
+   *  nothing to claim with — which is the whole reason D26 folds enrolment
+   *  into `serve` at all. */
+  runnerId?: string;
   /** Human-readable failure detail. NEVER contains a secret — see this
    *  file's module doc; every failure path below relays only the CHILD
    *  process's own stderr/stdout (which pipeline-runner itself never prints
@@ -287,6 +338,19 @@ export interface EnrolRunnerParams {
   accessToken: string;
   orgId?: string;
   name: string;
+  /**
+   * Whether to install the supervisor SERVICE as part of enrolment. Default
+   * `true` — `cloud connect` (a6) enrols and installs in one step.
+   *
+   * `pipeline department serve` (a9) passes `false`: 05 §5 splits these into
+   * two steps (5 enrol, 7 ensure the supervisor) precisely because a machine
+   * may already have a service and must get "a binding, not a rival service"
+   * (D26). Re-running `service install` there is not merely redundant — every
+   * backend targets the SAME fixed service name, so it would rewrite a unit
+   * the operator may have adjusted, for no gain. `serve` therefore checks
+   * `isRunnerServiceInstalled()` itself and installs only when there is none.
+   */
+  installService?: boolean;
 }
 
 /**
@@ -327,8 +391,16 @@ export async function enrolRunner(deps: RunnerEnrolDeps, params: EnrolRunnerPara
     return {
       status: 'register-failed',
       name,
+      runnerId: minted.runnerId,
       detail: (register.stderr || register.stdout || `exit ${register.code}`).trim(),
     };
+  }
+
+  // a9: `serve` owns the service decision itself (see `installService`'s doc).
+  // Reported as `connected-no-service` so the ONE success status keeps meaning
+  // "registered AND supervised" for every caller that asked for both.
+  if (params.installService === false) {
+    return { status: 'connected-no-service', name, runnerId: minted.runnerId };
   }
 
   const service = deps.shell(RUNNER_CLI_BIN, ['service', 'install']);
@@ -336,11 +408,12 @@ export async function enrolRunner(deps: RunnerEnrolDeps, params: EnrolRunnerPara
     return {
       status: 'connected-no-service',
       name,
+      runnerId: minted.runnerId,
       detail: (service.stderr || service.stdout || `exit ${service.code}`).trim(),
     };
   }
 
-  return { status: 'connected', name };
+  return { status: 'connected', name, runnerId: minted.runnerId };
 }
 
 /**

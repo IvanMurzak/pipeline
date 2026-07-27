@@ -867,21 +867,54 @@ describe('pipeline department validate — usage surface', () => {
 // The `department` dispatcher
 // ---------------------------------------------------------------------------
 
+/** The dispatcher became `async` when a9 added `serve` (the only verb that
+ *  awaits anything). Same capture idiom as `invoke`, one `await` deeper. */
+async function invokeAsync(
+  fn: (args: string[]) => Promise<number>,
+  args: string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  let stdout = '';
+  let stderr = '';
+  const origOut = process.stdout.write;
+  const origErr = process.stderr.write;
+  process.stdout.write = ((s: string) => ((stdout += s), true)) as typeof process.stdout.write;
+  process.stderr.write = ((s: string) => ((stderr += s), true)) as typeof process.stderr.write;
+  try {
+    const code = await fn(args);
+    return { code, stdout, stderr };
+  } finally {
+    process.stdout.write = origOut;
+    process.stderr.write = origErr;
+  }
+}
+
 describe('pipeline department — verb dispatch', () => {
-  test('routes new/validate', () => {
+  test('routes new/validate', async () => {
     const proj = tempProject();
-    expect(invoke(runDepartment, ['new', '--dir', proj]).code).toBe(0);
-    expect(invoke(runDepartment, ['validate', '--file', join(proj, DEPARTMENT_MANIFEST_FILENAME)]).code).toBe(0);
+    expect((await invokeAsync(runDepartment, ['new', '--dir', proj])).code).toBe(0);
+    expect((await invokeAsync(runDepartment, ['validate', '--file', join(proj, DEPARTMENT_MANIFEST_FILENAME)])).code).toBe(
+      0,
+    );
   });
 
-  test('no verb / unknown verb -> usage error (exit 2)', () => {
-    const err1 = invoke(runDepartment, []);
+  test('no verb / unknown verb -> usage error (exit 2)', async () => {
+    const err1 = await invokeAsync(runDepartment, []);
     expect(err1.code).toBe(2);
     expect(err1.stderr).toContain('a verb is required');
 
-    const err2 = invoke(runDepartment, ['serve']);
+    const err2 = await invokeAsync(runDepartment, ['publish']);
     expect(err2.code).toBe(2);
-    expect(err2.stderr).toContain("unknown verb 'serve'");
+    expect(err2.stderr).toContain("unknown verb 'publish'");
+    // Every verb the dispatcher DOES route is named in the same line.
+    expect(err2.stderr).toContain('serve');
+  });
+
+  test('routes serve (a9) — its usage errors come from serve itself', async () => {
+    // `--bogus` is rejected before `serve` touches the filesystem, the network
+    // or a subprocess, so this exercises the routing without any real I/O.
+    const err = await invokeAsync(runDepartment, ['serve', '--bogus']);
+    expect(err.code).toBe(2);
+    expect(err.stderr).toContain('pipeline department serve: unknown flag');
   });
 });
 

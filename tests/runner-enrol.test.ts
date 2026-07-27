@@ -9,6 +9,7 @@ import {
   enrolRunner,
   isRunnerCliAvailable,
   isRunnerServiceInstalled,
+  readRunnerIdentity,
   realShell,
   RUNNER_PACKAGE,
   RUNNER_OAUTH_CLIENT_SECRET_ENV,
@@ -35,6 +36,48 @@ describe('isRunnerCliAvailable', () => {
   test('false when the binary is missing (spawn ENOENT → code 127)', () => {
     const shell: ShellRunner = () => ({ code: 127, stdout: '', stderr: '' });
     expect(isRunnerCliAvailable({ shell })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readRunnerIdentity — "is this machine already a runner, and which one?"
+// (a9: the install claim needs a runner_id, D26)
+// ---------------------------------------------------------------------------
+
+describe('readRunnerIdentity', () => {
+  test('null when no identity is configured (`status` exits 1)', () => {
+    const shell: ShellRunner = () => ({ code: 1, stdout: '', stderr: 'no agent identity configured\n' });
+    expect(readRunnerIdentity({ shell })).toBeNull();
+  });
+
+  test('null when the binary is missing entirely (127)', () => {
+    const shell: ShellRunner = () => ({ code: 127, stdout: '', stderr: '' });
+    expect(readRunnerIdentity({ shell })).toBeNull();
+  });
+
+  test("reads runner_id + base_url out of `status`'s redacted JSON", () => {
+    const shell: ShellRunner = (cmd, args) => {
+      expect(cmd).toBe('pipeline-runner');
+      expect(args).toEqual(['status']);
+      return {
+        code: 0,
+        // `describeIdentity()` redacts every secret BEFORE printing, which is
+        // why reading this is safe at all.
+        stdout: JSON.stringify({ base_url: 'https://api.example.dev', runner_id: 'r-1', runner_token: '<redacted>' }),
+        stderr: '',
+      };
+    };
+    expect(readRunnerIdentity({ shell })).toEqual({ runnerId: 'r-1', baseUrl: 'https://api.example.dev' });
+  });
+
+  test('runnerId null when the identity exists but never completed a register round trip', () => {
+    const shell: ShellRunner = () => ({ code: 0, stdout: JSON.stringify({ base_url: 'https://x' }), stderr: '' });
+    expect(readRunnerIdentity({ shell })).toEqual({ runnerId: null, baseUrl: 'https://x' });
+  });
+
+  test('unreadable output is treated as no identity, never as a crash', () => {
+    const shell: ShellRunner = () => ({ code: 0, stdout: 'not json at all', stderr: '' });
+    expect(readRunnerIdentity({ shell })).toBeNull();
   });
 });
 
@@ -170,7 +213,10 @@ describe('enrolRunner', () => {
 
     const outcome = await enrolRunner(deps, { server: SERVER, accessToken: TOKEN, orgId: 'org-uuid', name: NAME });
 
-    expect(outcome).toEqual({ status: 'connected', name: NAME });
+    // `runnerId` is a9's addition: `pipeline department serve` needs the
+    // server-assigned id to claim an install with (D26), and enrolment is the
+    // only step that knows it on a machine that was not a runner before.
+    expect(outcome).toEqual({ status: 'connected', name: NAME, runnerId: CLIENT_ID });
     expect(calls.some((c) => c.cmd === 'bun')).toBe(false); // already available — no install attempted
 
     const mintCall = capture[0]!;
@@ -186,6 +232,24 @@ describe('enrolRunner', () => {
     expect(registerCall.args).not.toContain('--store-only');
 
     expect(calls.some((c) => c.args.join(' ') === 'service install')).toBe(true);
+  });
+
+  test('installService: false enrols WITHOUT touching the service — a9 owns that decision (D26)', async () => {
+    const { shell, calls } = collectingShell();
+    const deps: RunnerEnrolDeps = { shell, fetch: mintFetch(), out: () => {}, err: () => {} };
+
+    const outcome = await enrolRunner(deps, {
+      server: SERVER,
+      accessToken: TOKEN,
+      name: NAME,
+      installService: false,
+    });
+
+    // `connected-no-service` keeps the ONE `connected` status meaning
+    // "registered AND supervised" for `cloud connect`, which asked for both.
+    expect(outcome).toEqual({ status: 'connected-no-service', name: NAME, runnerId: CLIENT_ID });
+    expect(calls.some((c) => c.args.join(' ') === 'service install')).toBe(false);
+    expect(calls.some((c) => c.args[0] === 'register')).toBe(true);
   });
 
   test('CLI not available: shows the install command BEFORE running it, then proceeds', async () => {

@@ -1,8 +1,8 @@
-// `pipeline department new` and `pipeline department validate`
-// (simplified-onboarding design, task a8; refs 02 §4, 05 §3/§4, 06).
+// `pipeline department new`, `validate` and `serve`
+// (simplified-onboarding design, tasks a8 + a9; refs 02 §4, 05 §3/§4/§5, 06).
 //
 // A department is a project folder whose only REQUIRED file is
-// `department.yml` (D3/D8). This module is the two commands that make that
+// `department.yml` (D3/D8). This module is the commands that make that
 // promise real:
 //
 //   `new`      — scaffold department.yml (and NOTHING else — D3 is a hard
@@ -11,6 +11,12 @@
 //   `validate` — run every check class 05 §4 names against a hand-written or
 //                hand-edited file, so authoring one by hand is a reasonable
 //                thing to ask of a user.
+//   `serve`    — one command from an authored file to a live, callable
+//                department: 05 §5's nine steps, in order, idempotent and
+//                resumable from any partial state (task a9). The steps that
+//                talk to the control plane or to `pipeline-runner` live in
+//                `lib/department-serve.ts`; this file owns the order, the
+//                printed transcript, and the exit code.
 //
 // Both commands sit ON TOP of `lib/department-manifest.ts` (task a7, merged
 // as 29b7560) and never re-implement it: a7 owns the schema, `apiVersion`
@@ -81,8 +87,10 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { hostname as osHostname } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import {
+  buildRegistrationRequest,
   DEPARTMENT_API_VERSION_V1,
   DEPARTMENT_MANIFEST_FILENAME,
   bunYamlParser,
@@ -94,6 +102,39 @@ import {
   type DepartmentManifest,
   type ManifestFinding,
 } from '../lib/department-manifest';
+// a9: the steps that leave this process — HTTP to the control plane, argv to
+// `pipeline-runner`. See that module's doc for the three rules it keeps.
+import {
+  bindRuntime,
+  claimInstall,
+  departmentUrlFor,
+  ensureSupervisor,
+  registerOrUpdateDepartment,
+  renderState,
+  runtimeBindingFor,
+  type CloudContext,
+  type ServeFetch,
+  type ServeHttpResponse,
+  type ServeState,
+} from '../lib/department-serve';
+import {
+  enrolRunner,
+  isRunnerServiceInstalled,
+  readRunnerIdentity,
+  realShell,
+  type RunnerEnrolDeps,
+  type ShellRunner,
+} from '../lib/runner-enrol';
+// a9 (step 2): the ONE authentication ladder, shared with `cloud connect`
+// (D12). This is the single place a command in this package imports another
+// command's module — deliberate, and cheaper than the alternative: duplicating
+// the browser + device + machine-credential flows would mean two ladders, two
+// sets of 04 §9 failure messages, and two places to fix an OAuth bug. What is
+// imported statically is only the TYPES plus the env-var NAME (so `serve` and
+// `connect` cannot disagree about what the machine credential is called); the
+// implementation arrives through `ServeCommandDeps.authenticate`, whose
+// production wiring dynamic-imports it at call time.
+import { MACHINE_TOKEN_ENV, type ApiAuth, type ApiAuthOptions } from './cloud';
 import { findFirstIteration, findManifests, parseManifest as parsePipelineManifest } from '../lib/match';
 
 // ---------------------------------------------------------------------------
@@ -504,6 +545,17 @@ const COMMUNICATION_CAPABILITY_KEYS = [
  * (`process`, `container` — `EngineDefinition.capabilities === null`) have
  * nothing to check an author's claim against and are skipped; an
  * unrecognized engine already has its own Schema-class finding from a7.
+ *
+ * ⚠ **This function is the ONLY enforcement of these rules that can still
+ * fire** (task a9). The cloud has the same rules — `validateManifestCoherence`
+ * in `mesh-registry/manifest.ts` — but every one of them is guarded by
+ * `effective.adapter === 'pipeline-drive'`, and a7's `advertisedManifest()`
+ * never sends `runtime` at all (the whole block is local by construction). The
+ * server therefore evaluates an EMPTY shape and returns no errors, for every
+ * department, always. `serve` runs this check before it registers anything
+ * (05 §5 step 1), which is where a manifest the cloud would once have rejected
+ * is now stopped — locally, and earlier. Anything added to the server's list
+ * must be mirrored here, in the engine registry, or it is dead code.
  */
 function coherenceFindings(m: DepartmentManifest): ManifestFinding[] {
   const out: ManifestFinding[] = [];
@@ -519,11 +571,40 @@ function coherenceFindings(m: DepartmentManifest): ManifestFinding[] {
       }
     }
   }
+  // The lifecycle half of the same server-side rule set (`pipeline-drive` "only
+  // supports runtime.lifecycle 'per-task'"), expressed on a7's registry so
+  // adding an engine with its own restriction is one field, not a new branch.
+  if (
+    def !== undefined &&
+    def.supportedLifecycles !== null &&
+    !def.supportedLifecycles.includes(m.runtime.lifecycle)
+  ) {
+    out.push({
+      severity: 'error',
+      field: 'runtime.lifecycle',
+      message:
+        `engine '${m.runtime.engine}' only supports ${def.supportedLifecycles.map((l) => `'${l}'`).join(', ')} — ` +
+        `'${m.runtime.lifecycle}' cannot be honoured`,
+    });
+  }
   if (m.scheduling.contextAffinity === 'required' && m.runtime.lifecycle === 'per-task') {
     out.push({
       severity: 'error',
       field: 'scheduling.contextAffinity',
       message: "'required' needs runtime.lifecycle 'per-context' or 'daemon' — 'per-task' cannot hold context across tasks",
+    });
+  }
+  // An engine that carries its own exec fields has nothing to start without
+  // `command`. A WARNING, not an error: `department new --engine process`
+  // deliberately scaffolds without one (there is no honest placeholder for
+  // another project's binary), so failing here would make `new` produce a file
+  // its own `validate` rejects. `serve` refuses it outright at step 1 — see
+  // `runtimeBindingFor` — because a binding without a command cannot exist.
+  if (def !== undefined && def.takesLocalExecFields && !m.runtime.command) {
+    out.push({
+      severity: 'warning',
+      field: 'runtime.command',
+      message: `engine '${m.runtime.engine}' runs a command you supply — set runtime.command before serving`,
     });
   }
   return out;
@@ -758,6 +839,60 @@ function printHuman(
   out(`\n${errors} error${errors === 1 ? '' : 's'}, ${warnings} warning${warnings === 1 ? '' : 's'}.\n`);
 }
 
+/**
+ * Every check class 05 §4 names, run over one file: a7's Schema + Version
+ * findings, then this module's Coherence / Local / Advisory / `.claude`
+ * additions. The ONE place that composition exists — `validate` renders it,
+ * and `serve` (a9, 05 §5 step 1) runs "§4 in full" by calling exactly this.
+ * Two callers, one answer, so a rule can never apply to the linter and not to
+ * the publisher.
+ *
+ * `manifest: null` is 05 §4's exit-2 class (missing, unreadable, unparseable);
+ * `fatal` carries the reason when the file could not even be read.
+ */
+export interface ManifestInspection {
+  filePath: string;
+  manifest: DepartmentManifest | null;
+  findings: ManifestFinding[];
+  /** Set only when the bytes could not be read at all (ENOENT/EACCES). */
+  fatal?: string;
+}
+
+export function inspectManifestFile(filePath: string): ManifestInspection {
+  // Reuse `readDepartmentManifest` for its ENOENT/EACCES message logic
+  // (05 §4's exit-2 class) rather than re-deriving it, while capturing the
+  // raw text this module ALSO needs for `visibilityAdvisory()`.
+  let text = '';
+  let manifest: DepartmentManifest | null;
+  let findings: ManifestFinding[];
+  try {
+    const parsed = readDepartmentManifest(filePath, {
+      readFile: (p) => {
+        text = fsReadFileSync(p, 'utf-8');
+        return text;
+      },
+    });
+    manifest = parsed.manifest;
+    findings = [...parsed.findings];
+  } catch (e) {
+    const message = (e as Error).message;
+    return { filePath, manifest: null, findings: [{ severity: 'error', field: '$', message }], fatal: message };
+  }
+
+  if (manifest === null) {
+    // Unparseable (05 §4's exit-2 class, same as a missing file — a
+    // best-effort manifest could not even be built).
+    return { filePath, manifest: null, findings };
+  }
+
+  findings.push(...coherenceFindings(manifest));
+  findings.push(...localFindings(manifest, dirname(filePath)));
+  findings.push(...skillAdvisoryFindings(manifest));
+  findings.push(...claudeDirFindings(inspectClaudeDir(dirname(filePath))));
+  findings.push(...visibilityAdvisory(text));
+  return { filePath, manifest, findings };
+}
+
 export function runDepartmentValidate(args: string[]): number {
   const a = parseValidateArgs(args);
   const err = (s: string) => process.stderr.write(s);
@@ -777,57 +912,508 @@ export function runDepartmentValidate(args: string[]): number {
   }
 
   const filePath = resolve(a.file ?? DEPARTMENT_MANIFEST_FILENAME);
+  const inspection = inspectManifestFile(filePath);
 
-  // Reuse `readDepartmentManifest` for its ENOENT/EACCES message logic
-  // (05 §4's exit-2 class) rather than re-deriving it, while capturing the
-  // raw text this module ALSO needs for `visibilityAdvisory()`.
-  let text = '';
-  let manifest: DepartmentManifest | null;
-  let findings: ManifestFinding[];
-  try {
-    const parsed = readDepartmentManifest(filePath, {
-      readFile: (p) => {
-        text = fsReadFileSync(p, 'utf-8');
-        return text;
-      },
-    });
-    manifest = parsed.manifest;
-    findings = [...parsed.findings];
-  } catch (e) {
-    const message = (e as Error).message;
-    const result = buildJsonResult(filePath, [{ severity: 'error', field: '$', message }]);
-    if (a.json) out(JSON.stringify(result, null, 2) + '\n');
-    else err(`pipeline department validate: ${message}\n`);
+  if (inspection.fatal !== undefined) {
+    if (a.json) out(JSON.stringify(buildJsonResult(filePath, inspection.findings), null, 2) + '\n');
+    else err(`pipeline department validate: ${inspection.fatal}\n`);
     return 2;
   }
-
-  if (manifest === null) {
-    // Unparseable (05 §4's exit-2 class, same as a missing file — a
-    // best-effort manifest could not even be built).
-    if (a.json) out(JSON.stringify(buildJsonResult(filePath, findings), null, 2) + '\n');
-    else printHuman(out, filePath, null, findings);
+  if (inspection.manifest === null) {
+    if (a.json) out(JSON.stringify(buildJsonResult(filePath, inspection.findings), null, 2) + '\n');
+    else printHuman(out, filePath, null, inspection.findings);
     return 2;
   }
-
-  findings.push(...coherenceFindings(manifest));
-  findings.push(...localFindings(manifest, dirname(filePath)));
-  findings.push(...skillAdvisoryFindings(manifest));
-  findings.push(...claudeDirFindings(inspectClaudeDir(dirname(filePath))));
-  findings.push(...visibilityAdvisory(text));
 
   if (a.json) {
-    out(JSON.stringify(buildJsonResult(filePath, findings), null, 2) + '\n');
+    out(JSON.stringify(buildJsonResult(filePath, inspection.findings), null, 2) + '\n');
   } else {
-    printHuman(out, filePath, manifest, findings);
+    printHuman(out, filePath, inspection.manifest, inspection.findings);
   }
-  return hasErrors(findings) ? 1 : 0;
+  return hasErrors(inspection.findings) ? 1 : 0;
 }
+
+// ---------------------------------------------------------------------------
+// `serve` — 05 §5's nine steps (task a9)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every side effect `serve` performs, injected — so the whole nine-step flow
+ * is testable with no network, no browser, no `pipeline-runner` binary and no
+ * real home directory, exactly like `commands/cloud.ts`'s `CloudDeps`.
+ */
+export interface ServeCommandDeps {
+  fetch: ServeFetch;
+  /** Shells `pipeline-runner …` / `bun add -g …` (lib/runner-enrol.ts). */
+  shell: ShellRunner;
+  out: (s: string) => void;
+  err: (s: string) => void;
+  env: Record<string, string | undefined>;
+  /** Where a bare `serve` looks for `department.yml`. */
+  cwd: string;
+  /** Default runner name (04 §5), overridden by `--runner-name`. */
+  hostname: () => string;
+  /**
+   * Step 2: the 04 §4 authentication ladder, `PIPELINE_MACHINE_TOKEN`
+   * included. Injected rather than imported at module scope for two reasons:
+   * `lib/` must never depend on `commands/`, and the real implementation
+   * (`commands/cloud.ts`'s `authenticateApi`) pulls in the whole loopback +
+   * device-grant machinery, which `new` and `validate` must not pay for.
+   *
+   * It is the SAME ladder `cloud connect` runs — one browser flow, one device
+   * flow, one machine-credential exchange, one set of 04 §9 failure messages
+   * (D12) — minus the project binding: `serve` must never write
+   * `.claude/pipeline/cloud.json` into a department folder, because that would
+   * pin a clonable repo to one org and one server.
+   */
+  authenticate: (opts: ApiAuthOptions) => Promise<ApiAuth>;
+}
+
+function realHostname(): string {
+  try {
+    return osHostname();
+  } catch {
+    return 'this-machine';
+  }
+}
+
+/** Production wiring. Built lazily (and the `cloud` import is dynamic) so the
+ *  cost lands only on a `serve` invocation. */
+export function realServeDeps(): ServeCommandDeps {
+  return {
+    fetch: async (url, init) => (await fetch(url, init as RequestInit)) as unknown as ServeHttpResponse,
+    shell: realShell,
+    out: (s) => {
+      process.stdout.write(s);
+    },
+    err: (s) => {
+      process.stderr.write(s);
+    },
+    env: process.env,
+    cwd: process.cwd(),
+    hostname: realHostname,
+    authenticate: async (opts) => {
+      const { authenticateApi, realDeps } = await import('./cloud');
+      return await authenticateApi(realDeps, opts);
+    },
+  };
+}
+
+interface ServeArgs {
+  file?: string;
+  org?: string;
+  server?: string;
+  runnerName?: string;
+  runtimeCommand?: string;
+  machineToken?: string;
+  device: boolean;
+  reauth: boolean;
+  foreground: boolean;
+  json: boolean;
+  help: boolean;
+  unknownFlag?: string;
+  extra?: string;
+}
+
+const SERVE_USAGE =
+  'Usage: pipeline department serve [--org <slug>] [--runner-name <n>] [--detach|--foreground] [--json]\n' +
+  '                                 [--file <path>] [--server <url>] [--device] [--reauth]\n' +
+  '                                 [--machine-token <token>] [--runtime-command <cmd>]';
+
+function parseServeArgs(args: string[]): ServeArgs {
+  const out: ServeArgs = { device: false, reauth: false, foreground: false, json: false, help: false };
+  const take = (i: number) => args[i + 1];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? '';
+    const eq = (p: string) => (a.startsWith(p + '=') ? a.slice(p.length + 1) : undefined);
+    if (a === '--json') out.json = true;
+    else if (a === '--help' || a === '-h') out.help = true;
+    else if (a === '--device') out.device = true;
+    else if (a === '--reauth') out.reauth = true;
+    // `--detach` is the DEFAULT (a supervisor service that starts on boot), so
+    // it is accepted and does nothing — a user who types it should not get a
+    // usage error for asking for what already happens.
+    else if (a === '--detach') out.foreground = false;
+    else if (a === '--foreground') out.foreground = true;
+    else if (a === '--file') out.file = take(i++);
+    else if (eq('--file') !== undefined) out.file = eq('--file');
+    else if (a === '--org') out.org = take(i++);
+    else if (eq('--org') !== undefined) out.org = eq('--org');
+    else if (a === '--server') out.server = take(i++);
+    else if (eq('--server') !== undefined) out.server = eq('--server');
+    else if (a === '--runner-name') out.runnerName = take(i++);
+    else if (eq('--runner-name') !== undefined) out.runnerName = eq('--runner-name');
+    else if (a === '--runtime-command') out.runtimeCommand = take(i++);
+    else if (eq('--runtime-command') !== undefined) out.runtimeCommand = eq('--runtime-command');
+    else if (a === '--machine-token') out.machineToken = take(i++);
+    else if (eq('--machine-token') !== undefined) out.machineToken = eq('--machine-token');
+    else if (a === '--') continue;
+    else if (a.startsWith('-')) out.unknownFlag = a;
+    else out.extra = a;
+  }
+  return out;
+}
+
+function serveHelpText(): string {
+  return (
+    `${SERVE_USAGE}\n\n` +
+    'Take the department described by department.yml live: validate it, sign in,\n' +
+    'register it (or update it when the manifest changed), enrol this machine as a\n' +
+    'runner if it is not one, bind the runtime locally, make sure a supervisor is\n' +
+    'installed, claim the install, and report.\n\n' +
+    'Idempotent and resumable: re-running after any failure re-checks each step and\n' +
+    'performs only what is missing. Nothing is ever written INSIDE the department\n' +
+    'folder — the credential lives in the per-user store and the runtime binding in\n' +
+    "pipeline-runner's own config dir (written by `pipeline-runner bind`).\n\n" +
+    'Options:\n' +
+    `  --file <path>          The manifest (default: ./${DEPARTMENT_MANIFEST_FILENAME}).\n` +
+    '  --org <slug>           Which org to publish into (required with a machine\n' +
+    '                         credential, which has no discoverable org).\n' +
+    '  --server <url>         Control-plane base URL.\n' +
+    "  --runner-name <n>      Name for this machine's runner (default: hostname).\n" +
+    '  --runtime-command <c>  Executable an engine: pipeline department runs\n' +
+    "                         (default: 'pipeline' on PATH).\n" +
+    '  --detach               Install the supervisor as a service (the default).\n' +
+    '  --foreground           Do not install a service; print how to run one.\n' +
+    '  --device / --reauth    Passed to the authentication ladder.\n' +
+    `  --machine-token <t>    ${MACHINE_TOKEN_ENV} is the documented form (argv is\n` +
+    '                         world-readable in `ps`).\n' +
+    '  --json                 Emit one JSON object on stdout; progress to stderr.\n' +
+    '  --help, -h             Show this help.\n' +
+    '\n' +
+    'Exit: 0 online / waiting for approval · 1 a step failed (the department may be\n' +
+    'registered and not serving — re-run to converge) · 2 usage, or a missing or\n' +
+    'unparseable manifest.\n'
+  );
+}
+
+/** Everything `serve` learned, for `--json`. Mirrors the human transcript one
+ *  key per line, so a scripted caller never has to parse prose. */
+interface ServeJson {
+  ok: boolean;
+  state: ServeState;
+  org: string;
+  department: { id: string | null; slug: string; digest: string; registration: string | null };
+  runner: { id: string | null; name: string; enrolment: 'existing' | 'new' | null };
+  binding: { adapter: string; command: string; lifecycle?: string } | null;
+  supervisor: 'installed' | 'already-installed' | 'skipped' | null;
+  install: { id: string; pendingApproval: boolean; policy?: string; changed: boolean } | null;
+  url: string;
+  warnings: string[];
+  error?: string;
+}
+
+/**
+ * `pipeline department serve` — 05 §5's nine steps, in order.
+ *
+ * Ordering is load-bearing, not stylistic:
+ *  - **1–3 are local and happen before ANY registration.** Validation, and the
+ *    local runtime binding this machine would write, are both resolved first,
+ *    so a manifest that cannot be served never becomes a cloud record. (05 §5
+ *    step 1: "any error aborts before anything is registered".)
+ *  - **5 before 8**, because the install claim requires a `runner_id` and a
+ *    freshly cloned machine has none (D26 — the whole reason enrolment folds
+ *    into `serve`).
+ *  - **6 before 7**: binding first means a machine that ALREADY runs a
+ *    supervisor is serving the moment the binding lands (b1 signals a reload),
+ *    and the service step is then a no-op rather than a restart.
+ *
+ * There is no rollback and none is wanted (05 §5): a registered-but-not-
+ * serving department is inert and visible, and deleting cloud state because a
+ * local step failed would be worse. Every failure therefore states what DID
+ * happen, names the recovery, and leaves the rest for the next run.
+ */
+export async function runDepartmentServe(args: string[], deps: ServeCommandDeps = realServeDeps()): Promise<number> {
+  const a = parseServeArgs(args);
+  const say = (s: string): void => (a.json ? deps.err(s) : deps.out(s));
+  const usage = (msg: string): number => {
+    deps.err(`pipeline department serve: ${msg}\n${SERVE_USAGE}\n`);
+    return 2;
+  };
+
+  if (a.help) {
+    deps.out(serveHelpText());
+    return 0;
+  }
+  if (a.unknownFlag !== undefined) return usage(`unknown flag '${a.unknownFlag}'`);
+  if (a.extra !== undefined) return usage(`unexpected argument '${a.extra}'`);
+
+  // 04 §3: "Ambiguity is an error, not a guess" — the same rule `cloud
+  // connect` applies, checked here before any I/O so it is a clean exit 2
+  // regardless of which source named the credential.
+  const machineToken = (a.machineToken ?? deps.env[MACHINE_TOKEN_ENV] ?? '').trim();
+  if (machineToken.length > 0 && a.device) {
+    return usage(`--machine-token (or ${MACHINE_TOKEN_ENV}) cannot be combined with --device`);
+  }
+
+  // Resolved against the INJECTED cwd, never `process.cwd()` — the same seam
+  // every other side effect goes through, so a test (and a scripted caller
+  // that passes `--file`) never depends on the real working directory.
+  const filePath = a.file !== undefined ? resolve(deps.cwd, a.file) : join(deps.cwd, DEPARTMENT_MANIFEST_FILENAME);
+  const manifestDir = dirname(filePath);
+  const warnings: string[] = [];
+  /** Say a non-fatal fact AT THE MOMENT IT IS DISCOVERED, and keep it for
+   *  `--json`. Printing warnings where they happen (rather than batched at the
+   *  end) means a run that fails three steps later still showed them. */
+  const warn = (message: string): void => {
+    warnings.push(message);
+    say(`⚠ ${message}\n`);
+  };
+
+  // ---- Step 1: validate, in full ------------------------------------------
+  // A step-1 failure emits `validate --json`'s OWN payload rather than the
+  // serve payload below: what a caller needs here is the findings, in the
+  // shape it already parses from `validate`, and there is no serve state yet
+  // to report (nothing has been contacted, let alone registered).
+  const inspection = inspectManifestFile(filePath);
+  if (inspection.fatal !== undefined || inspection.manifest === null) {
+    // 05 §4's exit-2 class: missing or unparseable. Nothing was registered.
+    if (a.json) deps.out(JSON.stringify(buildJsonResult(filePath, inspection.findings), null, 2) + '\n');
+    else if (inspection.fatal !== undefined) deps.err(`pipeline department serve: ${inspection.fatal}\n`);
+    else printHuman(deps.err, filePath, null, inspection.findings);
+    return 2;
+  }
+  const manifest = inspection.manifest;
+  if (hasErrors(inspection.findings)) {
+    // The `validate` findings, verbatim — 05 §5's step-1 failure row is "the
+    // validate findings", so this prints the same report the user would get
+    // from `pipeline department validate`, then stops.
+    if (a.json) deps.out(JSON.stringify(buildJsonResult(filePath, inspection.findings), null, 2) + '\n');
+    else {
+      printHuman(deps.err, filePath, manifest, inspection.findings);
+      deps.err('\nNothing was registered. Fix the errors above and re-run.\n');
+    }
+    return 1;
+  }
+  for (const f of inspection.findings) {
+    if (f.severity === 'warning') warn(`${f.field}: ${f.message}`);
+  }
+
+  // Still step 1, and deliberately so: the LOCAL runtime binding is resolved
+  // before anything is registered, because a manifest this machine cannot bind
+  // is a manifest it cannot serve, and a cloud record for it would be inert.
+  const bindingResult = runtimeBindingFor(manifest, {
+    manifestDir,
+    ...(a.runtimeCommand !== undefined ? { runtimeCommand: a.runtimeCommand } : {}),
+  });
+  if (!bindingResult.ok) {
+    deps.err(`pipeline department serve: ${bindingResult.message}\n  Nothing was registered.\n`);
+    return 1;
+  }
+  const binding = bindingResult.binding;
+  for (const w of binding.warnings) warn(w);
+
+  // ---- Step 2: authenticate (04 §4's ladder) ------------------------------
+  let auth: ApiAuth;
+  try {
+    auth = await deps.authenticate({
+      ...(a.server !== undefined ? { server: a.server } : {}),
+      ...(a.org !== undefined ? { org: a.org } : {}),
+      ...(machineToken.length > 0 ? { machineToken } : {}),
+      device: a.device,
+      reauth: a.reauth,
+      json: a.json,
+    });
+  } catch (e) {
+    deps.err(`pipeline department serve: ${(e as Error).message}\n  Nothing was registered.\n`);
+    return 1;
+  }
+  const ctx: CloudContext = {
+    server: auth.server,
+    accessToken: auth.accessToken,
+    orgSlug: auth.orgSlug,
+    ...(auth.orgId !== undefined ? { orgId: auth.orgId } : {}),
+  };
+  // 05 §5's transcript line. The email is printed only when the identity
+  // endpoint supplied one (never for a machine credential, which has no human
+  // behind it) — an invented "as <someone>" would be worse than its absence.
+  say(auth.userEmail ? `✓ Authorized as ${auth.userEmail}    org: ${auth.orgSlug}\n` : `✓ Authorized      org: ${auth.orgSlug}\n`);
+
+  // ---- Step 3: compute the digest (never authored — D15) ------------------
+  // `buildRegistrationRequest` computes the digest over the SAME advertised
+  // object that becomes the body, and re-checks that body against a7's
+  // deny-list — so what an admin approves is literally what was published, and
+  // the `runtime:` half provably never leaves this machine.
+  const request = buildRegistrationRequest(manifest);
+
+  const json: ServeJson = {
+    ok: false,
+    state: 'registered-not-serving',
+    org: auth.orgSlug,
+    department: { id: null, slug: request.slug, digest: request.manifest_digest, registration: null },
+    runner: { id: null, name: '', enrolment: null },
+    binding: null,
+    supervisor: null,
+    install: null,
+    url: departmentUrlFor(auth.server, request.slug),
+    warnings,
+  };
+  /** One exit point for every outcome: prints the JSON object (or nothing, in
+   *  human mode, where each step already printed its own line) and returns. */
+  const finish = (code: number, state: ServeState, error?: string): number => {
+    json.ok = code === 0;
+    json.state = state;
+    if (error !== undefined) json.error = error;
+    if (a.json) deps.out(JSON.stringify(json, null, 2) + '\n');
+    return code;
+  };
+  const fail = (message: string, state: ServeState = 'registered-not-serving'): number => {
+    deps.err(`pipeline department serve: ${message}\n`);
+    return finish(1, state, message);
+  };
+
+  // ---- Step 4: register or update -----------------------------------------
+  const registration = await registerOrUpdateDepartment(deps, ctx, request);
+  if (!registration.ok) {
+    // Every failure here happened BEFORE the department existed (or before an
+    // edit landed on it), so the reported state says exactly that rather than
+    // implying a record the org does not have.
+    return fail(registration.message, 'not-registered');
+  }
+  const department = registration.department;
+  json.department.id = department.id;
+  json.department.registration = registration.action;
+  say(
+    `✓ Registered      ${auth.orgSlug} / ${department.slug}` +
+      (registration.action === 'updated'
+        ? '  (manifest changed)\n'
+        : registration.action === 'unchanged'
+          ? '  (unchanged)\n'
+          : '\n'),
+  );
+
+  // ---- Step 5: enrol this machine as a runner (D26) -----------------------
+  // `lib/runner-enrol.ts` declares its own structurally-identical HTTP seam
+  // (lib/ must not depend on commands/, so it duplicates the shape rather
+  // than importing one) — the two are assignable, no cast needed.
+  const runnerDeps: RunnerEnrolDeps = { shell: deps.shell, fetch: deps.fetch, out: say, err: say };
+  // ONE `service status` shell per invocation (a6's rule): the answer is used
+  // both to decide whether enrolment may install a service and by step 7.
+  const serviceInstalled = isRunnerServiceInstalled(runnerDeps);
+  const identity = readRunnerIdentity(runnerDeps);
+  const runnerName =
+    a.runnerName && a.runnerName.length > 0 ? a.runnerName : deps.hostname();
+  json.runner.name = runnerName;
+
+  let runnerId = identity?.runnerId ?? null;
+  if (runnerId !== null) {
+    json.runner.enrolment = 'existing';
+    say(`✓ This machine    already a runner\n`);
+    // A machine enrolled against a DIFFERENT control plane holds a runner id
+    // this org has never heard of, so the claim in step 8 would 404 with a
+    // message that does not explain itself. Say it here instead, where the
+    // cause is visible. Not fatal: the operator may have deliberately pointed
+    // one machine at two servers, and the claim's own error still decides.
+    if (identity?.baseUrl && identity.baseUrl.replace(/\/+$/, '') !== auth.server) {
+      warn(
+        `this machine is registered as a runner against ${identity.baseUrl}, but you are serving to ${auth.server} — ` +
+          're-run `pipeline-runner register --url <this server> …` if the install claim below fails',
+      );
+    }
+  } else {
+    // 05 §5 step 5: shell out to `pipeline-runner register`, never write its
+    // config store. `installService: false` keeps step 7's one-service-per-
+    // machine decision where it belongs — here, not inside enrolment.
+    const outcome = await enrolRunner(runnerDeps, {
+      server: auth.server,
+      accessToken: auth.accessToken,
+      ...(auth.orgId !== undefined ? { orgId: auth.orgId } : {}),
+      name: runnerName,
+      installService: false,
+    });
+    runnerId = outcome.runnerId ?? null;
+    if (outcome.status === 'install-failed' || outcome.status === 'mint-failed' || outcome.status === 'register-failed' || runnerId === null) {
+      return fail(
+        `Registered, but this machine could not be enrolled: ${outcome.detail ?? outcome.status}\n` +
+          '  The department stays registered and offline. Re-run `pipeline department serve` once the cause is fixed.',
+      );
+    }
+    json.runner.enrolment = 'new';
+    say(`✓ This machine    registered as runner '${runnerName}'\n`);
+  }
+  json.runner.id = runnerId;
+
+  // ---- Step 6: bind the runtime locally (b1's store, via its own CLI) -----
+  const bound = bindRuntime(deps, department.id, binding);
+  if (!bound.ok) {
+    return fail(`${bound.message}\n  Fix it and re-run — the department stays registered.`);
+  }
+  json.binding = {
+    adapter: binding.adapterId,
+    command: binding.command,
+    ...(binding.lifecycle !== undefined ? { lifecycle: binding.lifecycle } : {}),
+  };
+  say(`✓ Runtime bound   ${manifest.runtime.engine} → ${binding.command}\n`);
+
+  // ---- Step 7: ensure the supervisor (one per machine — D26) --------------
+  if (a.foreground) {
+    json.supervisor = 'skipped';
+    say('· Supervisor      not installed (--foreground)\n');
+    say(`    Run it here:  ${RUNNER_CLI_BIN_HINT}\n`);
+  } else {
+    const supervisor = ensureSupervisor(deps, serviceInstalled);
+    if (!supervisor.ok) {
+      return fail(
+        `Registered and bound, but ${supervisor.message}\n` +
+          '  Install it manually (`pipeline-runner service install`), or re-run.',
+      );
+    }
+    json.supervisor = supervisor.action;
+    say(
+      supervisor.action === 'installed'
+        ? '✓ Supervisor      installed, starts on boot\n'
+        : '✓ Supervisor      already installed (shared with cloud pipeline dispatch)\n',
+    );
+  }
+
+  // ---- Step 8: claim the install, then the org's approval policy ----------
+  const claim = await claimInstall(deps, ctx, department.id, runnerId, request.manifest_digest);
+  if (!claim.ok) {
+    return fail(`Registered, but ${claim.message}\n  Re-run to try again.`);
+  }
+  json.install = {
+    id: claim.claim.id,
+    pendingApproval: claim.claim.pendingApproval,
+    ...(claim.claim.policy !== undefined ? { policy: claim.claim.policy } : {}),
+    changed: claim.claim.changed,
+  };
+
+  // ---- Step 9: report ------------------------------------------------------
+  // (Every warning was already said where it was found — see `warn` above.)
+  if (claim.claim.pendingApproval) {
+    // 07 §4's second transcript. The department is registered and claimed; it
+    // is an ADMIN's decision away from serving, which is not a failure.
+    say(`\n${renderState('waiting-approval', department.slug)}\n`);
+    say(`   ${json.url}\n\n`);
+    say("You'll be notified when it's approved.\n");
+    return finish(0, 'waiting-approval');
+  }
+
+  if (a.foreground) {
+    // 05 §5's closing rule: a department that is registered but cannot take
+    // work reports `○ registered — not serving`, NEVER a bare `online`.
+    // Nothing is supervising it until the operator starts one by hand.
+    const reason = `no supervisor service on this machine (--foreground) — run \`${RUNNER_CLI_BIN_HINT}\``;
+    say(`\n${renderState('registered-not-serving', department.slug, reason)}\n`);
+    return finish(1, 'registered-not-serving', reason);
+  }
+
+  say(`\n${renderState('online', department.slug)}\n\n`);
+  say(`Callable now:  "ask the ${department.slug} department to …"\n`);
+  return finish(0, 'online');
+}
+
+/** Printed by `--foreground`; kept as a named constant so the two places that
+ *  talk about running a supervisor by hand cannot drift. */
+const RUNNER_CLI_BIN_HINT = 'pipeline-runner start';
 
 // ---------------------------------------------------------------------------
 // Dispatcher: `pipeline department <verb> [args]`
 // ---------------------------------------------------------------------------
 
-export function runDepartment(args: string[]): number {
+const VERBS = 'new, validate, serve';
+
+export async function runDepartment(args: string[]): Promise<number> {
   const verb = args[0];
   const rest = args.slice(1);
   switch (verb) {
@@ -835,11 +1421,13 @@ export function runDepartment(args: string[]): number {
       return runDepartmentNew(rest);
     case 'validate':
       return runDepartmentValidate(rest);
+    case 'serve':
+      return await runDepartmentServe(rest);
     case undefined:
-      process.stderr.write('pipeline department: a verb is required (new, validate)\n');
+      process.stderr.write(`pipeline department: a verb is required (${VERBS})\n`);
       return 2;
     default:
-      process.stderr.write(`pipeline department: unknown verb '${verb}' (expected: new, validate)\n`);
+      process.stderr.write(`pipeline department: unknown verb '${verb}' (expected: ${VERBS})\n`);
       return 2;
   }
 }

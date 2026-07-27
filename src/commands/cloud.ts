@@ -981,13 +981,13 @@ async function tryBrowserFlow(deps: CloudDeps, server: string, say: (s: string) 
 async function obtainToken(
   deps: CloudDeps,
   server: string,
-  opts: ConnectOptions,
+  opts: ApiAuthOptions,
   say: (s: string) => void,
 ): Promise<TokenResponse> {
   const preflight = decidePreflightFallback({
     env: deps.env,
     platform: deps.platform,
-    device: opts.device,
+    device: opts.device === true,
     commandExists: deps.commandExists,
   });
 
@@ -1089,7 +1089,7 @@ function refreshDepsFrom(deps: CloudDeps): RefreshDeps {
 async function obtainAndPersistToken(
   deps: CloudDeps,
   server: string,
-  opts: ConnectOptions,
+  opts: ApiAuthOptions,
   say: (s: string) => void,
   store: CredentialStore,
   credPath: string,
@@ -1247,12 +1247,87 @@ function writeBindingAndReport(
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// The reusable auth ladder (extracted for task a9)
+// ---------------------------------------------------------------------------
+
 /**
- * The machine-credential branch of the connect flow (task a4,
- * 04-cloud-auth.md §3/§4's THIRD, top rung — checked in `connect()` before
- * ANY of the reuse/browser/device logic below it runs). No TTY, no prompt,
- * no browser: `exchangeMachineCredential` is the only network call before
- * the binding is written, besides the credential-store write itself.
+ * What a caller must supply to run the 04§4 ladder. A strict subset of
+ * `ConnectOptions` — every field means exactly what it means on `connect`,
+ * so a second command cannot quietly grow a third authentication semantics.
+ */
+export interface ApiAuthOptions {
+  server?: string;
+  org?: string;
+  reauth?: boolean;
+  device?: boolean;
+  /** Already resolved from `--machine-token` / `PIPELINE_MACHINE_TOKEN` by the
+   *  caller (`resolveMachineToken`), so the precedence rule lives in one
+   *  place. */
+  machineToken?: string;
+  /** `--json` mode: progress lines go to stderr so stdout stays machine
+   *  readable. Same rule as `connect`'s own `say()`. */
+  json?: boolean;
+}
+
+/** The credential + identity every authenticated command needs. */
+export interface ApiAuth {
+  /** Normalized control-plane base URL the credential is valid for. */
+  server: string;
+  /** SECRET — a live bearer for `server`'s `api` audience. Never printed. */
+  accessToken: string;
+  orgSlug: string;
+  /** The org's UUID, needed as `X-Org-Id` for a device-grant token (whose own
+   *  claims carry no org). `undefined` on the machine-credential path, whose
+   *  token carries its own `org_id` claim and for which `/api/v1/me` 401s by
+   *  construction (see this file's module doc). */
+  orgId?: string;
+  /** The signed-in user's email, when the identity endpoint supplied one —
+   *  05 §5's transcript prints it (`✓ Authorized as ivan@…    org: acme`).
+   *  Absent on the machine-credential path, which has no human identity. */
+  userEmail?: string;
+  /** Where the credential was persisted — reported, never its contents. */
+  credentialPath: string;
+  /** The clock sample the whole call used, so a caller's own timestamps agree
+   *  with the ones written into the credential store. */
+  now: number;
+}
+
+/**
+ * Run 04§4's selection ladder and return a live credential + the org it acts
+ * in. This is the WHOLE of `cloud connect`'s authentication and NONE of its
+ * project binding: no `.claude/pipeline/cloud.json` is read or written here.
+ *
+ * Extracted for `pipeline department serve` (task a9), which 05 §5 step 2
+ * requires to authenticate "via the [04] ladder, `PIPELINE_MACHINE_TOKEN`
+ * included" — but which must NOT write a project binding, because a
+ * department folder is clonable and a committed `cloud.json` would pin it to
+ * one org and one server (a9's scope note). Sharing the ladder rather than
+ * duplicating it is D12's own rule ("every command that authenticates accepts
+ * the same variable with the same semantics") made structural: one browser
+ * flow, one device flow, one machine-credential exchange, one set of 04§9
+ * failure messages.
+ *
+ * Throws `CloudError` for every user-facing failure; the caller maps it to
+ * exit 1 with a one-line message.
+ */
+export async function authenticateApi(deps: CloudDeps, opts: ApiAuthOptions): Promise<ApiAuth> {
+  const server = normalizeServerUrl(opts.server ?? deps.env[SERVER_ENV] ?? DEFAULT_SERVER);
+  // 04§4's selection ladder, THIRD and topmost rung: a machine credential's
+  // presence wins over everything below — no reused human credential, no
+  // browser, no device code (callers reject combining it with --device as a
+  // usage error before this function is ever reached).
+  if (opts.machineToken !== undefined) {
+    return await authenticateWithMachineCredential(deps, opts, server, opts.machineToken);
+  }
+  return await authenticateAsHuman(deps, opts, server);
+}
+
+/**
+ * The machine-credential branch of the ladder (task a4, 04-cloud-auth.md
+ * §3/§4's THIRD, top rung). No TTY, no prompt, no browser:
+ * `exchangeMachineCredential` is the only network call, besides the
+ * credential-store write itself.
  *
  * Deliberately does NOT call `fetchMe`/`selectOrg` — see this file's module
  * doc "GAP FOUND READING THE SERVER": a machine credential has no human
@@ -1263,12 +1338,12 @@ function writeBindingAndReport(
  * dashboard — tells the CLI what to write locally; it is not verified
  * against the server (there is nothing to verify it against).
  */
-async function connectWithMachineCredential(
+async function authenticateWithMachineCredential(
   deps: CloudDeps,
-  opts: ConnectOptions,
+  opts: ApiAuthOptions,
   server: string,
   machineToken: string,
-): Promise<number> {
+): Promise<ApiAuth> {
   const homeCtx = { platform: deps.platform, env: deps.env, homedir: deps.homedir };
   const credPath = credentialFilePath(homeCtx);
   const store = readCredentialStore(deps.fs, credPath);
@@ -1306,26 +1381,17 @@ async function connectWithMachineCredential(
     persistCredential(deps, credPath, store);
   }
 
-  const code = writeBindingAndReport(deps, opts, server, credPath, orgSlug, now);
-  // Machine-credential path (task a6): no org UUID is known here — only the
-  // slug the operator passed via --org — so `maybeEnrolRunner` mints without
-  // an `X-Org-Id` header; the token's own claim carries the org (see this
-  // file's module doc's "GAP FOUND READING THE SERVER").
-  await maybeEnrolRunner(deps, opts, server, tok.access_token, undefined);
-  return code;
+  // No org UUID is knowable here — only the slug the operator passed via
+  // --org — so callers mint/claim without an `X-Org-Id` header; the token's
+  // own claim carries the org (see this file's module doc's "GAP FOUND
+  // READING THE SERVER").
+  return { server, accessToken: tok.access_token, orgSlug, credentialPath: credPath, now };
 }
 
-async function connect(deps: CloudDeps, opts: ConnectOptions, machineToken: string | undefined): Promise<number> {
-  const server = normalizeServerUrl(opts.server ?? deps.env[SERVER_ENV] ?? DEFAULT_SERVER);
-
-  // 04§4's selection ladder, THIRD and topmost rung: a machine credential's
-  // presence wins over everything below — no reused human credential, no
-  // browser, no device code (`runCloud` has already rejected combining it
-  // with --device as a usage error before `connect` is ever reached).
-  if (machineToken !== undefined) {
-    return await connectWithMachineCredential(deps, opts, server, machineToken);
-  }
-
+/** The human branch: reuse a live stored credential, silently REFRESH an
+ *  expiring one (a5), else run the full browser/device flow — then resolve
+ *  the org from `/api/v1/me`, the only source of an org slug. */
+async function authenticateAsHuman(deps: CloudDeps, opts: ApiAuthOptions, server: string): Promise<ApiAuth> {
   const homeCtx = { platform: deps.platform, env: deps.env, homedir: deps.homedir };
   const credPath = credentialFilePath(homeCtx);
   const store = readCredentialStore(deps.fs, credPath);
@@ -1393,12 +1459,36 @@ async function connect(deps: CloudDeps, opts: ConnectOptions, machineToken: stri
     persistCredential(deps, credPath, store);
   }
 
-  const code = writeBindingAndReport(deps, opts, server, credPath, org.slug, now);
-  // task a6: `org.id` is a UUID here (from /api/v1/me), so it rides as
-  // X-Org-Id on the mint request — required for a device-grant token (not
-  // org-bound in its own claims) and harmless for a browser-flow token
-  // (already org-bound, and guaranteed to agree since it's the same org).
-  await maybeEnrolRunner(deps, opts, server, token, org.id);
+  // `org.id` is a UUID here (from /api/v1/me), so callers can ride it as
+  // X-Org-Id — required for a device-grant token (not org-bound in its own
+  // claims) and harmless for a browser-flow token (already org-bound, and
+  // guaranteed to agree since it's the same org).
+  return {
+    server,
+    accessToken: token,
+    orgSlug: org.slug,
+    orgId: org.id,
+    ...(me.user?.email ? { userEmail: me.user.email } : {}),
+    credentialPath: credPath,
+    now,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// connect — the ladder above, plus the project binding it exists to write
+// ---------------------------------------------------------------------------
+
+async function connect(deps: CloudDeps, opts: ConnectOptions, machineToken: string | undefined): Promise<number> {
+  // The RAW `--machine-token` value is dropped in favour of the RESOLVED one
+  // (`resolveMachineToken`: flag first, then the env var, blank treated as
+  // absent) — spreading `opts` wholesale would let `--machine-token ''` reach
+  // the ladder as a present-but-empty credential and take the machine branch.
+  const { machineToken: _rawMachineTokenFlag, ...rest } = opts;
+  const auth = await authenticateApi(deps, { ...rest, ...(machineToken !== undefined ? { machineToken } : {}) });
+  const code = writeBindingAndReport(deps, opts, auth.server, auth.credentialPath, auth.orgSlug, auth.now);
+  // task a6: enrolment is layered on an ALREADY-successful connect and never
+  // changes its exit code (see `maybeEnrolRunner`).
+  await maybeEnrolRunner(deps, opts, auth.server, auth.accessToken, auth.orgId);
   return code;
 }
 

@@ -149,6 +149,24 @@ export interface EngineDefinition {
    *  it offer mid-task input to a process that never negotiated for it. Under-
    *  advertising degrades; over-advertising hangs a task. */
   capabilities: EngineCapabilities | null;
+  /**
+   * The lifecycles this engine can actually run, or `null` when it can run any
+   * of them. A restriction here is a COHERENCE rule (05 §4), enforced by
+   * `department validate` (a8) and therefore by `serve` (a9), which runs
+   * validate in full before it registers anything.
+   *
+   * ⚠ This is not redundant with the cloud's own coherence check — it is the
+   * ONLY place the rule can still fire. `validateManifestCoherence()`
+   * (`mesh-registry/manifest.ts`) keys every one of its rules off
+   * `runtime.adapter`, and `advertisedManifest()` above never sends `runtime`
+   * at all (a7's allow-list — the whole `runtime:` block is local). The server
+   * therefore sees `adapter: undefined`, returns `[]`, and its
+   * `pipeline-drive` restrictions are structurally unreachable. Keeping the
+   * equivalent rule HERE — locally, and earlier — is what stops a manifest the
+   * cloud would have rejected from being published, bound, and only then
+   * failing at task time.
+   */
+  supportedLifecycles: readonly DepartmentLifecycle[] | null;
   /** True when this engine legitimately carries the LOCAL-ONLY exec fields
    *  (`command`, `args`, `workingDirectory`, `environment`). Informational for
    *  a8's validate — the advertised projection is an allow-list either way. */
@@ -176,6 +194,7 @@ export const ENGINES: readonly EngineDefinition[] = [
       supportsStreaming: true,
       supportsCheckpoint: false,
     },
+    supportedLifecycles: null,
     takesLocalExecFields: false,
   },
   {
@@ -190,6 +209,11 @@ export const ENGINES: readonly EngineDefinition[] = [
       supportsStreaming: false,
       supportsCheckpoint: false,
     },
+    // 07-runtime-contract §2.1: `pipeline drive` exits after every invocation
+    // and holds nothing between them, so it can only ever be `per-task`. The
+    // cloud says the same thing (`manifest.ts`'s `validateManifestCoherence`)
+    // and can no longer enforce it — see `supportedLifecycles`' doc.
+    supportedLifecycles: ['per-task'],
     takesLocalExecFields: false,
   },
   {
@@ -198,12 +222,14 @@ export const ENGINES: readonly EngineDefinition[] = [
     // Negotiated: `jsonl-process` learns the child's capabilities from its
     // `initialize` frame at task start. Nothing to default at authoring time.
     capabilities: null,
+    supportedLifecycles: null,
     takesLocalExecFields: true,
   },
   {
     engine: 'container',
     adapterId: 'container',
     capabilities: null,
+    supportedLifecycles: null,
     takesLocalExecFields: true,
   },
 ];
