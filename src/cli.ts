@@ -251,6 +251,36 @@ function usage(): string {
     '      token never touches the project). Re-running updates the binding.',
     '      Exit 0 connected/updated · 1 auth/network failure · 2 usage.',
     '',
+    '  department new [<name>] [--engine <id>] [--from-pipeline <name>]',
+    '                 [--force] [--json]',
+    '      Scaffold department.yml — the ONLY file a department project folder',
+    '      requires (no .claude/, README, or starter agent). Current folder by',
+    '      default; a <name> argument creates ./<name>/department.yml instead',
+    '      and prefills name from it. --engine <id> picks the runtime engine',
+    '      (default claude-code). --from-pipeline <name> prefills description',
+    '      + one skill from an EXISTING ./.claude/pipeline/<name>/PIPELINE.md',
+    "      (its End State + Scope.In) and writes engine: pipeline with",
+    '      pipelineRoot + startIteration resolved for you — conflicts with a',
+    '      different explicit --engine. Refuses to overwrite an existing',
+    '      department.yml, or to write into an already-occupied <name> folder,',
+    '      without --force. Exit 0 created · 1 refused (exists / occupied /',
+    '      --from-pipeline pipeline not found) · 2 usage.',
+    '',
+    '  department validate [--file <path>] [--json]',
+    '      Validate a hand-written or hand-edited department.yml (default:',
+    '      ./department.yml) against every check class 05 §4 of the',
+    '      simplified-onboarding design names: schema + apiVersion (via',
+    '      lib/department-manifest.ts, task a7), coherence (a communication',
+    '      capability the named engine cannot honour; contextAffinity:',
+    '      required needs a per-context/daemon lifecycle), engine support,',
+    '      advisory nits (a missing or thin skill description, an empty',
+    '      .claude/, visibility left unset), and local filesystem facts',
+    '      (engine: pipeline pointing at a real pipeline; local paths',
+    '      existing). Findings are {severity: error|warning, field, message};',
+    '      warnings never affect the exit code. --json prints {file, valid,',
+    '      errors, warnings, findings}. Exit 0 clean · 1 errors present · 2',
+    '      file missing or unparseable.',
+    '',
     '  mesh notify [--interval-ms <n>] [--once] [--json]',
     '      Background department-mesh task notifier (department-mesh design, task',
     "      a1): polls the caller's open tasks via the credential",
@@ -340,6 +370,14 @@ async function main(argv: string[]): Promise<number> {
       // machinery — keep the hot `next` loop's per-spawn startup cost unchanged.
       const { runCloud } = await import('./commands/cloud');
       return runCloud(rest);
+    }
+    case 'department': {
+      // Lazy import (mirrors `cloud`/`mesh`): `department` pulls in the
+      // department.yml schema/digest machinery (lib/department-manifest.ts,
+      // task a7) and the PIPELINE.md scope parser (lib/match.ts) — keep the
+      // hot `next` loop's per-spawn startup cost unchanged.
+      const { runDepartment } = await import('./commands/department');
+      return runDepartment(rest);
     }
     case 'mesh': {
       // Lazy import (mirrors `cloud`): `mesh` pulls in the HTTP polling +
