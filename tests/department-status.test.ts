@@ -301,6 +301,14 @@ describe('stop -> serve — DoD box 2: restores service without re-registering o
         // never re-arming approval.
         return reply(200, { install: { id: INSTALL_ID, pendingApproval: false }, changed: false, auto_approved: false, approval_policy: 'auto-admin' });
       }
+      // x13: `serve` now CONFIRMS the claim it prints — the department's own
+      // profile is the one authority for `online`, and this world's supervisor
+      // reports `running`, so the re-serve legitimately comes back live.
+      if (url.endsWith(`/api/v1/departments/${DEPT_ID}`) && init.method === 'GET') {
+        return reply(200, {
+          department: { id: DEPT_ID, slug: 'unity-review', enabled: true, retired: false, online: true, manifestDigest: DIGEST },
+        });
+      }
       throw new Error(`unexpected fetch: ${init.method} ${url}`);
     };
 

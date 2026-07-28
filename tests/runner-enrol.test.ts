@@ -10,6 +10,7 @@ import {
   isRunnerCliAvailable,
   isRunnerServiceInstalled,
   readRunnerIdentity,
+  readRunnerServiceState,
   realShell,
   RUNNER_PACKAGE,
   RUNNER_OAUTH_CLIENT_SECRET_ENV,
@@ -143,6 +144,78 @@ describe('isRunnerServiceInstalled', () => {
     };
     isRunnerServiceInstalled({ shell });
     expect(seen).toEqual({ cmd: 'pipeline-runner', args: ['service', 'status'] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readRunnerServiceState (x13) — installed is NOT running
+// ---------------------------------------------------------------------------
+//
+// The whole reason this function exists: `isRunnerServiceInstalled` answers
+// "may I skip `service install`?" and returns `true` for a STOPPED service —
+// correct for that question, and the exact hole `department serve` fell
+// through when it printed `● online` on a machine whose supervisor was
+// `stopped (auto-start)`.
+
+describe('readRunnerServiceState (x13)', () => {
+  const withStdout = (stdout: string, code = 0): { shell: ShellRunner } => ({
+    shell: () => ({ code, stdout, stderr: '' }),
+  });
+
+  test("systemd's three renderings", () => {
+    expect(readRunnerServiceState(withStdout('[pipeline-runner] pipeline-runner.service: running (enabled)\n'))).toBe('running');
+    expect(readRunnerServiceState(withStdout('[pipeline-runner] pipeline-runner.service: stopped (disabled)\n'))).toBe('stopped');
+    expect(readRunnerServiceState(withStdout('[pipeline-runner] pipeline-runner.service is not installed\n'))).toBe('not-installed');
+  });
+
+  test("launchd's three renderings", () => {
+    expect(readRunnerServiceState(withStdout('[pipeline-runner] com.ivanmurzak.pipeline-runner: running (loaded)\n'))).toBe('running');
+    expect(readRunnerServiceState(withStdout('[pipeline-runner] com.ivanmurzak.pipeline-runner: stopped (not loaded)\n'))).toBe('stopped');
+    expect(readRunnerServiceState(withStdout('[pipeline-runner] dev.ai-pipeline.pipeline-runner is not installed\n'))).toBe('not-installed');
+  });
+
+  test("Windows SCM's three renderings — including the exact e2-gate line", () => {
+    expect(readRunnerServiceState(withStdout("[pipeline-runner] service 'pipeline-runner': running (auto-start)\n"))).toBe('running');
+    // ↓ This is the machine state that shipped a false `● online` in the e2 gate.
+    expect(readRunnerServiceState(withStdout("[pipeline-runner] service 'pipeline-runner': stopped (auto-start)\n"))).toBe('stopped');
+    expect(readRunnerServiceState(withStdout("[pipeline-runner] service 'pipeline-runner' is not installed\n"))).toBe('not-installed');
+  });
+
+  test("pipeline-runner's own fourth state is preserved, not rounded to 'stopped'", () => {
+    // `sc query` output matching neither RUNNING nor STOPPED — the backend
+    // reports `unknown`, and so must this.
+    expect(readRunnerServiceState(withStdout("[pipeline-runner] service 'pipeline-runner': unknown (manual/disabled)\n"))).toBe('unknown');
+  });
+
+  test('a line that does not parse is "unknown", never a guess', () => {
+    expect(readRunnerServiceState(withStdout('[pipeline-runner] something entirely new\n'))).toBe('unknown');
+  });
+
+  test('the service name containing "runner" never reads as "running"', () => {
+    // A bare substring scan for "running" over `pipeline-runner.service:
+    // stopped (...)` would still be wrong; the state is read from the `:
+    // <state> (` shape all three backends share.
+    expect(readRunnerServiceState(withStdout('[pipeline-runner] pipeline-runner.service: stopped (enabled)\n'))).toBe('stopped');
+  });
+
+  test('a missing binary (127) and any unexpected non-zero are "not-installed" — the pre-x13 behaviour, unchanged', () => {
+    expect(readRunnerServiceState(withStdout('', 127))).toBe('not-installed');
+    expect(readRunnerServiceState({ shell: () => ({ code: 1, stdout: '', stderr: 'boom' }) })).toBe('not-installed');
+  });
+
+  test('ONE shell per call, and `isRunnerServiceInstalled` still answers the install question identically', () => {
+    let calls = 0;
+    const stopped: { shell: ShellRunner } = {
+      shell: () => {
+        calls++;
+        return { code: 0, stdout: "[pipeline-runner] service 'pipeline-runner': stopped (auto-start)\n", stderr: '' };
+      },
+    };
+    expect(readRunnerServiceState(stopped)).toBe('stopped');
+    expect(calls).toBe(1);
+    // D26 is not weakened by x13: a stopped service is still a service, so
+    // `serve` must not install a rival one.
+    expect(isRunnerServiceInstalled(stopped)).toBe(true);
   });
 });
 

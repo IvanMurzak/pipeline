@@ -155,12 +155,75 @@ export function isRunnerCliAvailable(deps: Pick<RunnerEnrolDeps, 'shell'>): bool
  * this is the one place the fact is established, so a caller (this task's
  * `commands/cloud.ts`, later `commands/department.ts` per D26) shells
  * `service status` exactly once per invocation rather than twice.
+ *
+ * **This answers "may I skip `service install`?", NOT "is a supervisor
+ * running?"** — a `stopped` service is installed. Anything that wants to make
+ * a claim about a department actually taking work must use
+ * `readRunnerServiceState` below (x13).
  */
 export function isRunnerServiceInstalled(deps: Pick<RunnerEnrolDeps, 'shell'>): boolean {
+  return readRunnerServiceState(deps) !== 'not-installed';
+}
+
+/**
+ * The SAME four states pipeline-runner's own `ServiceState`
+ * (`service/types.ts`) models — mirrored, not imported, because the two
+ * packages ship on independent versions (the same one-directional mirroring
+ * rule `lib/department-journal.ts` keeps for the execution journal).
+ *
+ * `unknown` is pipeline-runner's OWN fourth state (a backend that found the
+ * service but could not classify its state — e.g. `sc query` output that
+ * matches neither `RUNNING` nor `STOPPED`), plus this reader's own "the line
+ * did not parse" case. It is deliberately NOT collapsed into `stopped`:
+ * "I know it is down" and "I could not tell" are different things to say to a
+ * user, and x13 exists because they were being collapsed into "online".
+ */
+export type RunnerServiceState = 'running' | 'stopped' | 'not-installed' | 'unknown';
+
+/**
+ * x13: **installed is not running.** `isRunnerServiceInstalled` above answers
+ * exactly one question — may `serve` skip `service install`? — and every state
+ * except `not-installed` answers it "yes". That is correct for the install
+ * decision and catastrophic as evidence of liveness: the machine that failed
+ * the `e2` gate had a supervisor that was `stopped (auto-start)`, which is
+ * "installed", and `serve` printed `● online` on the strength of it.
+ *
+ * This reader keeps the full state. It parses the one summary line every
+ * backend prints (`pipeline-runner`'s `printResult` prefixes each with
+ * `[pipeline-runner] `):
+ *
+ *   systemd   `pipeline-runner.service: running (enabled)`
+ *   launchd   `com.ivanmurzak.pipeline-runner: stopped (not loaded)`
+ *   windows   `service 'pipeline-runner': stopped (auto-start)`
+ *   any       `<name> is not installed`
+ *
+ * Rules, in order, chosen so an unreadable answer can never become a claim:
+ *  - a non-zero exit is `not-installed` — byte-for-byte the pre-existing
+ *    behaviour (missing binary → 127, unsupported platform → 1), and the
+ *    conservative answer for the install decision, which is the caller that
+ *    depends on it;
+ *  - the literal `not installed`, in either stream, is `not-installed`;
+ *  - `: <state> (` is the shape all three backends render, so the state word
+ *    is read from THERE rather than by scanning the whole line for the word
+ *    `running` — the service is literally called `pipeline-runner`, and a
+ *    bare substring search over a line that contains its own name is the kind
+ *    of check that works until it does not;
+ *  - anything else is `unknown`, never a guess.
+ *
+ * ONE shell per call, like `isRunnerServiceInstalled` — callers that need both
+ * the install decision and the liveness evidence call THIS once and derive the
+ * first from the result (a6's "ask the machine-level question exactly once per
+ * invocation" rule).
+ */
+export function readRunnerServiceState(deps: Pick<RunnerEnrolDeps, 'shell'>): RunnerServiceState {
   const r = deps.shell(RUNNER_CLI_BIN, ['service', 'status']);
-  if (r.code !== 0) return false;
-  const combined = `${r.stdout}\n${r.stderr}`.toLowerCase();
-  return !combined.includes('not installed');
+  if (r.code !== 0) return 'not-installed';
+  const combined = `${r.stdout}\n${r.stderr}`;
+  if (combined.toLowerCase().includes('not installed')) return 'not-installed';
+  const m = /:\s*(running|stopped|unknown)\s*\(/i.exec(combined);
+  if (m === null) return 'unknown';
+  const word = m[1]!.toLowerCase();
+  return word === 'running' ? 'running' : word === 'stopped' ? 'stopped' : 'unknown';
 }
 
 /** What this machine's `pipeline-runner` identity says about itself — the

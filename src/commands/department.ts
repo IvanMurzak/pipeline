@@ -105,6 +105,7 @@ import {
 // a9: the steps that leave this process — HTTP to the control plane, argv to
 // `pipeline-runner`. See that module's doc for the three rules it keeps.
 import {
+  assessLiveness,
   bindRuntime,
   claimInstall,
   departmentUrlFor,
@@ -119,12 +120,14 @@ import {
   resolveLocalDepartmentId,
   retireDepartmentRequest,
   runtimeBindingFor,
+  SUPERVISOR_FOREGROUND_HINT,
   unbindRuntime,
   type CloudContext,
   type DeptTaskSummary,
   type DeptUsage,
   type DepartmentProfile,
   type InstallSummary,
+  type Liveness,
   type ServeDeps,
   type ServeFetch,
   type ServeHttpResponse,
@@ -153,10 +156,11 @@ import {
 } from '../lib/cloud-config';
 import {
   enrolRunner,
-  isRunnerServiceInstalled,
   readRunnerIdentity,
+  readRunnerServiceState,
   realShell,
   type RunnerEnrolDeps,
+  type RunnerServiceState,
   type ShellRunner,
 } from '../lib/runner-enrol';
 // a9 (step 2): the ONE authentication ladder, shared with `cloud connect`
@@ -1020,6 +1024,14 @@ export interface ServeCommandDeps {
    *  passed and `isInteractive()` is true. Optional — production reads one
    *  line from stdin (`defaultConfirm`). */
   confirm?: (message: string) => Promise<boolean>;
+  /**
+   * x13 (step 9): the only wait `serve` ever performs — the short backoff
+   * between re-reads of the department's `online` flag while a RUNNING
+   * supervisor has not yet been seen by the control plane. Optional;
+   * production is a real timer. Injected so the verification tests are
+   * instant and so the wait can never leak into a suite as a real sleep.
+   */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 function realHostname(): string {
@@ -1049,6 +1061,7 @@ export function realServeDeps(): ServeCommandDeps {
       const { authenticateApi, realDeps } = await import('./cloud');
       return await authenticateApi(realDeps, opts);
     },
+    sleep: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
   };
 }
 
@@ -1118,6 +1131,10 @@ function serveHelpText(): string {
     'performs only what is missing. Nothing is ever written INSIDE the department\n' +
     'folder — the credential lives in the per-user store and the runtime binding in\n' +
     "pipeline-runner's own config dir (written by `pipeline-runner bind`).\n\n" +
+    'The final line reports only what was OBSERVED: `online` is printed when the\n' +
+    'control plane says so, `registered — not serving` with the reason and the fix\n' +
+    'when this machine has no running supervisor (or the department is offline), and\n' +
+    '`could not confirm it is live` when neither could be read.\n\n' +
     'Options:\n' +
     `  --file <path>          The manifest (default: ./${DEPARTMENT_MANIFEST_FILENAME}).\n` +
     '  --org <slug>           Which org to publish into (required with a machine\n' +
@@ -1134,9 +1151,9 @@ function serveHelpText(): string {
     '  --json                 Emit one JSON object on stdout; progress to stderr.\n' +
     '  --help, -h             Show this help.\n' +
     '\n' +
-    'Exit: 0 online / waiting for approval · 1 a step failed (the department may be\n' +
-    'registered and not serving — re-run to converge) · 2 usage, or a missing or\n' +
-    'unparseable manifest.\n'
+    'Exit: 0 online / waiting for approval / could not be confirmed (every step this\n' +
+    'command controls succeeded) · 1 a step failed, or the department is registered\n' +
+    'and NOT serving · 2 usage, or a missing or unparseable manifest.\n'
   );
 }
 
@@ -1151,6 +1168,23 @@ interface ServeJson {
   binding: { adapter: string; command: string; lifecycle?: string } | null;
   supervisor: 'installed' | 'already-installed' | 'skipped' | null;
   install: { id: string; pendingApproval: boolean; policy?: string; changed: boolean } | null;
+  /**
+   * x13: the EVIDENCE behind the state, so a scripted caller gets the same
+   * three-way distinction the transcript does and never has to infer liveness
+   * from `ok`. `verdict` is the answer; `supervisorState` and `cloudOnline`
+   * are what it was derived from — including `cloudOnline: null`, which is
+   * "not observed" and is deliberately not spelled `false`. `null` on this
+   * key means step 9 was never reached (an earlier step failed, or the
+   * install is awaiting approval).
+   */
+  liveness: {
+    verdict: Liveness['verdict'];
+    supervisorState: RunnerServiceState;
+    cloudOnline: boolean | null;
+    reason?: string;
+    nextStep?: string;
+    cloudError?: string;
+  } | null;
   url: string;
   warnings: string[];
   error?: string;
@@ -1170,6 +1204,12 @@ interface ServeJson {
  *  - **6 before 7**: binding first means a machine that ALREADY runs a
  *    supervisor is serving the moment the binding lands (b1 signals a reload),
  *    and the service step is then a no-op rather than a restart.
+ *  - **9 is a MEASUREMENT, not a summary** (x13). Steps 1–8 are things this
+ *    command does; whether the result is actually taking work is a thing only
+ *    the machine and the control plane know. Step 9 asks both and says only
+ *    what they answered — see `confirmOnline` below and `assessLiveness` in
+ *    `lib/department-serve.ts`. Deriving the final line from "the previous
+ *    eight steps returned ok" is exactly the bug x13 fixed.
  *
  * There is no rollback and none is wanted (05 §5): a registered-but-not-
  * serving department is inert and visible, and deleting cloud state because a
@@ -1298,6 +1338,7 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
     binding: null,
     supervisor: null,
     install: null,
+    liveness: null,
     url: departmentUrlFor(auth.server, request.slug),
     warnings,
   };
@@ -1342,7 +1383,10 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
   const runnerDeps: RunnerEnrolDeps = { shell: deps.shell, fetch: deps.fetch, out: say, err: say };
   // ONE `service status` shell per invocation (a6's rule): the answer is used
   // both to decide whether enrolment may install a service and by step 7.
-  const serviceInstalled = isRunnerServiceInstalled(runnerDeps);
+  // x13: the FULL state is kept, not just the boolean — `stopped` and
+  // `running` are both "installed", and step 9 may not treat them alike.
+  let serviceState: RunnerServiceState = readRunnerServiceState(runnerDeps);
+  const serviceInstalled = serviceState !== 'not-installed';
   const identity = readRunnerIdentity(runnerDeps);
   const runnerName =
     a.runnerName && a.runnerName.length > 0 ? a.runnerName : deps.hostname();
@@ -1402,7 +1446,7 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
   if (a.foreground) {
     json.supervisor = 'skipped';
     say('· Supervisor      not installed (--foreground)\n');
-    say(`    Run it here:  ${RUNNER_CLI_BIN_HINT}\n`);
+    say(`    Run it here:  ${SUPERVISOR_FOREGROUND_HINT}\n`);
   } else {
     const supervisor = ensureSupervisor(deps, serviceInstalled);
     if (!supervisor.ok) {
@@ -1412,11 +1456,26 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
       );
     }
     json.supervisor = supervisor.action;
-    say(
-      supervisor.action === 'installed'
-        ? '✓ Supervisor      installed, starts on boot\n'
-        : '✓ Supervisor      already installed (shared with cloud pipeline dispatch)\n',
-    );
+    if (supervisor.action === 'installed') {
+      // x13: the world just changed, so the state read at step 5 is stale.
+      // This is the ONE case that re-shells `service status` — a6's rule is
+      // "ask the machine-level question once", not "never notice an answer
+      // this command itself invalidated". Windows' backend starts the service
+      // best-effort (`sc start`'s exit code is deliberately not checked), so
+      // "install succeeded" is not by itself evidence that one is running.
+      serviceState = readRunnerServiceState(runnerDeps);
+      say(
+        serviceState === 'running'
+          ? '✓ Supervisor      installed, starts on boot\n'
+          : '⚠ Supervisor      installed, but it is not running\n',
+      );
+    } else if (serviceState === 'running') {
+      say('✓ Supervisor      already installed and running (shared with cloud pipeline dispatch)\n');
+    } else if (serviceState === 'stopped') {
+      say('⚠ Supervisor      already installed, but NOT running\n');
+    } else {
+      say('· Supervisor      already installed (its state could not be read)\n');
+    }
   }
 
   // ---- Step 8: claim the install, then the org's approval policy ----------
@@ -1442,23 +1501,96 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
     return finish(0, 'waiting-approval');
   }
 
-  if (a.foreground) {
-    // 05 §5's closing rule: a department that is registered but cannot take
-    // work reports `○ registered — not serving`, NEVER a bare `online`.
-    // Nothing is supervising it until the operator starts one by hand.
-    const reason = `no supervisor service on this machine (--foreground) — run \`${RUNNER_CLI_BIN_HINT}\``;
-    say(`\n${renderState('registered-not-serving', department.slug, reason)}\n`);
-    return finish(1, 'registered-not-serving', reason);
+  // x13: everything above this point is a thing `serve` DID. What follows is
+  // the one thing it can only OBSERVE — whether the result is actually taking
+  // work — and 05 §5's closing rule ("never a bare `online`") is enforced by
+  // making the claim a function of that observation rather than of the steps.
+  const cloud = await confirmOnline(deps, ctx, department.id, serviceState, say);
+  const liveness = assessLiveness({
+    supervisor: serviceState,
+    foreground: a.foreground,
+    cloudOnline: cloud.online,
+    ...(cloud.error !== undefined ? { cloudError: cloud.error } : {}),
+    server: auth.server,
+  });
+  json.liveness = {
+    verdict: liveness.verdict,
+    supervisorState: serviceState,
+    cloudOnline: cloud.online,
+    ...(liveness.verdict !== 'live' ? { reason: liveness.reason, nextStep: liveness.nextStep } : {}),
+    ...(cloud.error !== undefined ? { cloudError: cloud.error } : {}),
+  };
+
+  if (liveness.verdict === 'live') {
+    say(`\n${renderState('online', department.slug)}\n\n`);
+    say(`Callable now:  "ask the ${department.slug} department to …"\n`);
+    return finish(0, 'online');
   }
 
-  say(`\n${renderState('online', department.slug)}\n\n`);
-  say(`Callable now:  "ask the ${department.slug} department to …"\n`);
-  return finish(0, 'online');
+  if (liveness.verdict === 'undetermined') {
+    // Every step this command controls succeeded; only the confirmation did
+    // not. That is not a failed `serve`, so it is not exit 1 — but it is also
+    // not `online`, so it does not get that line.
+    say(`\n${renderState('unconfirmed', department.slug, liveness.reason)}\n`);
+    say(`   ${liveness.nextStep}\n`);
+    return finish(0, 'unconfirmed');
+  }
+
+  // Registered, bound and claimed — and positively NOT taking work. 05 §5's
+  // closing rule, with the cause and the remedy attached.
+  say(`\n${renderState('registered-not-serving', department.slug, liveness.reason)}\n`);
+  say(`   ${liveness.nextStep}\n`);
+  return finish(1, 'registered-not-serving', liveness.reason);
 }
 
-/** Printed by `--foreground`; kept as a named constant so the two places that
- *  talk about running a supervisor by hand cannot drift. */
-const RUNNER_CLI_BIN_HINT = 'pipeline-runner start';
+/** The re-read schedule when a RUNNING supervisor has not been seen by the
+ *  control plane yet — ~15s worst case, and only ever spent on the one case
+ *  where a `false` is likely to become a `true` on its own. */
+const ONLINE_RECHECK_BACKOFF_MS = [1000, 2000, 4000, 8000] as const;
+
+/**
+ * x13, step 9's remote half: ask the control plane whether it considers this
+ * department online — the ONE authority for that word (a department is online
+ * iff an `active` install's runner holds a live gateway connection).
+ *
+ * **Why this tolerates a short delay.** On a machine where step 7 just
+ * installed the service, the supervisor is starting while this runs; its
+ * gateway connection — and therefore the department's online-ness — arrives a
+ * moment later. Reading once and reporting "not serving" would replace one
+ * wrong answer with another on the healthiest possible path. So when a
+ * supervisor is RUNNING and the answer is still `false`, this re-reads on a
+ * short backoff (~15s worst case) and says out loud that it is waiting. It
+ * never waits when there is nothing to wait FOR: a stopped or unreadable
+ * supervisor is not going to connect, and a transport failure will not fix
+ * itself inside fifteen seconds.
+ *
+ * A read that fails returns `online: null` — "not observed" — and never
+ * `false`. That distinction is the whole point: `false` is a fact about the
+ * department, `null` is a fact about this command.
+ */
+async function confirmOnline(
+  deps: ServeCommandDeps,
+  ctx: CloudContext,
+  departmentId: string,
+  supervisor: RunnerServiceState,
+  say: (s: string) => void,
+): Promise<{ online: boolean | null; error?: string }> {
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let announced = false;
+
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetchDepartmentProfile(deps, ctx, departmentId);
+    if (!res.ok) return { online: null, error: res.message };
+    if (res.profile.online) return { online: true };
+    // Only a running supervisor is worth waiting for.
+    if (supervisor !== 'running' || attempt >= ONLINE_RECHECK_BACKOFF_MS.length) return { online: false };
+    if (!announced) {
+      say('· Confirming      waiting for the supervisor to report in …\n');
+      announced = true;
+    }
+    await sleep(ONLINE_RECHECK_BACKOFF_MS[attempt]!);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Shared: resolve `manifest.name` to a department id (task a10)

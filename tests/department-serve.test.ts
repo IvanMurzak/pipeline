@@ -31,6 +31,7 @@ import { join, resolve } from 'node:path';
 import { runDepartmentServe, type ServeCommandDeps } from '../src/commands/department';
 import {
   appOriginFor,
+  assessLiveness,
   buildBindArgs,
   departmentUrlFor,
   renderState,
@@ -140,11 +141,32 @@ interface CloudScript {
   claimBody?: Record<string, unknown>;
   /** Throw (a transport failure) for any URL containing this substring. */
   offlineOn?: string;
+  /**
+   * x13: what `GET /api/v1/departments/:id` reports for `online` — the ONE
+   * authority for the word `online`, and the read `serve` had never made.
+   * Defaults to `true` (a healthy machine), so every pre-existing test keeps
+   * asserting the transcript it always asserted.
+   */
+  profileOnline?: boolean;
+  /** x13: `online` answers, in order, for the retry path — the last one
+   *  sticks. Overrides `profileOnline` when present. */
+  profileOnlineSequence?: boolean[];
+  /** x13: make the profile read itself fail (a non-200), so the
+   *  "could not confirm" branch is reachable without breaking every other
+   *  call the way `offlineOn` would. */
+  profileStatus?: number;
 }
 
 interface ShellScript {
   /** Does this machine already have a supervisor service? */
   serviceInstalled?: boolean;
+  /** x13: and is it RUNNING? Only meaningful with `serviceInstalled: true`;
+   *  defaults to `running`, which is what the fake always used to report. */
+  serviceState?: 'running' | 'stopped' | 'unknown';
+  /** x13: what `service status` reports AFTER a successful `service install`
+   *  (the second read). Defaults to `running` — every backend's `install`
+   *  starts the service. */
+  serviceStateAfterInstall?: 'running' | 'stopped' | 'unknown';
   /** Existing runner identity (a machine that is already enrolled). */
   identityRunnerId?: string | null;
   registerCode?: number;
@@ -175,6 +197,8 @@ function makeWorld(opts: { cwd: string; cloud?: CloudScript; shell?: ShellScript
   const shells: ShellCall[] = [];
   let outBuf = '';
   let errBuf = '';
+  let profileReads = 0;
+  let serviceStatusReads = 0;
 
   const deps: ServeCommandDeps = {
     fetch: async (url, init) => {
@@ -197,6 +221,20 @@ function makeWorld(opts: { cwd: string; cloud?: CloudScript; shell?: ShellScript
         if (status !== 200) return reply(status, { error: 'patch refused' });
         return reply(200, {
           department: { id: DEPT_ID, slug: 'unity-review', manifestDigest: digestOf(init), enabled: true, retired: false },
+        });
+      }
+      // x13: step 9's confirmation read — the department's own profile.
+      if (url.endsWith(`/api/v1/departments/${DEPT_ID}`) && init.method === 'GET') {
+        profileReads++;
+        const status = cloud.profileStatus ?? 200;
+        if (status !== 200) return reply(status, { error: 'profile unavailable' });
+        const seq = cloud.profileOnlineSequence;
+        const online =
+          seq !== undefined
+            ? (seq[Math.min(profileReads - 1, seq.length - 1)] ?? false)
+            : (cloud.profileOnline ?? true);
+        return reply(200, {
+          department: { id: DEPT_ID, slug: 'unity-review', enabled: true, retired: false, online, manifestDigest: null },
         });
       }
       if (url.endsWith('/api/v1/runners') && init.method === 'POST') {
@@ -225,9 +263,24 @@ function makeWorld(opts: { cwd: string; cloud?: CloudScript; shell?: ShellScript
         return sh.cliAvailable === false ? { code: 127, stdout: '', stderr: '' } : { code: 0, stdout: '0.9.0\n', stderr: '' };
       }
       if (cmd === 'pipeline-runner' && args[0] === 'service' && args[1] === 'status') {
-        return sh.serviceInstalled
-          ? { code: 0, stdout: '[pipeline-runner] pipeline-runner.service: running (enabled)\n', stderr: '' }
-          : { code: 0, stdout: '[pipeline-runner] pipeline-runner.service is not installed\n', stderr: '' };
+        serviceStatusReads++;
+        // x13: the FIRST read is the machine as `serve` found it; a second
+        // read only ever happens after this run installed a service, and must
+        // therefore describe the machine as this run left it.
+        const state =
+          serviceStatusReads > 1
+            ? (sh.serviceStateAfterInstall ?? 'running')
+            : sh.serviceInstalled
+              ? (sh.serviceState ?? 'running')
+              : null;
+        if (state === null) {
+          return { code: 0, stdout: '[pipeline-runner] pipeline-runner.service is not installed\n', stderr: '' };
+        }
+        return {
+          code: 0,
+          stdout: `[pipeline-runner] pipeline-runner.service: ${state} (enabled)\n`,
+          stderr: '',
+        };
       }
       if (cmd === 'pipeline-runner' && args[0] === 'status') {
         const id = sh.identityRunnerId;
@@ -261,6 +314,9 @@ function makeWorld(opts: { cwd: string; cloud?: CloudScript; shell?: ShellScript
     env: {},
     cwd: opts.cwd,
     hostname: () => 'unity-box',
+    // x13: step 9's backoff, made instant. A real `sleep` here would put up to
+    // 15 seconds of wall clock into any test that exercises the retry.
+    sleep: async () => {},
     authenticate: async () => {
       if (opts.authError !== undefined) throw new Error(opts.authError);
       return {
@@ -846,6 +902,333 @@ describe('serve — DoD box 4: ○ registered — not serving, never a bare onli
 });
 
 // ---------------------------------------------------------------------------
+// x13 — `serve` never claims an outcome it has not observed
+// ---------------------------------------------------------------------------
+//
+// The defect: `serve` ended with `● <slug> — online, ready for work` after
+// writing a local binding, having checked nothing. In the `e2` gate that line
+// was printed while the control plane reported `online: false`, because the
+// machine's supervisor service was `stopped (auto-start)`.
+//
+// Three outcomes, three transcripts, three exit codes:
+//   verified live      ● online, ready for work                       exit 0
+//   bound, not live    ○ registered — not serving (<why>) + the fix   exit 1
+//   undetermined       ◌ could not confirm it is live (<why>)         exit 0
+
+describe('serve — x13: the online claim is an observation, not an assumption', () => {
+  test('VERIFIED LIVE: the claim is made only after the control plane says so', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({ cwd: dir, cloud: { profileOnline: true } });
+
+    const code = await runDepartmentServe([], w.deps);
+
+    expect(code).toBe(0);
+    expect(w.out()).toContain('● unity-review — online, ready for work');
+    // The claim rests on a real read of the ONE authority for the word.
+    const profileReads = w.fetches.filter(
+      (f) => f.url === `${SERVER}/api/v1/departments/${DEPT_ID}` && f.init.method === 'GET',
+    );
+    expect(profileReads).toHaveLength(1);
+  });
+
+  test('BOUND BUT NOT LIVE: the e2 gate, reproduced — a stopped supervisor never reads as online', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      // The machine exactly as the e2 gate found it: a supervisor service that
+      // exists and is not running, and a control plane that says so.
+      shell: { serviceInstalled: true, serviceState: 'stopped', identityRunnerId: RUNNER_ID },
+      cloud: { profileOnline: false },
+    });
+
+    const code = await runDepartmentServe([], w.deps);
+
+    expect(code).toBe(1);
+    const out = w.out();
+    expect(out).not.toContain('online, ready for work');
+    expect(out).toContain('○ unity-review — registered — not serving');
+    expect(out).toContain("this machine's supervisor service is installed but NOT running");
+    // Actionable: the fix is named, not left for the user to discover.
+    expect(out).toContain('Start it:  pipeline-runner service install');
+    // …and the supervisor step said so where it was found, too.
+    expect(out).toContain('⚠ Supervisor      already installed, but NOT running');
+    // D26 is intact: a stopped service is still a service, so no rival one.
+    expect(w.shells.filter((c) => c.args[0] === 'service' && c.args[1] === 'install')).toHaveLength(0);
+    // Everything `serve` actually DOES still happened — this is an honest
+    // report of an incomplete outcome, not an aborted run.
+    expect(shellArgs(w, 'bind')).toHaveLength(1);
+    expect(w.fetches.some((f) => f.url.includes('/installs'))).toBe(true);
+  });
+
+  test('BOUND BUT NOT LIVE survives the network: a stopped supervisor is a LOCAL fact', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: { serviceInstalled: true, serviceState: 'stopped', identityRunnerId: RUNNER_ID },
+      cloud: { profileStatus: 503 },
+    });
+
+    const code = await runDepartmentServe([], w.deps);
+
+    expect(code).toBe(1);
+    expect(w.out()).toContain('○ unity-review — registered — not serving');
+    expect(w.out()).toContain('installed but NOT running');
+    expect(w.out()).not.toContain('could not confirm');
+  });
+
+  test('a supervisor that is not running is never WAITED for — one read, not five', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: { serviceInstalled: true, serviceState: 'stopped', identityRunnerId: RUNNER_ID },
+      cloud: { profileOnline: false },
+    });
+
+    await runDepartmentServe([], w.deps);
+
+    expect(
+      w.fetches.filter((f) => f.url === `${SERVER}/api/v1/departments/${DEPT_ID}` && f.init.method === 'GET'),
+    ).toHaveLength(1);
+    expect(w.out()).not.toContain('waiting for the supervisor to report in');
+  });
+
+  test('a RUNNING supervisor the cloud has not seen yet is waited for, briefly, then reported honestly', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: { serviceInstalled: true, serviceState: 'running', identityRunnerId: RUNNER_ID },
+      cloud: { profileOnline: false },
+    });
+
+    const code = await runDepartmentServe([], w.deps);
+
+    expect(code).toBe(1);
+    // 1 first read + 4 backoff re-reads, and then it stops.
+    expect(
+      w.fetches.filter((f) => f.url === `${SERVER}/api/v1/departments/${DEPT_ID}` && f.init.method === 'GET'),
+    ).toHaveLength(5);
+    const out = w.out();
+    expect(out).toContain('· Confirming      waiting for the supervisor to report in');
+    expect(out).toContain('○ unity-review — registered — not serving');
+    expect(out).toContain(`does not see it connected`);
+    expect(out).toContain('Check the runner:  pipeline-runner status');
+    expect(out).not.toContain('online, ready for work');
+  });
+
+  test('the fresh-install race is not reported as a failure: a late `online` still ends in ● online', async () => {
+    // A machine that had no service: step 7 installs and starts one, and the
+    // supervisor's gateway connection lands a moment after `serve` first asks.
+    const dir = departmentProject();
+    const w = makeWorld({ cwd: dir, cloud: { profileOnlineSequence: [false, false, true] } });
+
+    const code = await runDepartmentServe([], w.deps);
+
+    expect(code).toBe(0);
+    expect(w.out()).toContain('● unity-review — online, ready for work');
+    expect(
+      w.fetches.filter((f) => f.url === `${SERVER}/api/v1/departments/${DEPT_ID}` && f.init.method === 'GET'),
+    ).toHaveLength(3);
+  });
+
+  test('UNDETERMINED: an unreadable control plane is not "online" and is not a failure either', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: { serviceInstalled: true, serviceState: 'running', identityRunnerId: RUNNER_ID },
+      cloud: { profileStatus: 500 },
+    });
+
+    const code = await runDepartmentServe([], w.deps);
+
+    // Every step `serve` controls succeeded; only the confirmation did not.
+    expect(code).toBe(0);
+    const out = w.out();
+    expect(out).not.toContain('online, ready for work');
+    expect(out).toContain('◌ unity-review — registered and bound; could not confirm it is live');
+    expect(out).toContain('Check it:  pipeline department status');
+  });
+
+  test('a supervisor whose own state cannot be read is "unknown", never assumed running', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: { serviceInstalled: true, serviceState: 'unknown', identityRunnerId: RUNNER_ID },
+      cloud: { profileOnline: false },
+    });
+
+    const code = await runDepartmentServe([], w.deps);
+
+    expect(code).toBe(1);
+    expect(w.out()).toContain('· Supervisor      already installed (its state could not be read)');
+    expect(w.out()).toContain("this machine's supervisor state could not be read");
+    expect(w.out()).toContain('pipeline-runner service status');
+  });
+
+  test('an install that reports 0 but leaves nothing running is not reported as ready', async () => {
+    // Windows' backend runs `sc start` best-effort — its exit code is
+    // deliberately not checked — so `service install` exiting 0 is not by
+    // itself evidence that a supervisor is running.
+    const dir = departmentProject();
+    const w = makeWorld({ cwd: dir, shell: { serviceStateAfterInstall: 'stopped' }, cloud: { profileOnline: false } });
+
+    const code = await runDepartmentServe([], w.deps);
+
+    expect(code).toBe(1);
+    expect(w.out()).toContain('⚠ Supervisor      installed, but it is not running');
+    expect(w.out()).toContain('○ unity-review — registered — not serving');
+    expect(w.out()).not.toContain('online, ready for work');
+    // The world changed under `serve`, so it looked again — and only then.
+    expect(w.shells.filter((c) => c.args[0] === 'service' && c.args[1] === 'status')).toHaveLength(2);
+  });
+
+  test('a department the cloud reports online while THIS machine is down says both', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: { serviceInstalled: true, serviceState: 'stopped', identityRunnerId: RUNNER_ID },
+      cloud: { profileOnline: true },
+    });
+
+    const code = await runDepartmentServe([], w.deps);
+
+    expect(code).toBe(1);
+    expect(w.out()).toContain('another machine is serving it, but this one is not');
+    expect(w.out()).not.toContain('online, ready for work');
+  });
+
+  test('--json carries the same three-way distinction, and never spells "not observed" as false', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: { serviceInstalled: true, serviceState: 'stopped', identityRunnerId: RUNNER_ID },
+      cloud: { profileStatus: 503 },
+    });
+
+    const code = await runDepartmentServe(['--json'], w.deps);
+
+    expect(code).toBe(1);
+    const payload = JSON.parse(w.out()) as Record<string, unknown>;
+    expect(payload['ok']).toBe(false);
+    expect(payload['state']).toBe('registered-not-serving');
+    const liveness = payload['liveness'] as Record<string, unknown>;
+    expect(liveness['verdict']).toBe('not-live');
+    expect(liveness['supervisorState']).toBe('stopped');
+    // The distinction the whole task is about: "not observed" is null, not false.
+    expect(liveness['cloudOnline']).toBeNull();
+    expect(String(liveness['reason'])).toContain('installed but NOT running');
+    expect(String(liveness['nextStep'])).toContain('pipeline-runner service install');
+    // D27: `--json` is one object on stdout, every progress line on stderr,
+    // and the non-interactive flag rides down the auth ladder untouched.
+    expect(w.err()).toContain('✓ Registered');
+    expect(w.out().trimEnd().endsWith('}')).toBe(true);
+  });
+
+  test('--json on a live department reports the verdict and the evidence behind it', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({ cwd: dir, cloud: { profileOnline: true } });
+
+    expect(await runDepartmentServe(['--json'], w.deps)).toBe(0);
+
+    const payload = JSON.parse(w.out()) as Record<string, unknown>;
+    expect(payload['state']).toBe('online');
+    expect(payload['liveness']).toEqual({ verdict: 'live', supervisorState: 'running', cloudOnline: true });
+  });
+
+  test('--json on an unconfirmed run is ok:true with state "unconfirmed" — never ok:true with state "online"', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: { serviceInstalled: true, serviceState: 'running', identityRunnerId: RUNNER_ID },
+      cloud: { profileStatus: 500 },
+    });
+
+    expect(await runDepartmentServe(['--json'], w.deps)).toBe(0);
+
+    const payload = JSON.parse(w.out()) as Record<string, unknown>;
+    expect(payload['ok']).toBe(true);
+    expect(payload['state']).toBe('unconfirmed');
+    const liveness = payload['liveness'] as Record<string, unknown>;
+    expect(liveness['verdict']).toBe('undetermined');
+    expect(liveness['cloudOnline']).toBeNull();
+    expect(String(liveness['cloudError']).length).toBeGreaterThan(0);
+  });
+
+  test('D27 is intact: `--json` still declines the interactive ladder', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({ cwd: dir });
+    let sawJson: boolean | undefined;
+    const inner = w.deps.authenticate;
+    w.deps.authenticate = async (opts) => {
+      sawJson = opts.json;
+      return await inner(opts);
+    };
+
+    await runDepartmentServe(['--json'], w.deps);
+
+    expect(sawJson).toBe(true);
+  });
+
+  test('--foreground on a machine that has no supervisor still refuses to claim online', async () => {
+    // x13 must not undo a9's own rule, nor duplicate it: `--foreground` runs
+    // through the SAME verification, and lands on the same answer.
+    const dir = departmentProject();
+    const w = makeWorld({ cwd: dir, cloud: { profileOnline: false } });
+
+    const code = await runDepartmentServe(['--foreground'], w.deps);
+
+    expect(code).toBe(1);
+    expect(w.out()).toContain('○ unity-review — registered — not serving');
+    expect(w.out()).toContain('no supervisor service on this machine (--foreground)');
+    expect(w.out()).toContain('Run one here:  pipeline-runner start');
+  });
+
+  test('--foreground on a machine that DOES have a running, connected supervisor tells the truth', async () => {
+    // The old code printed "no supervisor service on this machine" for every
+    // `--foreground` run — its own small unverified claim, in the other
+    // direction. The evidence decides now.
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: { serviceInstalled: true, serviceState: 'running', identityRunnerId: RUNNER_ID },
+      cloud: { profileOnline: true },
+    });
+
+    const code = await runDepartmentServe(['--foreground'], w.deps);
+
+    expect(code).toBe(0);
+    expect(w.out()).toContain('● unity-review — online, ready for work');
+    expect(w.shells.filter((c) => c.args[0] === 'service' && c.args[1] === 'install')).toHaveLength(0);
+  });
+
+  test('an approval-pending claim is still ⏸ — x13 adds no read on a path with nothing to confirm', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      cloud: {
+        claimBody: { install: { id: INSTALL_ID, pendingApproval: true }, changed: true, approval_policy: 'always' },
+      },
+    });
+
+    expect(await runDepartmentServe(['--json'], w.deps)).toBe(0);
+
+    const payload = JSON.parse(w.out()) as Record<string, unknown>;
+    expect(payload['state']).toBe('waiting-approval');
+    expect(payload['liveness']).toBeNull();
+    expect(w.fetches.some((f) => f.url === `${SERVER}/api/v1/departments/${DEPT_ID}` && f.init.method === 'GET')).toBe(false);
+  });
+
+  test('x11 is not regressed: a bind that fails still aborts before the claim, and prints no state at all', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({ cwd: dir, shell: { bindCode: 1, bindStderr: 'nope' } });
+
+    expect(await runDepartmentServe([], w.deps)).toBe(1);
+    expect(w.out()).not.toContain('online');
+    expect(w.out()).not.toContain('could not confirm');
+    expect(w.fetches.some((f) => f.url.includes('/installs'))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // pure units
 // ---------------------------------------------------------------------------
 
@@ -865,6 +1248,87 @@ describe('department-serve pure helpers', () => {
     const notServing = renderState('registered-not-serving', 'd', 'because');
     expect(notServing).toContain('○ d — registered — not serving');
     expect(notServing).not.toContain('online');
+    // x13's third outcome: distinct marker, distinct sentence, no claim.
+    const unconfirmed = renderState('unconfirmed', 'd', 'the server did not answer');
+    expect(unconfirmed).toContain('◌ d — registered and bound; could not confirm it is live');
+    expect(unconfirmed).toContain('(the server did not answer)');
+    expect(unconfirmed).not.toContain('online');
+  });
+
+  test('assessLiveness — the rule, without a network, a service or a clock (x13)', () => {
+    const base = { foreground: false, server: 'https://api.example.dev' } as const;
+
+    // Verified live: the authority said so.
+    expect(assessLiveness({ ...base, supervisor: 'running', cloudOnline: true })).toEqual({ verdict: 'live' });
+
+    // A supervisor that is not running is checked FIRST — it is the local,
+    // actionable fact, and it holds whether or not the cloud answered.
+    for (const cloudOnline of [false, null] as const) {
+      const stopped = assessLiveness({ ...base, supervisor: 'stopped', cloudOnline });
+      expect(stopped.verdict).toBe('not-live');
+      if (stopped.verdict !== 'not-live') return;
+      expect(stopped.reason).toContain('installed but NOT running');
+      expect(stopped.nextStep).toContain('pipeline-runner service install');
+
+      const none = assessLiveness({ ...base, supervisor: 'not-installed', cloudOnline });
+      expect(none.verdict).toBe('not-live');
+      if (none.verdict !== 'not-live') return;
+      expect(none.reason).toContain('no supervisor service');
+    }
+
+    // …and `--foreground` gets the remedy that fits it.
+    const fg = assessLiveness({ ...base, foreground: true, supervisor: 'not-installed', cloudOnline: false });
+    expect(fg.verdict).toBe('not-live');
+    if (fg.verdict !== 'not-live') return;
+    expect(fg.reason).toContain('--foreground');
+    expect(fg.nextStep).toContain('pipeline-runner start');
+
+    // `--foreground` on a machine that HAS a stopped service still describes
+    // the machine truthfully — the service exists, it is simply down.
+    const fgStopped = assessLiveness({ ...base, foreground: true, supervisor: 'stopped', cloudOnline: false });
+    expect(fgStopped.verdict).toBe('not-live');
+    if (fgStopped.verdict !== 'not-live') return;
+    expect(fgStopped.reason).toContain('installed but NOT running');
+    expect(fgStopped.reason).not.toContain('no supervisor service');
+    expect(fgStopped.nextStep).toContain('pipeline-runner start');
+
+    // A department another machine is serving is not denied just because this
+    // one is down — both facts are reported.
+    const elsewhere = assessLiveness({ ...base, supervisor: 'stopped', cloudOnline: true });
+    expect(elsewhere.verdict).toBe('not-live');
+    if (elsewhere.verdict !== 'not-live') return;
+    expect(elsewhere.reason).toContain('another machine is serving it, but this one is not');
+
+    // A running supervisor the cloud cannot see: not live, and it says which
+    // half is the mystery.
+    const unseen = assessLiveness({ ...base, supervisor: 'running', cloudOnline: false });
+    expect(unseen.verdict).toBe('not-live');
+    if (unseen.verdict !== 'not-live') return;
+    expect(unseen.reason).toContain('does not see it connected');
+
+    // Nothing observed either way.
+    const undet = assessLiveness({ ...base, supervisor: 'running', cloudOnline: null, cloudError: 'HTTP 500' });
+    expect(undet.verdict).toBe('undetermined');
+    if (undet.verdict !== 'undetermined') return;
+    expect(undet.reason).toContain('HTTP 500');
+    expect(undet.nextStep).toContain('pipeline department status');
+  });
+
+  test('assessLiveness never returns "live" without a cloud answer of exactly true', () => {
+    const supervisors = ['running', 'stopped', 'not-installed', 'unknown'] as const;
+    const answers = [false, null] as const;
+    for (const supervisor of supervisors) {
+      for (const cloudOnline of answers) {
+        for (const foreground of [false, true]) {
+          const v = assessLiveness({ supervisor, foreground, cloudOnline, server: 's' });
+          expect(v.verdict).not.toBe('live');
+          // Every non-live outcome is actionable — no dead ends.
+          if (v.verdict === 'live') return;
+          expect(v.reason.length).toBeGreaterThan(0);
+          expect(v.nextStep.length).toBeGreaterThan(0);
+        }
+      }
+    }
   });
 
   test('an engine that names its own command binds it, args and cwd included', () => {

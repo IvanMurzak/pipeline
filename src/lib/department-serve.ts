@@ -54,7 +54,7 @@
 import { resolve } from 'node:path';
 import type { DepartmentManifest, DepartmentRegistrationRequest } from './department-manifest';
 import { adapterIdForEngine, engineDefinition, ENGINES } from './department-manifest';
-import type { ShellRunner } from './runner-enrol';
+import type { RunnerServiceState, ShellRunner } from './runner-enrol';
 
 // ---------------------------------------------------------------------------
 // Seams
@@ -554,9 +554,12 @@ export type BindOutcome = { ok: true; detail: string } | { ok: false; message: s
 /**
  * Step 6: hand the binding to `pipeline-runner bind`, which writes its own
  * file-backed store (b1) and signals a RUNNING supervisor to reload it — the
- * reason 05 §5's transcript can end in `● online` instead of "restart the
- * supervisor". This function never touches `departments.json` itself; see
- * rule 1 in the module doc.
+ * reason a machine that already has one can be live immediately, instead of
+ * 05 §5's transcript having to say "restart the supervisor". Note *running*:
+ * writing the binding is what makes the department servable, not what makes
+ * it served, which is why step 9 verifies rather than assumes (x13). This
+ * function never touches `departments.json` itself; see rule 1 in the module
+ * doc.
  */
 export function bindRuntime(deps: ServeDeps, departmentId: string, binding: RuntimeBinding): BindOutcome {
   const r = deps.shell(RUNNER_CLI_BIN, buildBindArgs(departmentId, binding));
@@ -682,8 +685,19 @@ export async function claimInstall(
  * A department that is registered but cannot take work is
  * `registered-not-serving` and says why — never a bare `online`, which is the
  * exact lie 05 §5's closing line forbids.
+ *
+ * `unconfirmed` (x13) is the state that was missing, and its absence is what
+ * made the lie possible: "everything this command controls succeeded, and I
+ * could not observe whether the result is live." Before x13 that case had
+ * nowhere to go and fell into `online`.
  */
-export type ServeState = 'online' | 'waiting-approval' | 'registered-not-serving' | 'not-registered' | 'stopped';
+export type ServeState =
+  | 'online'
+  | 'waiting-approval'
+  | 'registered-not-serving'
+  | 'unconfirmed'
+  | 'not-registered'
+  | 'stopped';
 
 /** The one-line status marker for each state, matching 05 §5's transcript
  *  (`● unity-review — online, ready for work`) and §5's closing rule
@@ -696,11 +710,161 @@ export function renderState(state: ServeState, slug: string, reason?: string): s
       return `⏸ ${slug} — waiting for an admin to approve`;
     case 'registered-not-serving':
       return `○ ${slug} — registered — not serving${reason ? ` (${reason})` : ''}`;
+    case 'unconfirmed':
+      return `◌ ${slug} — registered and bound; could not confirm it is live${reason ? ` (${reason})` : ''}`;
     case 'not-registered':
       return `✗ ${slug} — not registered${reason ? ` (${reason})` : ''}`;
     case 'stopped':
       return `○ ${slug} — stopped on this machine${reason ? ` (${reason})` : ''}`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Step 9 — what `serve` is actually allowed to claim (x13)
+// ---------------------------------------------------------------------------
+//
+// The defect this section exists to make unrepeatable: `serve` printed
+// `● <slug> — online, ready for work` after writing a local binding, having
+// checked nothing about whether anything was running. In the `e2` gate that
+// line was printed on a machine whose supervisor service was
+// `stopped (auto-start)`, while the control plane reported `online: false`
+// for that department. It is the same shape as x11 one layer up — x11 was a
+// success line for a bind that never happened; this is a success line for a
+// state that was never looked at.
+//
+// **What "online" means, precisely.** Not "a file was written". The control
+// plane (`mesh-registry/service.ts#isDepartmentOnline`) answers `true` iff at
+// least one `active` install of the department belongs to a runner that
+// currently holds a live gateway connection. Two facts have to be true at
+// once, and `serve` only ever established the first: the install (step 8) and
+// a RUNNING, CONNECTED supervisor.
+//
+// **Why both a local and a remote check, and not either alone.**
+//  - The control plane is the AUTHORITY for the claim. It is the thing that
+//    was contradicting the transcript, and the only thing that can say `true`
+//    without a guess. So `online` is claimed on its word and nothing else.
+//  - The control plane is a terrible DIAGNOSTIC. `online: false` names no
+//    cause, and the overwhelmingly common cause — this machine's supervisor
+//    is not running — is knowable locally, exactly, for the cost of a
+//    `service status` shell `serve` was already paying once. A user told only
+//    "offline" has to go find out why; a user told "your supervisor service
+//    is installed but not running" has been handed the fix.
+//  - The local check ALSO covers the case the remote one cannot: the cloud
+//    read failing. A stopped supervisor is a positive local observation that
+//    the department is not being served from here, and it holds whether or
+//    not the network answers.
+//
+// So: the local state decides what to SAY and what to do next; the cloud
+// decides whether `online` may be said at all; and neither of them is allowed
+// to be silently assumed when it could not be read.
+
+/** Everything step 9 observed, before it decides what it is entitled to say. */
+export interface LivenessEvidence {
+  /** This machine's supervisor service, read AFTER step 7 (so a service this
+   *  run just installed is reported as this run left it, not as it was found). */
+  supervisor: RunnerServiceState;
+  /** `--foreground`: this run deliberately installed no service, so
+   *  `not-installed` is an expected outcome and its remedy is a different
+   *  command. */
+  foreground: boolean;
+  /** `GET /api/v1/departments/:id` → `online`. `null` means the read did not
+   *  happen or did not answer — NEVER "false". */
+  cloudOnline: boolean | null;
+  /** Why `cloudOnline` is `null`, verbatim from the failed read. */
+  cloudError?: string;
+  /** For the message: which control plane was asked. */
+  server: string;
+}
+
+export type Liveness =
+  /** The control plane reports this department online. */
+  | { verdict: 'live' }
+  /** Something was positively observed that means it is not taking work from
+   *  this machine. `reason` says what, `nextStep` says what to do about it. */
+  | { verdict: 'not-live'; reason: string; nextStep: string }
+  /** Nothing contradicts it and nothing confirms it. */
+  | { verdict: 'undetermined'; reason: string; nextStep: string };
+
+/** How to start a supervisor that exists but is down. pipeline-runner ships
+ *  `service install|uninstall|status` and no `start`/`restart` verb — but
+ *  `install` is idempotent BY DESIGN on all three backends (systemd
+ *  `enable --now`, launchd `unload` + `load -w`, Windows `stop`+`delete`+
+ *  `create`+`start`), so re-running it on an installed-but-stopped service
+ *  starts it. Named once, here, so the two places that say it cannot drift. */
+export const SUPERVISOR_START_HINT = 'pipeline-runner service install';
+/** Running one in the foreground instead — the `--foreground` remedy. */
+export const SUPERVISOR_FOREGROUND_HINT = 'pipeline-runner start';
+
+/**
+ * The whole of step 9's judgement, as a pure function of what was observed —
+ * so the rule is testable without a network, a service, or a clock, and so
+ * there is exactly ONE place that decides whether `online` may be printed.
+ *
+ * Order matters. A supervisor that is not running is checked FIRST because it
+ * is a positive local observation with a concrete remedy, and because it
+ * survives the cloud read failing. Only then does the cloud's answer decide
+ * between `live`, `not-live` and `undetermined`.
+ */
+export function assessLiveness(e: LivenessEvidence): Liveness {
+  // ── 1. A supervisor that is not running: known, local, actionable ────────
+  if (e.supervisor === 'stopped' || e.supervisor === 'not-installed') {
+    // The department may still be online because ANOTHER machine is serving
+    // it. That is a true fact about the department and a false one about this
+    // run, so both are said rather than either being suppressed.
+    const alsoOnline =
+      e.cloudOnline === true
+        ? ` — ${e.server} reports the department online, so another machine is serving it, but this one is not`
+        : '';
+    if (e.supervisor === 'stopped') {
+      return {
+        verdict: 'not-live',
+        reason: `this machine's supervisor service is installed but NOT running${alsoOnline}`,
+        nextStep: e.foreground
+          ? `Run one here:  ${SUPERVISOR_FOREGROUND_HINT}   (or start the installed service: \`${SUPERVISOR_START_HINT}\`)`
+          : `Start it:  ${SUPERVISOR_START_HINT}   (idempotent — re-registers and starts the service)`,
+      };
+    }
+    return e.foreground
+      ? {
+          verdict: 'not-live',
+          reason: `no supervisor service on this machine (--foreground)${alsoOnline}`,
+          nextStep: `Run one here:  ${SUPERVISOR_FOREGROUND_HINT}`,
+        }
+      : {
+          verdict: 'not-live',
+          reason: `this machine has no supervisor service${alsoOnline}`,
+          nextStep: `Install one:  ${SUPERVISOR_START_HINT}   (or run one in the foreground: ${SUPERVISOR_FOREGROUND_HINT})`,
+        };
+  }
+
+  // ── 2. The authority speaks ──────────────────────────────────────────────
+  if (e.cloudOnline === true) return { verdict: 'live' };
+
+  if (e.cloudOnline === false) {
+    return e.supervisor === 'running'
+      ? {
+          verdict: 'not-live',
+          reason: `this machine's supervisor is running, but ${e.server} does not see it connected`,
+          nextStep:
+            'Check the runner:  pipeline-runner status   (then `pipeline department status` to re-check the department)',
+        }
+      : {
+          verdict: 'not-live',
+          reason: `${e.server} reports this department offline, and this machine's supervisor state could not be read`,
+          nextStep: `Check the supervisor:  pipeline-runner service status   (start it with \`${SUPERVISOR_START_HINT}\`)`,
+        };
+  }
+
+  // ── 3. Nothing confirmed it, nothing contradicted it ─────────────────────
+  const why =
+    e.supervisor === 'unknown'
+      ? `this machine's supervisor state could not be read${e.cloudError !== undefined ? `, and ${e.cloudError}` : ''}`
+      : (e.cloudError ?? `${e.server} did not answer`);
+  return {
+    verdict: 'undetermined',
+    reason: why,
+    nextStep: 'Check it:  pipeline department status',
+  };
 }
 
 /** True when this engine's module exists in the supervisor that would run it
