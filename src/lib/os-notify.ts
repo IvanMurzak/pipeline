@@ -1,10 +1,10 @@
 // os-notify.ts — best-effort, cross-platform OS-level notification for the
-// mesh background notifier (department-mesh task a1, Q2). Fires a native
-// toast/balloon so a parked task can "announce itself" even to a user who
-// isn't looking at a terminal — never required for correctness (the
+// department background notifier (department-mesh task a1, Q2). Fires a
+// native toast/balloon so a parked task can "announce itself" even to a user
+// who isn't looking at a terminal — never required for correctness (the
 // SessionStart hook's additionalContext injection, apps/pipeline-cli/src/lib
-// /mesh-notify.ts's pending-notification journal, is the durable fallback),
-// so every path here is best-effort and MUST NOT throw.
+// /department-notify.ts's pending-notification journal, is the durable
+// fallback), so every path here is best-effort and MUST NOT throw.
 //
 // `buildOsNotifyCommand` is the pure, fully-tested half: platform -> exact
 // argv, with no I/O. `sendOsNotification` is the thin, deliberately-untested

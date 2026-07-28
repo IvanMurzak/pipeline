@@ -1,11 +1,18 @@
-// mesh.test.ts — `pipeline mesh notify` CLI shell: arg parsing + the --once
-// smoke-test path (daemon-loop behavior itself is covered by
-// mesh-notify.test.ts's pollLoop suite against the pure core).
+// mesh.test.ts — the DEPRECATED `pipeline mesh notify` alias
+// (`commands/mesh.ts`, a11: 08-terminology.md / D10 / D31). It has no logic
+// of its own beyond subcommand dispatch + a deprecation warning; the actual
+// notify behavior is covered by department-notify-cli.test.ts (CLI shell)
+// and department-notify.test.ts (poll/diff/journal core) against
+// `commands/department-notify.ts`, which this file delegates to.
+//
+// DoD coverage (a11-rename-plugin.md): "pipeline mesh notify still works,
+// warns, and points at the new name."
 
 import { test, expect, afterEach, describe } from 'bun:test';
-import { runMesh, parseNotifyArgs, DEFAULT_INTERVAL_MS, MIN_INTERVAL_MS, type MeshCliDeps } from '../src/commands/mesh';
-import { realFs, credentialFilePath, writeCredentialStore, type HomeContext } from '../src/lib/cloud-config';
-import type { FetchLike, HttpResponse, HttpInit } from '../src/lib/mesh-notify';
+import { runMesh } from '../src/commands/mesh';
+import { realFs } from '../src/lib/cloud-config';
+import type { DepartmentNotifyCliDeps } from '../src/commands/department-notify';
+import type { FetchLike } from '../src/lib/department-notify';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,66 +23,15 @@ afterEach(() => {
 });
 
 function mkHome(): string {
-  const d = mkdtempSync(join(tmpdir(), 'pipeline-mesh-cli-home-'));
+  const d = mkdtempSync(join(tmpdir(), 'pipeline-mesh-deprecated-home-'));
   created.push(d);
   return d;
 }
 
-// ---------------------------------------------------------------------------
-// parseNotifyArgs
-// ---------------------------------------------------------------------------
-
-describe('parseNotifyArgs', () => {
-  test('defaults: not once, not json, default interval', () => {
-    const r = parseNotifyArgs([]);
-    expect(r).toEqual({ once: false, intervalMs: DEFAULT_INTERVAL_MS, json: false });
-  });
-
-  test('--once and --json flags', () => {
-    const r = parseNotifyArgs(['--once', '--json']);
-    expect('error' in r).toBe(false);
-    if (!('error' in r)) {
-      expect(r.once).toBe(true);
-      expect(r.json).toBe(true);
-    }
-  });
-
-  test('--interval-ms <n> and --interval-ms=<n> both parse', () => {
-    const a = parseNotifyArgs(['--interval-ms', '90000']);
-    const b = parseNotifyArgs(['--interval-ms=90000']);
-    expect(a).toEqual({ once: false, intervalMs: 90_000, json: false });
-    expect(b).toEqual({ once: false, intervalMs: 90_000, json: false });
-  });
-
-  test('an interval below the floor clamps up to MIN_INTERVAL_MS', () => {
-    const r = parseNotifyArgs(['--interval-ms=100']);
-    expect('error' in r).toBe(false);
-    if (!('error' in r)) expect(r.intervalMs).toBe(MIN_INTERVAL_MS);
-  });
-
-  test('a non-numeric or non-positive interval is a usage error', () => {
-    expect('error' in parseNotifyArgs(['--interval-ms=abc'])).toBe(true);
-    expect('error' in parseNotifyArgs(['--interval-ms=-5'])).toBe(true);
-    expect('error' in parseNotifyArgs(['--interval-ms=0'])).toBe(true);
-  });
-
-  test('a missing --interval-ms value is a usage error', () => {
-    expect('error' in parseNotifyArgs(['--interval-ms'])).toBe(true);
-  });
-
-  test('an unknown flag is a usage error', () => {
-    expect('error' in parseNotifyArgs(['--bogus'])).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// runMesh — CLI shell dispatch
-// ---------------------------------------------------------------------------
-
-function makeCliDeps(home: string, overrides: Partial<MeshCliDeps> = {}): { deps: MeshCliDeps; out: () => string; err: () => string } {
+function makeCliDeps(home: string): { deps: DepartmentNotifyCliDeps; out: () => string; err: () => string } {
   let outBuf = '';
   let errBuf = '';
-  const deps: MeshCliDeps = {
+  const deps: DepartmentNotifyCliDeps = {
     fetch: (async () => {
       throw new Error('fetch should not be called in this test');
     }) as FetchLike,
@@ -92,12 +48,11 @@ function makeCliDeps(home: string, overrides: Partial<MeshCliDeps> = {}): { deps
     err: (s) => {
       errBuf += s;
     },
-    ...overrides,
   };
   return { deps, out: () => outBuf, err: () => errBuf };
 }
 
-describe('runMesh dispatch', () => {
+describe('runMesh (deprecated alias)', () => {
   test('no subcommand → usage to stderr, exit 2', async () => {
     const { deps, err } = makeCliDeps(mkHome());
     const code = await runMesh([], deps);
@@ -105,11 +60,13 @@ describe('runMesh dispatch', () => {
     expect(err()).toContain('Usage: pipeline mesh notify');
   });
 
-  test('--help → usage to stdout, exit 0', async () => {
+  test('--help → usage to stdout naming the deprecation, exit 0', async () => {
     const { deps, out } = makeCliDeps(mkHome());
     const code = await runMesh(['--help'], deps);
     expect(code).toBe(0);
     expect(out()).toContain('Usage: pipeline mesh notify');
+    expect(out()).toContain('DEPRECATED');
+    expect(out()).toContain('pipeline department notify');
   });
 
   test('unknown subcommand → usage to stderr, exit 2', async () => {
@@ -119,14 +76,16 @@ describe('runMesh dispatch', () => {
     expect(err()).toContain("unknown subcommand 'bogus'");
   });
 
-  test('notify with a bad flag → usage error, exit 2', async () => {
-    const { deps, err } = makeCliDeps(mkHome());
-    const code = await runMesh(['notify', '--nope'], deps);
-    expect(code).toBe(2);
-    expect(err()).toContain('unknown argument');
+  test('notify warns on stderr and points at the new name before doing anything else', async () => {
+    const home = mkHome();
+    const { deps, err } = makeCliDeps(home);
+    const code = await runMesh(['notify', '--once'], deps);
+    expect(code).toBe(0);
+    expect(err()).toContain('deprecated');
+    expect(err()).toContain('pipeline department notify');
   });
 
-  test('notify --once with no stored credential → polls zero servers, prints a clean summary, exit 0', async () => {
+  test('notify --once still works end-to-end, delegating to the same behavior as `department notify`', async () => {
     const home = mkHome();
     const { deps, out } = makeCliDeps(home);
     const code = await runMesh(['notify', '--once'], deps);
@@ -134,56 +93,11 @@ describe('runMesh dispatch', () => {
     expect(out()).toContain('polled 0 server(s)');
   });
 
-  test('notify --once --json with no stored credential prints a machine-readable summary', async () => {
-    const home = mkHome();
-    const { deps, out } = makeCliDeps(home);
-    const code = await runMesh(['notify', '--once', '--json'], deps);
-    expect(code).toBe(0);
-    const parsed = JSON.parse(out().trim());
-    expect(parsed).toEqual({ servers_polled: 0, notifications: 0, errors: [] });
-  });
-
-  test('notify --once with a task in INPUT_REQUIRED fires the OS-notify spawn AND prints the human line', async () => {
-    const home = mkHome();
-    const ctx: HomeContext = { platform: 'linux', env: { PIPELINE_CLOUD_HOME: home }, homedir: home };
-    writeCredentialStore(realFs, credentialFilePath(ctx), {
-      version: 1,
-      servers: { 'https://api.example.com': { access_token: 'tok', token_type: 'bearer' } },
-    });
-    const fetchImpl: FetchLike = async (url: string, _init: HttpInit): Promise<HttpResponse> => {
-      if (url.endsWith('/api/v1/me')) {
-        return {
-          status: 200,
-          json: async () => ({ user: { id: 'u1' }, orgs: [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'member' }] }),
-        };
-      }
-      if (url.endsWith('/api/v1/dept-tasks')) {
-        return {
-          status: 200,
-          json: async () => ({
-            tasks: [
-              {
-                id: 'task-1',
-                contextId: 'ctx-1',
-                departmentId: 'dep-1',
-                originPrincipal: 'user:u1',
-                state: 'INPUT_REQUIRED',
-                stateVersion: 1,
-                updatedAt: '2026-07-24T00:00:00.000Z',
-              },
-            ],
-          }),
-        };
-      }
-      throw new Error(`unexpected fetch ${url}`);
-    };
-    const spawnCalls: Array<{ cmd: string; args: string[] }> = [];
-    const { deps, out } = makeCliDeps(home, { fetch: fetchImpl, spawn: (cmd, args) => spawnCalls.push({ cmd, args }) });
-    const code = await runMesh(['notify', '--once'], deps);
-    expect(code).toBe(0);
-    expect(out()).toContain('needs your input');
-    expect(out()).toContain('task-1');
-    expect(spawnCalls).toHaveLength(1); // linux → notify-send
-    expect(spawnCalls[0]!.cmd).toBe('notify-send');
+  test('notify with a bad flag still validates (delegated), after the deprecation warning', async () => {
+    const { deps, err } = makeCliDeps(mkHome());
+    const code = await runMesh(['notify', '--nope'], deps);
+    expect(code).toBe(2);
+    expect(err()).toContain('deprecated');
+    expect(err()).toContain('unknown argument');
   });
 });

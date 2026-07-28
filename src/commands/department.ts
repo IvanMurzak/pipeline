@@ -164,6 +164,12 @@ import {
 // production wiring dynamic-imports it at call time.
 import { MACHINE_TOKEN_ENV, type ApiAuth, type ApiAuthOptions } from './cloud';
 import { findFirstIteration, findManifests, parseManifest as parsePipelineManifest } from '../lib/match';
+// a11: `notify` is the SAME poll/toast/journal daemon as before (task a1),
+// just addressed as a `department` verb instead of the standalone `mesh`
+// top-level command (08-terminology.md / D10 / D31) — `commands/mesh.ts`
+// keeps the old `pipeline mesh notify` spelling alive as a deprecated,
+// warning alias that delegates to the exact same function.
+import { runDepartmentNotify } from './department-notify';
 
 // ---------------------------------------------------------------------------
 // Small text helpers shared by `new`'s scaffold writer
@@ -1832,8 +1838,8 @@ export async function runDepartmentRetire(args: string[], deps: ServeCommandDeps
  * ladder: a routine, possibly-scripted, possibly-`--follow` diagnostic
  * command must never pop a browser or a device code. It needs the
  * credential-READ seam instead (`fs`/`platform`/`homedir`/`now`, mirroring
- * `lib/mesh-notify.ts`'s `MeshNotifyDeps`, which has the identical "headless,
- * silent-or-nothing" requirement) so it can reuse an already-live credential
+ * `lib/department-notify.ts`'s `DepartmentNotifyDeps`, which has the identical
+ * "headless, silent-or-nothing" requirement) so it can reuse an already-live credential
  * through `ensureFreshCredential` — the ONE function allowed to call the
  * refresh grant (a5) — and fall back to a local-only view for everything
  * else (DoD box 1: "status works with the network down").
@@ -1948,10 +1954,10 @@ function parseMeOrgs(raw: unknown): MeOrgLite[] {
   return out;
 }
 
-/** `GET /api/v1/me` — the SAME identity call `cloud connect`/`mesh-notify`
+/** `GET /api/v1/me` — the SAME identity call `cloud connect`/`department-notify`
  *  make, duplicated in shape rather than imported (`lib/` must not depend on
  *  `commands/`, and this is a one-off read not worth a shared module — the
- *  same call this file already makes twice elsewhere, `mesh-notify.ts`'s
+ *  same call this file already makes twice elsewhere, `department-notify.ts`'s
  *  `fetchMe` and `cloud.ts`'s own). */
 async function fetchMeOrgs(deps: Pick<StatusCommandDeps, 'fetch'>, server: string, accessToken: string): Promise<MeOrgLite[] | null> {
   try {
@@ -2312,7 +2318,7 @@ const STATUS_FOLLOW_INTERVAL_MS = 5000;
 
 /**
  * `pipeline department status` — 05 §6. `maxIterations` is a TEST-ONLY hook
- * (mirrors `lib/mesh-notify.ts`'s `PollLoopOptions.maxIterations`) so
+ * (mirrors `lib/department-notify.ts`'s `PollLoopOptions.maxIterations`) so
  * `--follow` is verifiable without an infinite loop or a real timer; a real
  * invocation runs until interrupted.
  */
@@ -2362,7 +2368,7 @@ export async function runDepartmentStatus(
 // Dispatcher: `pipeline department <verb> [args]`
 // ---------------------------------------------------------------------------
 
-const VERBS = 'new, validate, serve, status, stop, retire';
+const VERBS = 'new, validate, serve, status, stop, retire, notify';
 
 export async function runDepartment(args: string[]): Promise<number> {
   const verb = args[0];
@@ -2380,6 +2386,12 @@ export async function runDepartment(args: string[]): Promise<number> {
       return runDepartmentStop(rest);
     case 'retire':
       return await runDepartmentRetire(rest);
+    case 'notify':
+      // a1/a11: the background department-task notifier (lib/department-notify.ts) —
+      // poll/diff/journal + OS toast, normally spawned detached by
+      // hooks/department_notifier_relay.ts. Not part of 05's nine-step serve
+      // flow; listed here only because it is the `department` verb.
+      return await runDepartmentNotify(rest);
     case undefined:
       process.stderr.write(`pipeline department: a verb is required (${VERBS})\n`);
       return 2;

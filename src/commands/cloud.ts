@@ -83,7 +83,7 @@
 //          below mirrors machine-credentials/service.ts's
 //          `splitMachineCredentialToken` byte-for-byte; this package cannot
 //          import the private cloud/ tree, same constraint as
-//          lib/mesh-notify.ts's duplicated task-state vocabulary)
+//          lib/department-notify.ts's duplicated task-state vocabulary)
 //          grant_type=client_credentials&scope=machine:credential&
 //          resource=<server>/api  — the resource check runs BEFORE the
 //          secret is even looked up server-side (routes.ts's own doc
@@ -1075,7 +1075,7 @@ function persistCredential(deps: CloudDeps, credPath: string, store: CredentialS
  *  `RefreshDeps` — the two side-effect seams are structurally compatible
  *  (same fetch/fs/now/env/platform/homedir shape), just named/scoped
  *  differently per module (lib/ must not depend on commands/, see
- *  mesh-notify.ts's own note). */
+ *  department-notify.ts's own note). */
 function refreshDepsFrom(deps: CloudDeps): RefreshDeps {
   return { fetch: deps.fetch, fs: deps.fs, now: deps.now, platform: deps.platform, env: deps.env, homedir: deps.homedir };
 }
@@ -1424,7 +1424,7 @@ async function authenticateAsHuman(deps: CloudDeps, opts: ApiAuthOptions, server
     // "Your session was refreshed elsewhere" case — or a network error)
     // falls back to a full interactive re-auth rather than surfacing the
     // refresh failure as THIS command's own error: unlike a headless
-    // caller (lib/mesh-notify.ts), `pipeline cloud connect` always has a
+    // caller (lib/department-notify.ts), `pipeline cloud connect` always has a
     // human present who can complete a fresh flow right now, and the user
     // already re-ran the command the §9 message would have told them to.
     try {

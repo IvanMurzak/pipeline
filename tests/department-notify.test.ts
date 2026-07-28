@@ -1,8 +1,9 @@
-// mesh-notify.test.ts — the background mesh-task notifier's poll/diff/journal
-// core (department-mesh task a1, Q2). Everything is injected: a scripted
-// fetch, the real fs over a tmp home (credentialDir/credentialFilePath
-// resolve relative to it via PIPELINE_CLOUD_HOME), and a fake clock — no
-// test touches the network or the real home dir.
+// department-notify.test.ts — the background department-task notifier's
+// poll/diff/journal core (department-mesh task a1, Q2). Everything is
+// injected: a scripted fetch, the real fs over a tmp home
+// (credentialDir/credentialFilePath resolve relative to it via
+// PIPELINE_CLOUD_HOME), and a fake clock — no test touches the network or
+// the real home dir.
 
 import { test, expect, afterEach, describe } from 'bun:test';
 import {
@@ -20,10 +21,10 @@ import {
   type FetchLike,
   type HttpResponse,
   type HttpInit,
-  type MeshNotifyDeps,
+  type DepartmentNotifyDeps,
   type NotifyJournal,
   type TaskNotification,
-} from '../src/lib/mesh-notify';
+} from '../src/lib/department-notify';
 import { realFs, credentialFilePath, writeCredentialStore, type HomeContext } from '../src/lib/cloud-config';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -35,7 +36,7 @@ afterEach(() => {
 });
 
 function mkHome(): string {
-  const d = mkdtempSync(join(tmpdir(), 'pipeline-mesh-home-'));
+  const d = mkdtempSync(join(tmpdir(), 'pipeline-department-notify-home-'));
   created.push(d);
   return d;
 }
@@ -92,7 +93,7 @@ function task(overrides: Partial<{
   };
 }
 
-function makeDeps(fetchImpl: FetchLike, home: string, overrides: Partial<MeshNotifyDeps> = {}): MeshNotifyDeps {
+function makeDeps(fetchImpl: FetchLike, home: string, overrides: Partial<DepartmentNotifyDeps> = {}): DepartmentNotifyDeps {
   return {
     fetch: fetchImpl,
     fs: realFs,
@@ -423,8 +424,8 @@ describe('journal I/O', () => {
   test('notifyLockPath sits beside notifyJournalPath, both under the credential dir', () => {
     const home = mkHome();
     const ctx: HomeContext = { platform: 'linux', env: { PIPELINE_CLOUD_HOME: home }, homedir: home };
-    expect(notifyJournalPath(ctx)).toBe(join(home, 'mesh-notify-state.json'));
-    expect(notifyLockPath(ctx)).toBe(join(home, 'mesh-notify-daemon.lock'));
+    expect(notifyJournalPath(ctx)).toBe(join(home, 'department-notify-state.json'));
+    expect(notifyLockPath(ctx)).toBe(join(home, 'department-notify-daemon.lock'));
   });
 });
 

@@ -298,15 +298,16 @@ function usage(): string {
     '      awaiting approval · 1 a step failed · 2 usage / manifest missing',
     '      or unparseable.',
     '',
-    '  mesh notify [--interval-ms <n>] [--once] [--json]',
-    '      Background department-mesh task notifier (department-mesh design, task',
-    "      a1): polls the caller's open tasks via the credential",
+    '  department notify [--interval-ms <n>] [--once] [--json]',
+    '      Background department-task notifier (department-mesh design, task a1):',
+    "      polls the caller's open tasks via the credential",
     '      `pipeline cloud connect` already stored and surfaces INPUT_REQUIRED/',
     '      AUTH_REQUIRED and terminal transitions — an OS-level toast plus a',
     "      durable pending-notification journal the plugin's SessionStart hook",
     '      drains on the next Claude Code session, in ANY project. Normally',
     '      spawned detached by the SessionStart hook; --once runs one poll cycle',
     '      and exits (smoke-test a connection). Default interval 60000ms.',
+    '      (`pipeline mesh notify` still works as a deprecated, warning alias.)',
     '',
     '  step run <iteration.md> [--param <name>=<value> ...]',
     '           [--var NAME=value ...] [--vars-file <path>] [--json]',
@@ -391,15 +392,19 @@ async function main(argv: string[]): Promise<number> {
     case 'department': {
       // Lazy import (mirrors `cloud`/`mesh`): `department` pulls in the
       // department.yml schema/digest machinery (lib/department-manifest.ts,
-      // task a7) and the PIPELINE.md scope parser (lib/match.ts) — keep the
-      // hot `next` loop's per-spawn startup cost unchanged.
+      // task a7), the PIPELINE.md scope parser (lib/match.ts), and (for the
+      // `notify` verb) the HTTP polling + child_process notification
+      // machinery — keep the hot `next` loop's per-spawn startup cost unchanged.
       const { runDepartment } = await import('./commands/department');
       return runDepartment(rest);
     }
     case 'mesh': {
-      // Lazy import (mirrors `cloud`): `mesh` pulls in the HTTP polling +
-      // child_process notification machinery — keep the hot `next` loop's
-      // per-spawn startup cost unchanged.
+      // DEPRECATED, hidden alias for `department notify` (a11 —
+      // 08-terminology.md / D10 / D31: "mesh"/"fleet" are gone). Not listed
+      // in usage() above; kept only so scripts/service definitions written
+      // against `pipeline mesh notify` keep working. Lazy import (mirrors
+      // `cloud`): pulls in the same HTTP polling + child_process
+      // notification machinery as `department notify`.
       const { runMesh } = await import('./commands/mesh');
       return runMesh(rest);
     }

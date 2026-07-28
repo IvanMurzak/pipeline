@@ -19,8 +19,8 @@
 // revoked" (see `REAUTH_REQUIRED_MESSAGE` below).
 //
 // One credential file is shared by the interactive CLI (`commands/cloud.ts`),
-// the always-on `pipeline mesh notify` daemon (`lib/mesh-notify.ts` — the
-// "always-on supervisor" 04§6 names), and any concurrent `department
+// the always-on `pipeline department notify` daemon (`lib/department-notify.ts`
+// — the "always-on supervisor" 04§6 names), and any concurrent `department
 // serve`/`status` this product ships later. `ensureFreshCredential` below is
 // the ONLY code in this package allowed to call the refresh grant — every
 // caller MUST route through it rather than hand-rolling its own POST.
@@ -46,7 +46,7 @@
 //      `CloudError` carrying 04-cloud-auth.md §9's exact stated message.
 //      Every existing caller already maps a thrown `CloudError` to a clean
 //      exit — see `commands/cloud.ts`'s `runCloud` and this module's own
-//      callers in `lib/mesh-notify.ts`.
+//      callers in `lib/department-notify.ts`.
 
 import {
   CloudError,
@@ -63,8 +63,8 @@ import { protectCredentialFile } from './credential-protect';
 
 // ---------------------------------------------------------------------------
 // HTTP seam — deliberately local (mirrors commands/cloud.ts's near-identical
-// shape); lib/ must not depend on commands/ — see mesh-notify.ts's own note
-// on why it duplicates rather than imports.
+// shape); lib/ must not depend on commands/ — see department-notify.ts's own
+// note on why it duplicates rather than imports.
 // ---------------------------------------------------------------------------
 
 export interface HttpResponse {
@@ -86,7 +86,7 @@ export const realRefreshFetch: FetchLike = async (url, init) => {
 
 /** Pre-registered public client id — mirrors `commands/cloud.ts`'s
  *  `CLI_CLIENT_ID` byte-for-byte (duplicated rather than imported, same
- *  lib-must-not-depend-on-commands rule as `mesh-notify.ts`). The refresh
+ *  lib-must-not-depend-on-commands rule as `department-notify.ts`). The refresh
  *  grant handler does not actually validate `client_id` server-side today
  *  (`handleRefreshTokenGrant` reads only `body.refresh_token`), but sending
  *  it keeps this request shaped like every other grant this CLI makes. */

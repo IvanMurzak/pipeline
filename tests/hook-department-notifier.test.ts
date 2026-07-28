@@ -1,7 +1,14 @@
 /**
- * SessionStart mesh-notifier relay — hooks/mesh_notifier_relay.ts.
+ * SessionStart department-notifier relay — hooks/department_notifier_relay.ts.
  *
- *   bun test tests/hook-mesh-notifier.test.ts
+ *   bun test tests/hook-department-notifier.test.ts
+ *
+ * RENAME NOTE (a11, simplified-onboarding — 08-terminology.md / D10 / D31):
+ * this file was tests/hook-mesh-notifier.test.ts, testing
+ * hooks/mesh_notifier_relay.ts's meshNotifyEnabled(). The hook, its gate
+ * function, and the env var it reads are all renamed; PIPELINE_MESH_NOTIFY_ENABLED
+ * is still READ as a fallback (with a deprecation warning) and is covered
+ * below.
  *
  * Two layers of coverage, mirroring hook-prompt-match.test.ts:
  *   • unit tests over the exported pure/near-pure helpers (gate, context
@@ -11,13 +18,13 @@
  *
  * Deliberately NOT covered here: the actual `spawnNotifyDaemon` code path
  * (when no live daemon lock exists). Exercising it for real would fork a
- * genuine detached `pipeline mesh notify` background process — a poll loop
- * hitting the network forever — which must never happen inside `bun test`.
- * Every scenario below either gates out before that branch (no credential
- * store) or pre-seeds a lock pointing at THIS test process's own pid (always
- * alive), so `ensureDaemonRunning` takes the "already running" early return.
- * The real spawn path is smoke-tested manually / proven at the `e3` gate,
- * same deferral as pipeline_ui_relay.ts's own spawnDaemon().
+ * genuine detached `pipeline department notify` background process — a poll
+ * loop hitting the network forever — which must never happen inside
+ * `bun test`. Every scenario below either gates out before that branch (no
+ * credential store) or pre-seeds a lock pointing at THIS test process's own
+ * pid (always alive), so `ensureDaemonRunning` takes the "already running"
+ * early return. The real spawn path is smoke-tested manually / proven at the
+ * `e3` gate, same deferral as pipeline_ui_relay.ts's own spawnDaemon().
  */
 
 import { describe, expect, test, afterEach } from "bun:test";
@@ -27,14 +34,14 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 import {
-  meshNotifyEnabled,
+  departmentNotifyEnabled,
   buildAdditionalContext,
   ensureDaemonRunning,
-} from "../../../hooks/mesh_notifier_relay.ts";
-import { notifyLockPath, notifyJournalPath, type TaskNotification } from "../src/lib/mesh-notify";
+} from "../../../hooks/department_notifier_relay.ts";
+import { notifyLockPath, notifyJournalPath, type TaskNotification } from "../src/lib/department-notify";
 import { credentialFilePath, writeCredentialStore, realFs, type HomeContext } from "../src/lib/cloud-config";
 
-const HOOK_PATH = resolve(import.meta.dir, "../../../hooks/mesh_notifier_relay.ts");
+const HOOK_PATH = resolve(import.meta.dir, "../../../hooks/department_notifier_relay.ts");
 
 const created: string[] = [];
 afterEach(() => {
@@ -48,7 +55,7 @@ afterEach(() => {
 });
 
 function mkHome(): string {
-  const d = mkdtempSync(join(tmpdir(), "mesh-hook-home-"));
+  const d = mkdtempSync(join(tmpdir(), "department-notify-hook-home-"));
   created.push(d);
   return d;
 }
@@ -73,30 +80,55 @@ function sampleNotification(overrides: Partial<TaskNotification> = {}): TaskNoti
 }
 
 // ---------------------------------------------------------------------------
-// meshNotifyEnabled
+// departmentNotifyEnabled
 // ---------------------------------------------------------------------------
 
-describe("meshNotifyEnabled", () => {
-  const KEY = "PIPELINE_MESH_NOTIFY_ENABLED";
+describe("departmentNotifyEnabled", () => {
+  const KEY = "PIPELINE_DEPARTMENT_NOTIFY_ENABLED";
+  const LEGACY_KEY = "PIPELINE_MESH_NOTIFY_ENABLED";
   const saved = process.env[KEY];
+  const savedLegacy = process.env[LEGACY_KEY];
   afterEach(() => {
     if (saved === undefined) delete process.env[KEY];
     else process.env[KEY] = saved;
+    if (savedLegacy === undefined) delete process.env[LEGACY_KEY];
+    else process.env[LEGACY_KEY] = savedLegacy;
   });
 
-  test("unset → enabled by default", () => {
+  test("both unset → enabled by default", () => {
     delete process.env[KEY];
-    expect(meshNotifyEnabled()).toBe(true);
+    delete process.env[LEGACY_KEY];
+    expect(departmentNotifyEnabled()).toBe(true);
   });
 
-  test.each(["0", "false", "no", "off", "FALSE", "Off"])("falsy value %p disables", (v) => {
+  test.each(["0", "false", "no", "off", "FALSE", "Off"])("falsy value %p on the new var disables", (v) => {
+    delete process.env[LEGACY_KEY];
     process.env[KEY] = v;
-    expect(meshNotifyEnabled()).toBe(false);
+    expect(departmentNotifyEnabled()).toBe(false);
   });
 
-  test.each(["1", "true", "yes", "on", "anything"])("non-falsy value %p keeps it enabled", (v) => {
+  test.each(["1", "true", "yes", "on", "anything"])("non-falsy value %p on the new var keeps it enabled", (v) => {
+    delete process.env[LEGACY_KEY];
     process.env[KEY] = v;
-    expect(meshNotifyEnabled()).toBe(true);
+    expect(departmentNotifyEnabled()).toBe(true);
+  });
+
+  test("new var unset, legacy var falsy → disables (fallback still honored)", () => {
+    delete process.env[KEY];
+    process.env[LEGACY_KEY] = "0";
+    expect(departmentNotifyEnabled()).toBe(false);
+  });
+
+  test("new var unset, legacy var truthy → enabled (fallback still honored)", () => {
+    delete process.env[KEY];
+    process.env[LEGACY_KEY] = "1";
+    expect(departmentNotifyEnabled()).toBe(true);
+  });
+
+  test("both set → the new var wins", () => {
+    process.env[KEY] = "1";
+    process.env[LEGACY_KEY] = "0";
+    expect(departmentNotifyEnabled()).toBe(true);
   });
 });
 
@@ -107,7 +139,7 @@ describe("meshNotifyEnabled", () => {
 describe("buildAdditionalContext", () => {
   test("a single notification: singular wording, mentions task/department/org", () => {
     const ctx = buildAdditionalContext([sampleNotification()]);
-    expect(ctx).toContain("You have 1 department-mesh task update since");
+    expect(ctx).toContain("You have 1 department task update since");
     expect(ctx).toContain("task-1");
     expect(ctx).toContain("dep-1");
     expect(ctx).toContain("/mcp");
@@ -118,7 +150,7 @@ describe("buildAdditionalContext", () => {
       sampleNotification({ taskId: "task-1" }),
       sampleNotification({ taskId: "task-2", state: "COMPLETED" }),
     ]);
-    expect(ctx).toContain("You have 2 department-mesh task updates since");
+    expect(ctx).toContain("You have 2 department task updates since");
     expect(ctx).toContain("task-1");
     expect(ctx).toContain("task-2");
   });
@@ -126,7 +158,7 @@ describe("buildAdditionalContext", () => {
   test("more than 10 notifications: shows 10 lines plus an 'and N more' trailer", () => {
     const many = Array.from({ length: 13 }, (_, i) => sampleNotification({ taskId: `task-${i}` }));
     const ctx = buildAdditionalContext(many);
-    expect(ctx).toContain("You have 13 department-mesh task updates since");
+    expect(ctx).toContain("You have 13 department task updates since");
     expect(ctx).toContain("…and 3 more.");
     for (let i = 0; i < 10; i++) expect(ctx).toContain(`task-${i}`);
     expect(ctx).not.toContain("task-10");
@@ -157,20 +189,30 @@ describe("ensureDaemonRunning", () => {
 // ---------------------------------------------------------------------------
 
 describe("subprocess", () => {
-  function runHook(env: Record<string, string | undefined>, stdinPayload: object): { stdout: string; status: number | null } {
+  function runHook(env: Record<string, string | undefined>, stdinPayload: object): { stdout: string; stderr: string; status: number | null } {
     const r = spawnSync(process.execPath, [HOOK_PATH], {
       input: JSON.stringify(stdinPayload),
       encoding: "utf-8",
       env: { ...process.env, ...env },
     });
-    return { stdout: r.stdout ?? "", status: r.status };
+    return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", status: r.status };
   }
 
-  test("disabled via env → silent, exit 0", () => {
+  test("disabled via the new env var → silent, exit 0", () => {
+    const home = mkHome();
+    const r = runHook(
+      { PIPELINE_DEPARTMENT_NOTIFY_ENABLED: "0", PIPELINE_CLOUD_HOME: home },
+      { session_id: "s1", cwd: home, hook_event_name: "SessionStart", source: "startup" },
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("");
+  });
+
+  test("disabled via the deprecated legacy env var → still honored, silent, exit 0", () => {
     const home = mkHome();
     const r = runHook(
       { PIPELINE_MESH_NOTIFY_ENABLED: "0", PIPELINE_CLOUD_HOME: home },
-      { session_id: "s1", cwd: home, hook_event_name: "SessionStart", source: "startup" },
+      { session_id: "s1b", cwd: home, hook_event_name: "SessionStart", source: "startup" },
     );
     expect(r.status).toBe(0);
     expect(r.stdout.trim()).toBe("");

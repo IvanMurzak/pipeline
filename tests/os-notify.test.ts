@@ -1,4 +1,4 @@
-// os-notify.test.ts — pure command-construction tests for the mesh
+// os-notify.test.ts — pure command-construction tests for the department
 // notifier's best-effort OS-level toast (department-mesh task a1, Q2).
 // buildOsNotifyCommand is pure (no I/O); sendOsNotification is exercised
 // against an injected fake spawn that never touches a real process.
@@ -8,7 +8,7 @@ import { buildOsNotifyCommand, sendOsNotification } from '../src/lib/os-notify';
 
 describe('buildOsNotifyCommand', () => {
   test('darwin → osascript display notification with escaped title/body', () => {
-    const cmd = buildOsNotifyCommand('darwin', 'Mesh task needs your input', 'Task "abc" is now INPUT_REQUIRED.');
+    const cmd = buildOsNotifyCommand('darwin', 'Department task needs your input', 'Task "abc" is now INPUT_REQUIRED.');
     expect(cmd).not.toBeNull();
     expect(cmd!.cmd).toBe('osascript');
     expect(cmd!.args[0]).toBe('-e');
@@ -20,8 +20,8 @@ describe('buildOsNotifyCommand', () => {
   });
 
   test('linux → notify-send with title/body as two plain argv entries (no shell involved)', () => {
-    const cmd = buildOsNotifyCommand('linux', 'Mesh task finished', 'Task x is now COMPLETED.');
-    expect(cmd).toEqual({ cmd: 'notify-send', args: ['Mesh task finished', 'Task x is now COMPLETED.'] });
+    const cmd = buildOsNotifyCommand('linux', 'Department task finished', 'Task x is now COMPLETED.');
+    expect(cmd).toEqual({ cmd: 'notify-send', args: ['Department task finished', 'Task x is now COMPLETED.'] });
   });
 
   test('win32 → powershell NotifyIcon balloon, single-quoted literals with doubled internal quotes', () => {

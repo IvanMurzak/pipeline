@@ -1,9 +1,18 @@
-// mesh-notify.ts — pure/injectable core of the background mesh-task notifier
+// department-notify.ts — pure/injectable core of the background department-task notifier
 // (department-mesh design, task a1 — the Q2 owner override:
 // 12-user-workflows.md Persona B, "a parked task announces itself instead of
 // waiting to be polled").
 //
-// WHAT THIS WATCHES: department-mesh tasks the caller created (A2A
+// RENAME NOTE (a11, simplified-onboarding — 08-terminology.md / D10 / D31):
+// this file was `lib/mesh-notify.ts`. "mesh" is gone from every user-facing
+// surface and from this module's own identifiers; citations below that name
+// files in the PRIVATE cloud/ repo (`mesh-oauth/…`, `mesh/routes.ts`, …) or in
+// the LOCKED `department-mesh` design folder are left as-is — those paths and
+// that folder name have not been renamed (D17: the design ledger keeps its
+// original wording), so rewriting the citation would point at something that
+// doesn't exist.
+//
+// WHAT THIS WATCHES: department tasks the caller created (A2A
 // `originPrincipal === "user:<id>"`) that enter `INPUT_REQUIRED` /
 // `AUTH_REQUIRED` (needs a human) or a terminal state
 // (`COMPLETED`/`FAILED`/`CANCELED`/`REJECTED`) — even after the Claude Code
@@ -13,12 +22,12 @@
 // TRANSPORT — a deliberate, documented deviation from a literal reading of
 // the task spec, recorded here rather than left implicit:
 //
-//   04-mcp-gateway.md §3.6/§3.7 and 13-mcp-authorization.md name the mesh
-//   surface this watches as the `tasks.list` / `tasks.wait` MCP TOOLS on the
-//   OAuth-gated `/mcp` endpoint. That is the eventual, spec-literal
-//   transport, and it is what a live Claude Code session uses (the
-//   `mcpServers` entry in `.claude-plugin/plugin.json` — Claude Code owns
-//   that whole OAuth dance internally; nothing here duplicates it).
+//   04-mcp-gateway.md §3.6/§3.7 and 13-mcp-authorization.md name the
+//   department surface this watches as the `tasks.list` / `tasks.wait` MCP
+//   TOOLS on the OAuth-gated `/mcp` endpoint. That is the eventual,
+//   spec-literal transport, and it is what a live Claude Code session uses
+//   (the `mcpServers` entry in `.claude-plugin/plugin.json` — Claude Code
+//   owns that whole OAuth dance internally; nothing here duplicates it).
 //
 //   This module, however, is a HEADLESS background process with no
 //   interactive session to complete a browser consent flow in. At a1's
@@ -40,7 +49,7 @@
 //   of running a second OAuth dance the user never asked for.
 //
 //   The polling/diff/journal logic below is written behind the small
-//   `MeshNotifyDeps` seam so swapping the transport to real MCP
+//   `DepartmentNotifyDeps` seam so swapping the transport to real MCP
 //   `tasks.list`/`tasks.wait` JSON-RPC calls (once c12 lands and a headless
 //   MCP-audience credential path exists) is a localized change to
 //   `fetchMe`/`fetchOpenTasks` below, not a redesign. Full cross-session live
@@ -79,7 +88,7 @@ export interface HttpInit {
 
 export type FetchLike = (url: string, init: HttpInit) => Promise<HttpResponse>;
 
-export const realMeshFetch: FetchLike = async (url, init) => {
+export const realDepartmentNotifyFetch: FetchLike = async (url, init) => {
   return (await fetch(url, init as RequestInit)) as unknown as HttpResponse;
 };
 
@@ -101,7 +110,7 @@ export type DeptTaskState =
 
 /**
  * True when `originPrincipal` names `userId` as the ORIGINATING human —
- * across EVERY principal spelling the mesh orchestrator produces for a
+ * across EVERY principal spelling the department orchestrator produces for a
  * user-delegated task, not just one.
  *
  * FIX (e3 P2 gate, cross-repo convergence bug found against the REAL c6
@@ -152,7 +161,7 @@ export function isNotifyTerminal(state: DeptTaskState): boolean {
 // ---------------------------------------------------------------------------
 
 /** The subset of DeptTaskView (cloud's REST response shape) this module reads. */
-export interface MeshTaskSummary {
+export interface DepartmentTaskSummary {
   id: string;
   contextId: string;
   departmentId: string;
@@ -181,7 +190,7 @@ export interface TaskNotification {
  *  additionalContext — so every surface describes a transition identically. */
 export function notificationTitle(n: TaskNotification): string {
   const label = n.state === 'INPUT_REQUIRED' || n.state === 'AUTH_REQUIRED' ? 'needs your input' : 'finished';
-  return `Mesh task ${label}`;
+  return `Department task ${label}`;
 }
 
 export function notificationBody(n: TaskNotification): string {
@@ -213,11 +222,11 @@ export const MAX_PENDING_NOTIFICATIONS = 200;
 // ---------------------------------------------------------------------------
 
 export function notifyJournalPath(ctx: HomeContext): string {
-  return join(credentialDir(ctx), 'mesh-notify-state.json');
+  return join(credentialDir(ctx), 'department-notify-state.json');
 }
 
 export function notifyLockPath(ctx: HomeContext): string {
-  return join(credentialDir(ctx), 'mesh-notify-daemon.lock');
+  return join(credentialDir(ctx), 'department-notify-daemon.lock');
 }
 
 function emptyJournal(): NotifyJournal {
@@ -280,7 +289,7 @@ interface MeResponse {
   orgs: MeOrg[];
 }
 
-async function fetchMe(deps: MeshNotifyDeps, server: string, token: string): Promise<MeResponse | null> {
+async function fetchMe(deps: DepartmentNotifyDeps, server: string, token: string): Promise<MeResponse | null> {
   try {
     const res = await deps.fetch(`${server}/api/v1/me`, {
       method: 'GET',
@@ -296,11 +305,11 @@ async function fetchMe(deps: MeshNotifyDeps, server: string, token: string): Pro
 }
 
 async function fetchOpenTasks(
-  deps: MeshNotifyDeps,
+  deps: DepartmentNotifyDeps,
   server: string,
   token: string,
   orgId: string,
-): Promise<MeshTaskSummary[]> {
+): Promise<DepartmentTaskSummary[]> {
   try {
     const res = await deps.fetch(`${server}/api/v1/dept-tasks`, {
       method: 'GET',
@@ -309,7 +318,7 @@ async function fetchOpenTasks(
     if (res.status !== 200) return [];
     const body = (await res.json()) as { tasks?: unknown };
     if (!Array.isArray(body.tasks)) return [];
-    return body.tasks as MeshTaskSummary[];
+    return body.tasks as DepartmentTaskSummary[];
   } catch {
     return [];
   }
@@ -319,7 +328,7 @@ async function fetchOpenTasks(
 // Poll core
 // ---------------------------------------------------------------------------
 
-export interface MeshNotifyDeps {
+export interface DepartmentNotifyDeps {
   fetch: FetchLike;
   fs: CloudFs;
   now: () => number;
@@ -334,13 +343,13 @@ export interface PollResult {
   errors: string[];
 }
 
-/** Adapt `MeshNotifyDeps` into `credential-refresh.ts`'s `RefreshDeps` — the
- *  two side-effect seams are structurally identical (fetch/fs/now/env/
+/** Adapt `DepartmentNotifyDeps` into `credential-refresh.ts`'s `RefreshDeps` —
+ *  the two side-effect seams are structurally identical (fetch/fs/now/env/
  *  platform/homedir); this daemon is exactly the "always-on supervisor"
  *  04-cloud-auth.md §6 names, so it must never hand-roll its own refresh
  *  call — a poll cycle racing an interactive `pipeline cloud connect` is the
  *  precise concurrent-refresh scenario that revokes the token family. */
-function refreshDepsFrom(deps: MeshNotifyDeps): RefreshDeps {
+function refreshDepsFrom(deps: DepartmentNotifyDeps): RefreshDeps {
   return { fetch: deps.fetch, fs: deps.fs, now: deps.now, platform: deps.platform, env: deps.env, homedir: deps.homedir };
 }
 
@@ -349,7 +358,7 @@ function refreshDepsFrom(deps: MeshNotifyDeps): RefreshDeps {
  *  changed notify-worthy states are appended to the pending queue (durable —
  *  survives until a SessionStart hook drains them) and returned. Never
  *  throws — a single bad server/org is skipped and recorded in `errors`. */
-export async function pollOnce(deps: MeshNotifyDeps): Promise<PollResult> {
+export async function pollOnce(deps: DepartmentNotifyDeps): Promise<PollResult> {
   const ctx: HomeContext = { platform: deps.platform, env: deps.env, homedir: deps.homedir };
   const store: CredentialStore = readCredentialStore(deps.fs, credentialFilePath(ctx));
   const journal = readNotifyJournal(deps.fs, notifyJournalPath(ctx));
@@ -414,7 +423,7 @@ export async function pollOnce(deps: MeshNotifyDeps): Promise<PollResult> {
 }
 
 // ---------------------------------------------------------------------------
-// Poll loop (the daemon's main body — `pipeline mesh notify`)
+// Poll loop (the daemon's main body — `pipeline department notify`)
 // ---------------------------------------------------------------------------
 
 export interface PollLoopOptions {
@@ -429,7 +438,7 @@ export interface PollLoopOptions {
   maxIterations?: number;
 }
 
-export async function pollLoop(deps: MeshNotifyDeps, opts: PollLoopOptions): Promise<void> {
+export async function pollLoop(deps: DepartmentNotifyDeps, opts: PollLoopOptions): Promise<void> {
   let iteration = 0;
   for (;;) {
     iteration++;
