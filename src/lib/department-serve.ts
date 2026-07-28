@@ -53,7 +53,7 @@
 
 import { resolve } from 'node:path';
 import type { DepartmentManifest, DepartmentRegistrationRequest } from './department-manifest';
-import { adapterIdForEngine, engineDefinition, ENGINES } from './department-manifest';
+import { engineDefinition, SUPPORTED_ENGINES } from './department-manifest';
 import type { RunnerServiceState, ShellRunner } from './runner-enrol';
 
 // ---------------------------------------------------------------------------
@@ -381,26 +381,56 @@ function describeHttpFailure(what: string, result: JsonResult): string {
 // ---------------------------------------------------------------------------
 
 /**
- * The adapters `pipeline-runner` actually registers today — its `cli.ts`
- * constructs exactly `JsonlProcessAdapter` (`jsonl-process`),
- * `ContainerAdapter` (`container`) and `PipelineDriveAdapter`
- * (`pipeline-drive`), and `DepartmentManager` resolves an offer by looking
- * `RuntimeConfig.adapterId` up in that registry.
+ * x32 — THERE IS NO SECOND ENGINE LIST HERE ANY MORE, and that absence is the
+ * fix. This file used to carry `SERVABLE_ADAPTER_IDS`, a hand-written
+ * `['jsonl-process', 'container', 'pipeline-drive']` describing which adapters
+ * `pipeline-runner`'s `cli.ts` constructs. It went stale the moment task `b3`
+ * shipped `ClaudeCodeAdapter` and nobody edited this line, and the result was
+ * a command that contradicted itself on one screen: `validate` printed
+ * `✓ engine  claude-code  (supported)` (read from `ENGINES`) and `serve` then
+ * refused with "no engine module for 'claude-code' ships in pipeline-runner
+ * yet" (read from the copy below it). The flagship engine — `department new`'s
+ * own default — was unreachable through the one command that takes a
+ * department live.
  *
- * The binding STORE would accept any adapter id (b1 validates shape, not
- * existence), so serving an engine with no module would produce a department
- * that registers, binds, and then rejects every task it is offered — the
- * "why isn't my department working" trap this design exists to remove.
- * `serve` therefore refuses BEFORE registering anything, and says which
- * engines this machine can actually run.
+ * The list that was wrong was this one, and the reason it could be wrong is
+ * that it was a SECOND opinion about a fact `ENGINES`
+ * (`./department-manifest.ts`) already states. So it is gone: **an engine is
+ * servable exactly when it is in the engine registry**, which is what
+ * `engineDefinition()` / `isSupportedEngine()` answer and what BOTH the
+ * "(supported)" line and this module's refusal now read. Two lists cannot
+ * disagree when there is one list and one predicate.
  *
- * `claude-code` — `department new`'s own default — is deliberately absent: its
- * engine module is task `b3`, and inventing a command line for it here would
- * be fabricating a contract that task has not written yet (D23 already
- * constrains it to `--mcp-config` + a `headersHelper`, which no `bind` flag
- * can express). One honest refusal beats a half-live department.
+ * That equivalence is not a convenience — it is `pipeline-runner`'s own
+ * documented invariant, restated. Its `department/engine.ts` says a name
+ * enters `ENGINE_NAMES` only together with its module and its
+ * `ENGINE_REGISTRY` row ("listing it any earlier would have made `validate`
+ * tell a user that `engine: claude-code` is supported when nothing in this
+ * repo could run it. `codex` / `copilot` are still not listed for exactly that
+ * reason"), and the `Record<EngineName, …>` type makes a half-added engine a
+ * compile error there. A name in the registry therefore MEANS a module ships.
+ *
+ * What remains genuinely unguarded is the mirror itself: `ENGINES` here is a
+ * hand-maintained copy of a table owned by `pipeline-runner`, with no
+ * dependency edge between the packages — the open architecture decision filed
+ * as **x14**. This change removes one of the two copies inside THIS package
+ * and leaves x14's copy exactly where it was; `tests/department-serve.test.ts`
+ * adds a best-effort drift check that reads the runner's `engine.ts` when both
+ * repos are checked out side by side (the superrepo, which is where such drift
+ * is actually authored) and fails loudly on a mismatch. It is a detector, not
+ * the cure. The cure is x14.
+ *
+ * NOTE for whoever closes x14: `pipeline-runner bind` does NOT validate
+ * `--adapter` against its own registry (`cli.ts`'s `runBind` writes whatever
+ * it is given; b1 validates shape, not existence). Teaching it to reject an
+ * adapter id it has no module for would move this fact to the package that
+ * owns it, over a seam — argv — that already exists and that D26 already
+ * sanctions, with no npm dependency in either direction.
+ *
+ * The per-engine executable this module used to hard-code (`'pipeline'`) now
+ * lives on the same one table as `EngineDefinition.defaultCommand`, for the
+ * same reason: one row per engine, no second place to forget.
  */
-export const SERVABLE_ADAPTER_IDS: readonly string[] = ['jsonl-process', 'container', 'pipeline-drive'];
 
 /** The local runtime spec for one department — exactly what `pipeline-runner
  *  bind` will store, and nothing that ever reaches the cloud. */
@@ -424,9 +454,18 @@ export interface RuntimeBindingOptions {
    *  working directory (05 §1: "every arriving task runs a session rooted in
    *  this folder"). */
   manifestDir: string;
-  /** Overrides the executable an `engine: pipeline` department runs. Defaults
-   *  to `pipeline` on PATH, which is what `pipeline-runner`'s own dispatch
-   *  path uses (`dispatch/matcher.ts`'s `pipelineBin`). */
+  /**
+   * Overrides the executable for the two engines whose binary is a MACHINE
+   * fact rather than an authored one: `engine: pipeline` (defaults to
+   * `pipeline` on PATH, which is what `pipeline-runner`'s own dispatch path
+   * uses — `dispatch/matcher.ts`'s `pipelineBin`) and, since x32,
+   * `engine: claude-code` (defaults to `claude`). Both defaults are
+   * `EngineDefinition.defaultCommand` rows in `./department-manifest.ts`.
+   *
+   * Deliberately NOT applied to `process` / `container`: for those the command
+   * IS the department, it is authored in `department.yml`, and overriding it
+   * from the command line would run something the manifest never named.
+   */
   runtimeCommand?: string;
 }
 
@@ -437,35 +476,57 @@ export type RuntimeBindingResult = { ok: true; binding: RuntimeBinding } | { ok:
  * `RuntimeConfig` shape. Pure — no I/O, no clock — so every engine's mapping
  * is unit-testable without a runner on the machine.
  *
- * `engine:` → `adapterId` goes through a7's registry
- * (`adapterIdForEngine`), which is the single place that translation exists;
- * 06 §2 is explicit that a user never types `adapterId` and no user-facing
- * text may print one.
+ * Everything engine-specific is read from ONE row of a7's registry
+ * (`engineDefinition`) — the adapter id, the default executable, nothing
+ * hard-coded here (x32). 06 §2 is explicit that a user never types `adapterId`
+ * and no user-facing text may print one.
  */
 export function runtimeBindingFor(
   manifest: DepartmentManifest,
   opts: RuntimeBindingOptions,
 ): RuntimeBindingResult {
-  const adapterId = adapterIdForEngine(manifest.runtime.engine);
-  if (adapterId === undefined) {
-    // Unreachable in `serve` (validate refuses an unknown engine first), kept
-    // so this function is total for any caller.
-    return { ok: false, message: `unknown engine '${manifest.runtime.engine}'` };
-  }
-  if (!SERVABLE_ADAPTER_IDS.includes(adapterId)) {
+  const engine = engineDefinition(manifest.runtime.engine);
+  if (engine === undefined) {
+    // The ONE engine gate left (x32). Being absent from the registry is what
+    // "no module ships for this engine" MEANS — see this module's header note.
+    // Normally unreachable from `serve` (validate refuses an unknown engine
+    // first, with the same list), kept so this function is total for any
+    // caller.
     return {
       ok: false,
       message:
-        `no engine module for '${manifest.runtime.engine}' ships in pipeline-runner yet, so this machine could not ` +
-        `execute a single task for it.\n  Servable engines today: ${SERVABLE_ENGINES.join(', ')}. ` +
-        `A department authored for '${manifest.runtime.engine}' comes online as soon as its engine module ships — ` +
-        'no change to department.yml.',
+        `unknown engine '${manifest.runtime.engine}' — no module for it ships in pipeline-runner, so this machine ` +
+        `could not execute a single task for it.\n  Engines this machine can run: ${SUPPORTED_ENGINES.join(', ')}.`,
+    };
+  }
+  const adapterId = engine.adapterId;
+
+  // x32 — the executable, resolved once, from the registry rather than from a
+  // branch per engine. `EngineDefinition.defaultCommand` says which kind of
+  // engine this is:
+  //
+  //  - SET (`pipeline` → `pipeline`, `claude-code` → `claude`): the binary is a
+  //    MACHINE fact. Every department using this engine runs the same one, its
+  //    path varies per machine, and the supervisor's adapter builds the whole
+  //    command line around it — so nothing is authored, the default applies,
+  //    and `--runtime-command` is the (machine-local) override. This is what
+  //    makes a `department new` manifest — which names claude-code and no
+  //    command at all — complete rather than broken, and it is load-bearing
+  //    rather than cosmetic: pipeline-runner's `narrowRuntimeConfig` DROPS an
+  //    entry whose `command` is missing or empty.
+  //  - UNSET (`process`, `container`): the command IS the department. Nothing
+  //    can be defaulted and the refusal below is the honest answer.
+  const command =
+    engine.defaultCommand !== undefined ? (opts.runtimeCommand ?? engine.defaultCommand) : manifest.runtime.command;
+  if (!command) {
+    return {
+      ok: false,
+      message: `engine: ${manifest.runtime.engine} needs runtime.command — the supervisor has nothing to start`,
     };
   }
 
   const warnings: string[] = [];
   const spec: Record<string, unknown> = {};
-  let command: string;
   let args: string[] = [];
   let cwd = opts.manifestDir;
 
@@ -476,7 +537,6 @@ export function runtimeBindingFor(
     // `pipelineDrive` spec. `pipelineRoot` is made ABSOLUTE here: the
     // supervisor's working directory is its own, not the department's, so a
     // repo-relative path would resolve somewhere else entirely.
-    command = opts.runtimeCommand ?? 'pipeline';
     const pipelineRoot = manifest.runtime.pipelineRoot;
     const startIteration = manifest.runtime.startIteration;
     if (!pipelineRoot) {
@@ -498,15 +558,15 @@ export function runtimeBindingFor(
       startIteration,
     };
   } else {
-    // `process` / `container` / any future engine that names its own command.
-    const declared = manifest.runtime.command;
-    if (!declared) {
-      return {
-        ok: false,
-        message: `engine: ${manifest.runtime.engine} needs runtime.command — the supervisor has nothing to start`,
-      };
-    }
-    command = declared;
+    // `claude-code` / `process` / `container` — an executable started directly
+    // in the department folder, with the manifest's own argv appended.
+    //
+    // For `claude-code` those args are the per-department extras
+    // `pipeline-runner`'s `ClaudeCodeAdapter` appends VERBATIM after the flag
+    // surface it builds itself (`--model`, `--add-dir`, …); it constructs
+    // `--print`, `--output-format stream-json`, `--mcp-config` and the allowed
+    // receiver tools from `RuntimeConfig.command` + `cwd`, so a claude-code
+    // binding needs no nested spec and no authored command line at all.
     args = manifest.runtime.args ?? [];
     if (manifest.runtime.workingDirectory) cwd = resolve(opts.manifestDir, manifest.runtime.workingDirectory);
     if (manifest.runtime.environment !== undefined) {
@@ -867,18 +927,13 @@ export function assessLiveness(e: LivenessEvidence): Liveness {
   };
 }
 
-/** True when this engine's module exists in the supervisor that would run it
- *  (see `SERVABLE_ADAPTER_IDS`). */
-export function engineIsServable(engine: string): boolean {
-  const adapterId = engineDefinition(engine)?.adapterId;
-  return adapterId !== undefined && SERVABLE_ADAPTER_IDS.includes(adapterId);
-}
-
-/** The engine NAMES a user may type today, in registry order — never adapter
- *  ids, which 06 §2 forbids in user-facing text. */
-export const SERVABLE_ENGINES: readonly string[] = ENGINES.filter((e) =>
-  SERVABLE_ADAPTER_IDS.includes(e.adapterId),
-).map((e) => e.engine);
+// x32: `engineIsServable()` and `SERVABLE_ENGINES` lived here. Both were
+// derived from `SERVABLE_ADAPTER_IDS`, both are gone with it, and neither had
+// a second caller — `engineIsServable` had none at all, which is part of how
+// the drift stayed invisible. Ask `isSupportedEngine()` / `SUPPORTED_ENGINES`
+// (`./department-manifest.ts`) instead: in this product an engine is servable
+// exactly when the registry has a row for it, and that is now the only place
+// the question is answered.
 
 // ---------------------------------------------------------------------------
 // a10 — resolving a department's ID WITHOUT the cloud

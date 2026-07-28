@@ -96,6 +96,7 @@ import {
   bunYamlParser,
   engineDefinition,
   hasErrors,
+  isSupportedEngine,
   parseDepartmentManifest,
   readDepartmentManifest,
   SUPPORTED_ENGINES,
@@ -859,7 +860,11 @@ function printHuman(
     } else {
       out('✗ skills        (see findings below)\n');
     }
-    const engineOk = engineDefinition(manifest.runtime.engine) !== undefined;
+    // x32: the SAME predicate `serve` binds on (`lib/department-manifest.ts`).
+    // This line is the one that used to say "(supported)" about an engine
+    // `serve` then refused; there is no longer a second list for it to
+    // disagree with.
+    const engineOk = isSupportedEngine(manifest.runtime.engine);
     out(
       `${engineOk ? '✓' : '✗'} engine        ${manifest.runtime.engine || '(missing)'}${engineOk ? '  (supported)' : ''}\n`,
     );
@@ -1141,8 +1146,9 @@ function serveHelpText(): string {
     '                         credential, which has no discoverable org).\n' +
     '  --server <url>         Control-plane base URL.\n' +
     "  --runner-name <n>      Name for this machine's runner (default: hostname).\n" +
-    '  --runtime-command <c>  Executable an engine: pipeline department runs\n' +
-    "                         (default: 'pipeline' on PATH).\n" +
+    '  --runtime-command <c>  Executable this machine runs for engines whose\n' +
+    "                         binary is not authored: 'pipeline' (engine:\n" +
+    "                         pipeline) and 'claude' (engine: claude-code).\n" +
     '  --detach               Install the supervisor as a service (the default).\n' +
     '  --foreground           Do not install a service; print how to run one.\n' +
     '  --device / --reauth    Passed to the authentication ladder.\n' +

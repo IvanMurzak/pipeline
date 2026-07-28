@@ -167,16 +167,47 @@ export interface EngineDefinition {
    * failing at task time.
    */
   supportedLifecycles: readonly DepartmentLifecycle[] | null;
-  /** True when this engine legitimately carries the LOCAL-ONLY exec fields
-   *  (`command`, `args`, `workingDirectory`, `environment`). Informational for
-   *  a8's validate — the advertised projection is an allow-list either way. */
+  /**
+   * True when this engine's command line IS the department and must therefore
+   * be authored — the one thing a8's validate does with it is warn that
+   * `runtime.command` is missing. It is exactly the inverse of
+   * {@link EngineDefinition.defaultCommand}, and the LOCAL-ONLY argv fields
+   * (`args`, `workingDirectory`, `environment`) are honoured for every engine
+   * that spawns an executable regardless of it. The advertised projection is
+   * an allow-list either way, so nothing here reaches the cloud.
+   */
   takesLocalExecFields: boolean;
+  /**
+   * x32 — the executable this engine runs when the manifest names none, or
+   * `undefined` when the command must be authored (`takesLocalExecFields`).
+   *
+   * A `defaultCommand` marks an engine whose binary is a MACHINE fact rather
+   * than an authored one: every department using it runs the SAME program
+   * (`pipeline drive …`, `claude --print …`), only its install path varies per
+   * machine, and the runner-side adapter builds the whole command line around
+   * it. `department.yml` is cloned and shared, so an operator's install path
+   * does not belong in it — `pipeline department serve --runtime-command <c>`
+   * is the override, and this is the default.
+   *
+   * It is load-bearing rather than cosmetic: `pipeline-runner`'s
+   * `narrowRuntimeConfig` REJECTS a binding whose `command` is missing or
+   * empty, so an engine with neither an authored nor a defaulted command
+   * cannot be bound at all.
+   */
+  defaultCommand?: string;
 }
 
 /**
  * The engine registry (06 §2's table). Adding an engine is one row here plus a
  * module in the runner — no change to `department.yml`'s shape, the CLI's
  * commands, the wire protocol, or any existing department.
+ *
+ * x32: it is also the ONLY engine list in this package. A row here means every
+ * one of `validate`'s "(supported)", `new --engine`'s accepted values, and
+ * `serve`'s willingness to bind — see {@link isSupportedEngine}. There is
+ * deliberately no second table saying which of these can actually be served,
+ * because there was one, it disagreed with this one, and the flagship engine
+ * was unreachable for as long as it did.
  *
  * `claude-code`'s capabilities are 06 §3's table. `pipeline` advertises no
  * streaming and no mid-task input because `pipeline-drive` has no stdin and
@@ -196,6 +227,11 @@ export const ENGINES: readonly EngineDefinition[] = [
     },
     supportedLifecycles: null,
     takesLocalExecFields: false,
+    // Claude Code's own CLI, on PATH. `pipeline-runner`'s `ClaudeCodeAdapter`
+    // builds every flag around it (`--print`, `--output-format stream-json`,
+    // `--mcp-config`, the allowed receiver tools) and appends `runtime.args`
+    // verbatim, so a claude-code department authors no command line at all.
+    defaultCommand: 'claude',
   },
   {
     engine: 'pipeline',
@@ -215,6 +251,10 @@ export const ENGINES: readonly EngineDefinition[] = [
     // and can no longer enforce it — see `supportedLifecycles`' doc.
     supportedLifecycles: ['per-task'],
     takesLocalExecFields: false,
+    // This CLI itself: the adapter runs `<command> drive --root … --start …`,
+    // the same binary `pipeline-runner`'s own dispatch path uses
+    // (`dispatch/matcher.ts`'s `pipelineBin`).
+    defaultCommand: 'pipeline',
   },
   {
     engine: 'process',
@@ -241,6 +281,29 @@ export const SUPPORTED_ENGINES: readonly string[] = ENGINES.map((e) => e.engine)
 
 export function engineDefinition(engine: string): EngineDefinition | undefined {
   return ENGINES.find((e) => e.engine === engine);
+}
+
+/**
+ * x32 — THE engine predicate. `validate`'s `✓ engine … (supported)` line and
+ * `serve`'s "can this machine run it?" refusal are the same question, and this
+ * is the one function both ask, so they cannot answer differently.
+ *
+ * They used to. `department-serve.ts` carried its own hand-written
+ * `SERVABLE_ADAPTER_IDS` listing the adapters `pipeline-runner` was believed to
+ * register; it went stale when task b3 shipped `ClaudeCodeAdapter`, and
+ * `pipeline department serve` printed `✓ engine  claude-code  (supported)` and
+ * then refused the same manifest on the next screen. That list is deleted:
+ * being in `ENGINES` is what "a module for it ships" MEANS, which is
+ * `pipeline-runner`'s own rule for its `ENGINE_NAMES` (a name is added only
+ * together with its module and its `ENGINE_REGISTRY` row — `codex`/`copilot`
+ * are absent for exactly that reason).
+ *
+ * The remaining exposure is that `ENGINES` mirrors that table by hand with no
+ * dependency edge between the packages — filed as **x14**, an open
+ * architecture decision, not closed here.
+ */
+export function isSupportedEngine(engine: string): boolean {
+  return engineDefinition(engine) !== undefined;
 }
 
 /** `engine:` → `adapterId`, the one place the translation happens.

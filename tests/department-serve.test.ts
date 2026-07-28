@@ -25,10 +25,10 @@
 // binary, no real credential store is touched by any test in this file.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { runDepartmentServe, type ServeCommandDeps } from '../src/commands/department';
+import { runDepartmentServe, runDepartmentValidate, type ServeCommandDeps } from '../src/commands/department';
 import {
   appOriginFor,
   assessLiveness,
@@ -39,7 +39,7 @@ import {
   type ServeHttpInit,
   type ServeHttpResponse,
 } from '../src/lib/department-serve';
-import { buildRegistrationRequest, parseDepartmentManifest } from '../src/lib/department-manifest';
+import { buildRegistrationRequest, ENGINES, parseDepartmentManifest } from '../src/lib/department-manifest';
 import type { ShellResult } from '../src/lib/runner-enrol';
 
 // ---------------------------------------------------------------------------
@@ -846,18 +846,19 @@ describe('serve — DoD box 3: 05 §5\'s failure table', () => {
 // ---------------------------------------------------------------------------
 
 describe('serve — DoD box 4: ○ registered — not serving, never a bare online', () => {
-  test('an engine with no module on this machine is refused BEFORE anything is registered', async () => {
-    // `claude-code` is `department new`'s own default and its engine module is
-    // task b3 — pipeline-runner registers only jsonl-process, container and
-    // pipeline-drive today, so this department could not execute one task.
-    const dir = departmentProject(departmentYaml({ engine: 'claude-code' }));
+  test('an engine that does not exist at all is refused BEFORE anything is registered', async () => {
+    // The refusal x32 kept. `codex` is named in the design as a planned engine
+    // and is deliberately absent from the registry (as it is from
+    // pipeline-runner's `ENGINE_NAMES`), so nothing on this machine could
+    // execute a task for it — and a cloud record for it would be inert.
+    const dir = departmentProject(departmentYaml({ engine: 'codex' }));
     const w = makeWorld({ cwd: dir });
 
     const code = await runDepartmentServe([], w.deps);
 
     expect(code).toBe(1);
-    expect(w.err()).toContain("no engine module for 'claude-code'");
-    expect(w.err()).toContain('Servable engines today: pipeline, process, container');
+    expect(w.err()).toContain("'codex' is not supported yet");
+    expect(w.err()).toContain('claude-code, pipeline, process, container');
     expect(w.err()).toContain('Nothing was registered');
     expect(w.out()).not.toContain('online');
     // Nothing reached the control plane, and nothing was bound locally.
@@ -1225,6 +1226,226 @@ describe('serve — x13: the online claim is an observation, not an assumption',
     expect(w.out()).not.toContain('online');
     expect(w.out()).not.toContain('could not confirm');
     expect(w.fetches.some((f) => f.url.includes('/installs'))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// x32 — the flagship engine is reachable through the shipped command
+// ---------------------------------------------------------------------------
+//
+// `serve` could not bring a `claude-code` department online AT ALL: a second,
+// hand-written engine list in `lib/department-serve.ts` (`SERVABLE_ADAPTER_IDS`)
+// had gone stale against the registry, so one screen printed
+// `✓ engine  claude-code  (supported)` and the next refused the same manifest.
+// Every phase-P4 engine task (b3, b4, x16, x21, x27, x31) builds `claude-code`,
+// and design 02 §4's publish path runs through `serve`.
+//
+// Two gate runs and a green CI missed it because their rigs bound the
+// `DepartmentManager` directly instead of going through `serve`. So these tests
+// deliberately do NOT assert list membership — they run a real `claude-code`
+// manifest through `runDepartmentServe`, the same entry point a user types, and
+// look at what reached `pipeline-runner bind`.
+
+describe('serve — x32: a claude-code department comes online', () => {
+  test('serve binds and serves engine: claude-code, defaulting the binary to `claude`', async () => {
+    const dir = departmentProject(departmentYaml({ engine: 'claude-code' }));
+    const w = makeWorld({ cwd: dir });
+
+    const code = await runDepartmentServe([], w.deps);
+
+    expect(code).toBe(0);
+    expect(w.out()).toContain('✓ Runtime bound   claude-code → claude');
+    expect(w.out()).toContain('● unity-review — online');
+    // The refusal that used to fire here is gone in every spelling.
+    expect(w.err()).not.toContain('no engine module');
+    expect(w.err()).not.toContain('Nothing was registered');
+
+    // What actually reached pipeline-runner. `--adapter claude-code` is the id
+    // its `cli.ts` really registers (`new ClaudeCodeAdapter(...)`), `--command`
+    // is non-empty because `narrowRuntimeConfig` DROPS a binding without one,
+    // and `--cwd` is the department folder (05 §1: the session is rooted
+    // there, and the folder's own `.claude/` is what governs it).
+    const bind = w.shells.find((c) => c.args[0] === 'bind');
+    expect(bind).toBeDefined();
+    expect(bind!.args).toEqual([
+      'bind',
+      '--department',
+      DEPT_ID,
+      '--adapter',
+      'claude-code',
+      '--command',
+      'claude',
+      '--cwd',
+      dir,
+      '--lifecycle',
+      'per-task',
+    ]);
+    // No nested spec: the adapter builds its own flag surface.
+    expect(bind!.args).not.toContain('--spec');
+  });
+
+  test('nothing prints "(supported)" and then refuses — validate and serve read one predicate', async () => {
+    // The self-contradiction itself, as a test: the exact two outputs that
+    // disagreed on `main`, produced back to back from the same manifest.
+    const dir = departmentProject(departmentYaml({ engine: 'claude-code' }));
+    const manifestPath = join(dir, 'department.yml');
+
+    let validateOut = '';
+    const origOut = process.stdout.write;
+    process.stdout.write = ((s: string) => ((validateOut += s), true)) as typeof process.stdout.write;
+    let validateCode: number;
+    try {
+      validateCode = runDepartmentValidate(['--file', manifestPath]);
+    } finally {
+      process.stdout.write = origOut;
+    }
+
+    expect(validateCode).toBe(0);
+    expect(validateOut).toContain('✓ engine        claude-code  (supported)');
+
+    const w = makeWorld({ cwd: dir });
+    expect(await runDepartmentServe([], w.deps)).toBe(0);
+    expect(w.out()).toContain('● unity-review — online');
+  });
+
+  test('--runtime-command overrides the claude binary; a manifest never carries an install path', async () => {
+    const dir = departmentProject(departmentYaml({ engine: 'claude-code' }));
+    const w = makeWorld({ cwd: dir });
+
+    expect(await runDepartmentServe(['--runtime-command', '/opt/claude/bin/claude'], w.deps)).toBe(0);
+
+    const bind = w.shells.find((c) => c.args[0] === 'bind');
+    expect(bind!.args[bind!.args.indexOf('--command') + 1]).toBe('/opt/claude/bin/claude');
+  });
+
+  test('claude-code passes runtime.args through as the adapter\'s verbatim extras', () => {
+    // `ClaudeCodeAdapter` appends `RuntimeConfig.args` after the flag surface
+    // it builds, which is where `--model` / `--add-dir` belong.
+    const { manifest } = parseDepartmentManifest(
+      departmentYaml({ engine: 'claude-code', extra: '  args: ["--model", "opus"]\n' }),
+    );
+    const result = runtimeBindingFor(manifest!, { manifestDir: '/dept' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.binding.adapterId).toBe('claude-code');
+    expect(result.binding.command).toBe('claude');
+    expect(result.binding.args).toEqual(['--model', 'opus']);
+    expect(result.binding.spec).toEqual({});
+  });
+
+  test('every engine the registry lists can produce a binding — no row is a dead end', () => {
+    // The general form of the x32 bug: a registry row `validate` calls
+    // "supported" that `runtimeBindingFor` cannot turn into a binding. Written
+    // over `ENGINES` rather than over a list of names, so a new engine is
+    // covered the moment its row lands.
+    for (const def of ENGINES) {
+      const extra =
+        def.engine === 'pipeline'
+          ? '' // departmentYaml already writes pipelineRoot + startIteration
+          : def.takesLocalExecFields
+            ? '  command: ./bin/dept\n'
+            : '';
+      const { manifest } = parseDepartmentManifest(departmentYaml({ engine: def.engine, extra }));
+      expect(manifest).not.toBeNull();
+      const result = runtimeBindingFor(manifest!, { manifestDir: '/dept' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.binding.adapterId).toBe(def.adapterId);
+      // pipeline-runner's `narrowRuntimeConfig` drops an entry without one.
+      expect(result.binding.command.length).toBeGreaterThan(0);
+    }
+  });
+
+  test('x13 still holds for claude-code: a stopped supervisor is not-serving, never online', async () => {
+    const dir = departmentProject(departmentYaml({ engine: 'claude-code' }));
+    const w = makeWorld({
+      cwd: dir,
+      shell: { identityRunnerId: RUNNER_ID, serviceInstalled: true, serviceState: 'stopped' },
+      cloud: { profileOnline: false },
+    });
+
+    expect(await runDepartmentServe([], w.deps)).toBe(1);
+    expect(w.out()).toContain('○ unity-review — registered — not serving');
+    expect(w.out()).not.toContain('● unity-review — online');
+  });
+
+  test('x11 still holds for claude-code: a failed bind aborts before the claim', async () => {
+    const dir = departmentProject(departmentYaml({ engine: 'claude-code' }));
+    const w = makeWorld({ cwd: dir, shell: { bindCode: 1, bindStderr: 'nope' } });
+
+    expect(await runDepartmentServe([], w.deps)).toBe(1);
+    expect(w.out()).not.toContain('online');
+    expect(w.fetches.some((f) => f.url.includes('/installs'))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// x32 — the drift that produced the bug, made loud where it is authored
+// ---------------------------------------------------------------------------
+//
+// `ENGINES` is a hand-maintained copy of a table owned by `pipeline-runner`
+// (`src/department/engine.ts`'s `ENGINE_NAMES` + `ENGINE_REGISTRY`) with NO
+// dependency edge between the packages — the open architecture decision filed
+// as x14, which this task deliberately does not take unilaterally. Until it is
+// taken, the next best thing is to make the drift LOUD in the one place it is
+// actually authored: the ai-pipeline superrepo, where both repos are checked
+// out as sibling submodules.
+//
+// Best-effort by construction. When the runner's source is not on disk (this
+// repo's own CI, an npm consumer, a bare clone) or its shape is not the one
+// this reader understands, the check declines to assert rather than inventing
+// a failure. It is a detector for the superrepo, not a substitute for x14.
+
+const RUNNER_ENGINE_SOURCE_ENV = 'PIPELINE_RUNNER_ENGINE_TS';
+
+/** `engine → adapterId` as stated by pipeline-runner's own `ENGINE_REGISTRY`
+ *  source text, or `null` when it cannot be read or confidently parsed. */
+function readRunnerEngineRegistry(): Record<string, string> | null {
+  const candidates = [
+    process.env[RUNNER_ENGINE_SOURCE_ENV],
+    // superrepo layout: public/ai-pipeline-plugin/apps/pipeline-cli/tests → public/pipeline-runner
+    resolve(import.meta.dir, '../../../../pipeline-runner/src/department/engine.ts'),
+  ].filter((p): p is string => typeof p === 'string' && p.length > 0);
+
+  const file = candidates.find((p) => existsSync(p));
+  if (file === undefined) return null;
+
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+  // Each shipped row reads:  <key>: { engine: '<name>', adapterId: '<id>', …
+  const rows = [...text.matchAll(/engine:\s*'([a-z0-9-]+)',\s*(?:\/\/[^\n]*\n\s*)*adapterId:\s*'([a-z0-9-]+)'/g)];
+  if (rows.length === 0) return null;
+  const out: Record<string, string> = {};
+  for (const m of rows) out[m[1]!] = m[2]!;
+  return out;
+}
+
+describe('x32 — engine registry drift against pipeline-runner (best effort, superrepo only)', () => {
+  test('ENGINES mirrors pipeline-runner ENGINE_REGISTRY, or the copy has drifted', () => {
+    const runner = readRunnerEngineRegistry();
+    if (runner === null) {
+      // Nothing to compare against here. Not a failure — see the note above.
+      expect(true).toBe(true);
+      return;
+    }
+    const mine: Record<string, string> = Object.fromEntries(ENGINES.map((e) => [e.engine, e.adapterId]));
+    // Reported as self-explaining strings rather than as an object diff: a
+    // failure here is read by whoever just edited ONE of the two tables, and
+    // it has to say which engine and which side without further digging.
+    const drift = [...new Set([...Object.keys(mine), ...Object.keys(runner)])].sort().flatMap((engine) =>
+      mine[engine] === runner[engine]
+        ? []
+        : [
+            `${engine}: ENGINES (apps/pipeline-cli/src/lib/department-manifest.ts) says ` +
+              `${mine[engine] ?? '(no row — add one, or the engine is unusable from the CLI)'}; ` +
+              `pipeline-runner ENGINE_REGISTRY says ${runner[engine] ?? '(no row — no module ships for it)'}`,
+          ],
+    );
+    expect(drift).toEqual([]);
   });
 });
 
