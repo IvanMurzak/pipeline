@@ -77,14 +77,9 @@ const newCmd = (args: string[]) => invoke(runDepartmentNew, args);
 const validateCmd = (args: string[]) => invoke(runDepartmentValidate, args);
 
 /** A PIPELINE.md whose `## Scope` uses the BULLETED `- In:`/`- Out:` marker
- *  form `lib/match.ts`'s `SCOPE_MARKER_RE` recognizes — unlike ALL THREE
- *  bundled templates (`example-minimal`, `support-answer`, `ship-feature`),
- *  which write a plain `In:`/`Out:` line with no leading `-`/`*` and so parse
- *  to an EMPTY `scope_in`/`scope_out` (a pre-existing `lib/match.ts` gap,
- *  unrelated to this task — see the PR description). Used to exercise the
- *  Scope.In-driven half of `--from-pipeline`'s prefill; the bundled-template
- *  tests below exercise the End-State-fallback half the same gap forces in
- *  practice today.
+ *  form (as opposed to the bare `In:`/`Out:` form all three bundled templates
+ *  use — both forms parse identically since x9). Used to exercise the
+ *  Scope.In-driven half of `--from-pipeline`'s prefill.
  */
 function writeScopedPipeline(pipelineRoot: string): void {
   mkdirSync(join(pipelineRoot, 'steps'), { recursive: true });
@@ -290,7 +285,7 @@ describe('pipeline department new --from-pipeline', () => {
     expect(v.code).toBe(0);
   });
 
-  test('gracefully falls back to End State for the skill description when Scope.In does not parse (the bundled templates today)', () => {
+  test('a bundled template (bare In:/Out: markers) drives the skill description from Scope.In, not End State (x9)', () => {
     const proj = tempProject();
     copyTemplateTree('support-answer', join(proj, '.claude', 'pipeline', 'support-answer'));
 
@@ -298,8 +293,34 @@ describe('pipeline department new --from-pipeline', () => {
     expect(code).toBe(0);
     const { manifest } = readDepartmentManifest(join(proj, DEPARTMENT_MANIFEST_FILENAME));
     expect(manifest!.description).toContain('grounded answer');
-    expect(manifest!.skills[0]!.description.length).toBeGreaterThan(0);
-    // Validates cleanly regardless — the fallback never leaves a schema hole.
+    // Since x9, support-answer's bare `In:` marker parses, so the skill
+    // description comes from Scope.In (not the End-State fallback).
+    expect(manifest!.skills[0]!.description).toContain('BM25 retrieval');
+    expect(manifest!.skills[0]!.description).not.toBe(manifest!.description);
+    // Validates cleanly.
+    expect(validateCmd(['--file', join(proj, DEPARTMENT_MANIFEST_FILENAME)]).code).toBe(0);
+  });
+
+  test('gracefully falls back to End State for the skill description when a pipeline has no Scope section at all', () => {
+    const proj = tempProject();
+    const pipelineRoot = join(proj, '.claude', 'pipeline', 'no-scope');
+    mkdirSync(join(pipelineRoot, 'steps'), { recursive: true });
+    writeFileSync(
+      join(pipelineRoot, 'PIPELINE.md'),
+      `# Pipeline: no-scope\n\n## End State\n\nA concise architectural review, with a prioritized list of risks.\n\n## Project Context\n\n- Root: any project.\n`,
+    );
+    writeFileSync(
+      join(pipelineRoot, 'steps', '01-scan.md'),
+      `# Step: scan\n\n## Task\n\nScan the project.\n\n## Next\n\nPipeline complete.\n`,
+    );
+
+    const { code } = newCmd(['--from-pipeline', 'no-scope', '--dir', proj]);
+    expect(code).toBe(0);
+    const { manifest } = readDepartmentManifest(join(proj, DEPARTMENT_MANIFEST_FILENAME));
+    expect(manifest!.description).toContain('prioritized list');
+    // No `## Scope` section at all → scope_in is empty → true End-State fallback.
+    expect(manifest!.skills[0]!.description).toBe(manifest!.description);
+    // Validates cleanly — the fallback never leaves a schema hole.
     expect(validateCmd(['--file', join(proj, DEPARTMENT_MANIFEST_FILENAME)]).code).toBe(0);
   });
 

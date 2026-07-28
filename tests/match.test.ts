@@ -6,10 +6,11 @@ import {
   matchedTerms,
   splitSections,
   parseScope,
+  parseManifest,
   roundScore,
   findFirstIteration,
 } from '../src/lib/match';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 
@@ -308,4 +309,99 @@ test('Bug 2 — default neg-threshold=2: ONE shared Scope.Out token does NOT exc
   // aggressive behavior — a single shared token excludes when negThreshold=1.
   out = matchPipelines(make(), 'build the widget feature and touch the database once', { negThreshold: 1 });
   expect(out.excluded.map((e) => e.name)).toEqual(['widget']);
+});
+
+// ===========================================================================
+// Bug 3 (x9) — bare `In:`/`Out:` scope markers (no leading bullet) parsed as
+// empty, so ALL THREE bundled templates (example-minimal, ship-feature,
+// support-answer) had a dead Scope.Out hard-filter.
+// ===========================================================================
+
+test('Bug 3 — parseScope: bare In:/Out: markers (no bullet) parse identically to bulleted ones', () => {
+  const bare = parseScope(['In: alpha beta', 'Out:', '- gamma', '- delta'].join('\n'));
+  const bulleted = parseScope(['- In: alpha beta', '- Out:', '  - gamma', '  - delta'].join('\n'));
+  expect(bare).toEqual(bulleted);
+  // Pre-fix, a bare marker matched NEITHER In nor Out (the regex required a
+  // leading `-`/`*`), so the whole Scope section (both arrays) came back
+  // empty — assert both are populated now.
+  expect(bare[0].length).toBeGreaterThan(0);
+  expect(bare[1].length).toBeGreaterThan(0);
+});
+
+test('Bug 3 — parseScope: a marker starting mid-line at a sentence boundary is recognized', () => {
+  // Mirrors ship-feature's exact shape: "In:" opens the Scope body, wraps onto
+  // a second physical line, and "Out:" begins mid-line right after a period.
+  const [inL, outL] = parseScope(
+    [
+      'In: plan, implement, bounded self-review loop, open/reuse a PR, wait for CI,',
+      'human-approved merge. Out: deciding what to build (the task states it),',
+      'versioning, deploy.',
+    ].join('\n'),
+  );
+  expect(inL).toEqual([
+    'plan, implement, bounded self-review loop, open/reuse a PR, wait for CI,',
+    'human-approved merge.',
+  ]);
+  expect(outL).toEqual(['deciding what to build (the task states it),', 'versioning, deploy.']);
+});
+
+test('Bug 3 — parseScope: a bare In:/Out:-shaped substring mid-clause (no preceding sentence end) stays plain text', () => {
+  // Deliberate non-goal: we only split at a real sentence boundary
+  // (`.`/`!`/`?` + whitespace), not wherever a marker-shaped substring
+  // appears. This is the guard against false-positives on ordinary prose.
+  const [inL] = parseScope(['In: check the built-in: true flag before merging'].join('\n'));
+  expect(inL).toEqual(['check the built-in: true flag before merging']);
+});
+
+test('Bug 3 — end-to-end: all three bundled templates now parse non-empty scope_in/scope_out with the right text', () => {
+  const templatesDir = join(__dirname, '..', 'templates');
+
+  const exampleMinimal = parseManifest(join(templatesDir, 'example-minimal', 'PIPELINE.md'));
+  expect(exampleMinimal.scope_in).toEqual(['What this pipeline is responsible for.']);
+  expect(exampleMinimal.scope_out).toEqual(['What it deliberately does NOT do.']);
+
+  const shipFeature = parseManifest(join(templatesDir, 'ship-feature', 'PIPELINE.md'));
+  expect(shipFeature.scope_in).toEqual([
+    'plan, implement, bounded self-review loop, open/reuse a PR, wait for CI,',
+    'human-approved merge.',
+  ]);
+  expect(shipFeature.scope_out).toEqual([
+    'deciding what to build (the task states it),',
+    'versioning, deploy.',
+  ]);
+
+  const supportAnswer = parseManifest(join(templatesDir, 'support-answer', 'PIPELINE.md'));
+  expect(supportAnswer.scope_in).toEqual([
+    'BM25 retrieval over a local docs folder (read-only), agent selection of the',
+    'best source, and a grounded answer with a citation.',
+  ]);
+  expect(supportAnswer.scope_out).toEqual([
+    "Writing to the docs or the user's code, network calls, and multi-source",
+    'synthesis (each answer is grounded in a single best source).',
+  ]);
+});
+
+test('Bug 3 — end-to-end: ship-feature Scope.Out hard-filter now actually fires', () => {
+  // Copy the real bundled templates into a scratch pipelines dir and match a
+  // task that lands squarely in ship-feature's disclaimed Scope.Out
+  // ("versioning, deploy") — proving the filter engages, not just that the
+  // regex matches in isolation.
+  const templatesDir = join(__dirname, '..', 'templates');
+  const root = mkdtempSync(join(tmpdir(), 'match-templates-'));
+  created.push(root);
+  for (const name of ['example-minimal', 'ship-feature', 'support-answer']) {
+    cpSync(join(templatesDir, name), join(root, name), { recursive: true });
+  }
+
+  const excludedRun = matchPipelines(root, 'handle the versioning and deploy steps for this release');
+  expect(excludedRun.excluded.map((e) => e.name)).toContain('ship-feature');
+  const shipExclusion = excludedRun.excluded.find((e) => e.name === 'ship-feature')!;
+  expect(shipExclusion.matching_terms).toEqual(['versioning', 'deploy']);
+  expect(excludedRun.candidates.map((c) => c.name)).not.toContain('ship-feature');
+
+  // Sanity: a genuinely in-scope task is NOT excluded (guards against an
+  // over-eager filter created by this fix).
+  const inScopeRun = matchPipelines(root, 'implement this feature, open a PR, wait for CI, then merge');
+  expect(inScopeRun.excluded.map((e) => e.name)).not.toContain('ship-feature');
+  expect(inScopeRun.candidates.map((c) => c.name)).toContain('ship-feature');
 });

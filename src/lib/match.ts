@@ -65,9 +65,39 @@ const SECTION_RE = /^##\s+(.+?)\s*$/;
 const BULLET_RE = /^[-*]\s+(.+)$/;
 // Tolerates an optional bold wrapper around the In/Out marker so manifests
 // authored as `- **In**:` / `- **Out**:` parse identically to `- In:` / `- Out:`.
-// Without this, a bold-marked Scope section is silently dropped (both scope_in
-// AND scope_out come back empty), disabling that manifest's negative hard-filter.
-const SCOPE_MARKER_RE = /^[-*]\s*(?:\*\*)?(In|Out)(?:\*\*)?\s*:\s*(.*)$/i;
+// The leading `- `/`* ` bullet is ALSO optional: all three bundled templates
+// (example-minimal, ship-feature, support-answer) write markers flush at line
+// start with no bullet at all (`In:` / `Out:`). Without either tolerance, a
+// Scope section is silently dropped (both scope_in AND scope_out come back
+// empty), disabling that manifest's negative hard-filter.
+const SCOPE_MARKER_RE = /^(?:[-*]\s*)?(?:\*\*)?(In|Out)(?:\*\*)?\s*:\s*(.*)$/i;
+// Same marker shape as SCOPE_MARKER_RE (keep the two in sync) but without the
+// line-start anchor and with a capture of the preceding sentence-ending
+// punctuation, used only to locate a marker that starts mid-LINE but at a
+// sentence boundary — see splitMidSentenceMarkers below.
+const MID_SENTENCE_MARKER_RE = /([.!?])\s+(?=(?:\*\*)?(?:In|Out)(?:\*\*)?\s*:)/gi;
+
+/**
+ * Insert a line break right before a scope marker that starts a new sentence
+ * mid-line, e.g. ship-feature's wrapped
+ * `...wait for CI, human-approved merge. Out: deciding what to build...`
+ * — "Out:" begins a new sentence but not a new physical line.
+ *
+ * Deliberately narrow: this only fires immediately after `.`/`!`/`?` +
+ * whitespace (an actual sentence boundary), NOT wherever a marker-shaped
+ * substring happens to appear. A bare "In:"/"Out:" appearing mid-clause
+ * (not preceded by sentence-ending punctuation) is left alone and still
+ * concatenates as plain continuation text, same as before this fix. This
+ * keeps false positives out of ordinary prose while still catching the one
+ * real shape a bundled template uses.
+ *
+ * Idempotent: a marker already at the start of its own line is unaffected
+ * (at most a blank separator line collapses to one, which parseScope already
+ * ignores).
+ */
+function splitMidSentenceMarkers(text: string): string {
+  return text.replace(MID_SENTENCE_MARKER_RE, '$1\n');
+}
 
 export interface Manifest {
   manifest: string;
@@ -118,14 +148,20 @@ export function splitSections(text: string): Record<string, string> {
 /**
  * Parse a Scope section into [in_lines, out_lines].
  *
- * Tolerant of multiple authoring styles (inline `In: ...` / `Out: ...`,
- * marker-then-sub-bullets, and plain continuation lines).
+ * Tolerant of multiple authoring styles: bulleted (`- In: ...`) or bare
+ * (`In: ...`) markers, inline content on the marker line, marker-then-
+ * sub-bullets, plain continuation lines, and a marker that starts mid-line
+ * at a sentence boundary (see splitMidSentenceMarkers). Marker recognition
+ * stays scoped to whatever text the caller passes in (in practice, only the
+ * `## Scope` section body — see parseManifest) rather than being a
+ * document-wide search, so a stray "In:"/"Out:" elsewhere in the manifest
+ * can't be mistaken for a scope marker.
  */
 export function parseScope(scopeText: string): [string[], string[]] {
   const inLines: string[] = [];
   const outLines: string[] = [];
   let current: string[] | null = null;
-  for (const rawLine of splitlines(scopeText)) {
+  for (const rawLine of splitlines(splitMidSentenceMarkers(scopeText))) {
     const stripped = rawLine.trim();
     if (!stripped) continue;
     const markerMatch = SCOPE_MARKER_RE.exec(stripped);
