@@ -136,6 +136,12 @@ import {
 // or a device code. `ensureFreshCredential` is the one function in this
 // package allowed to call the refresh grant (a5's single-flight rule).
 import { ensureFreshCredential, type RefreshDeps } from '../lib/credential-refresh';
+// x19: the LOCAL half of a task's identity. The control plane knows a task's
+// state and its authenticated CALLER; only the machine that ran the work knows
+// who ADDRESSED it and which engine executed it — pipeline-runner writes both
+// into its own execution journal (b4). Read-only, never through pipeline-runner's
+// code; see that module's doc for the three rules it keeps.
+import { readLocalDepartmentJournal, type LocalJournalReading, type LocalTaskFacts } from '../lib/department-journal';
 import {
   credentialFilePath,
   DEFAULT_SERVER,
@@ -1923,6 +1929,9 @@ function statusHelpText(): string {
     "tasks — from the control plane when a live credential is already stored,\n" +
     'from this machine’s own binding state when it is not. Never triggers an\n' +
     'interactive sign-in (run `pipeline cloud connect` first for the full view).\n\n' +
+    'Each task line also shows who asked (sender) and what ran it (engine),\n' +
+    'read from this machine’s own runner journal. A task this machine did not\n' +
+    'run shows `?` for both — it is never attributed to somebody else.\n\n' +
     'Options:\n' +
     '  --follow       Keep printing an updated snapshot every few seconds until\n' +
     '                 interrupted.\n' +
@@ -2042,9 +2051,28 @@ interface StatusSnapshot {
    *  (`resolveLocalDepartmentId`) — known with the network down. */
   boundLocally: boolean;
   localBindError?: string;
+  /** x19: what THIS machine's runner journal recorded for this department —
+   *  the only source of `sender`/`engine` there is. `null` when no department
+   *  id could be resolved at all (offline and unbound), i.e. there is not even
+   *  a file to name. Any other outcome — absent, unreadable, partial — is a
+   *  `LocalJournalReading` carrying its own status; none of them is an error. */
+  localJournal: LocalJournalReading | null;
   cloud: StatusCloudView | null;
   cloudError?: string;
   warnings: string[];
+}
+
+/** One rendered task row: the cloud's task joined to whatever THIS machine
+ *  recorded for it. `facts === null` means the local journal has no record of
+ *  this task — it ran elsewhere, or no journal is readable here — which is
+ *  rendered as UNKNOWN and never as a substituted identity. */
+interface TaskRow {
+  task: DeptTaskSummary;
+  facts: LocalTaskFacts | null;
+}
+
+function joinTaskRows(tasks: readonly DeptTaskSummary[], journal: LocalJournalReading | null): TaskRow[] {
+  return tasks.map((task) => ({ task, facts: journal?.byTaskId.get(task.id) ?? null }));
 }
 
 /**
@@ -2083,8 +2111,15 @@ async function gatherStatusSnapshot(
     warnings,
   };
 
+  /** x19: the local journal is keyed by department id, so it can only be read
+   *  once one is known. Never throws — see `readLocalDepartmentJournal`. */
+  const readJournal = (departmentId: string | null): LocalJournalReading | null =>
+    departmentId === null
+      ? null
+      : readLocalDepartmentJournal(deps.fs, { env: deps.env, platform: deps.platform, departmentId });
+
   const auth = await trySilentAuth(deps, opts);
-  if (auth === null) return { ...base, cloud: null };
+  if (auth === null) return { ...base, localJournal: readJournal(localDepartmentId), cloud: null };
 
   const ctx: CloudContext = { server: auth.server, accessToken: auth.accessToken, orgSlug: auth.orgSlug, orgId: auth.orgId };
   const serveDeps: ServeDeps = { fetch: deps.fetch, shell: deps.shell };
@@ -2092,12 +2127,13 @@ async function gatherStatusSnapshot(
   let departmentId = localDepartmentId;
   if (departmentId === null) {
     const found = await findDepartmentBySlug(serveDeps, ctx, manifest.name);
-    if (!found.ok) return { ...base, cloud: null, cloudError: found.message };
+    if (!found.ok) return { ...base, localJournal: readJournal(localDepartmentId), cloud: null, cloudError: found.message };
     departmentId = found.department.id;
   }
+  const localJournal = readJournal(departmentId);
 
   const profileResult = await fetchDepartmentProfile(serveDeps, ctx, departmentId);
-  if (!profileResult.ok) return { ...base, cloud: null, cloudError: profileResult.message };
+  if (!profileResult.ok) return { ...base, localJournal, cloud: null, cloudError: profileResult.message };
   const profile = profileResult.profile;
 
   let thisInstall: InstallSummary | null = null;
@@ -2120,6 +2156,7 @@ async function gatherStatusSnapshot(
 
   return {
     ...base,
+    localJournal,
     cloud: {
       orgSlug: ctx.orgSlug,
       profile,
@@ -2182,6 +2219,58 @@ function shortDigest(d: string | null): string {
   return d.length > 19 ? `${d.slice(0, 19)}…` : d;
 }
 
+// ---- sender / engine, from the local runner journal (x19) ------------------
+
+/** This machine has NO record of the task — it ran somewhere else, or nothing
+ *  here is readable. Deliberately a different glyph from `—`: `—` is a fact
+ *  ("the offer stated no sender"), `?` is the absence of one. Conflating them
+ *  is how a status line starts asserting things it does not know. */
+const UNKNOWN_CELL = '?';
+/** The journal HAS this task, and recorded no value for the column. */
+const NONE_CELL = '—';
+
+function senderCell(facts: LocalTaskFacts | null): string {
+  if (facts === null) return UNKNOWN_CELL;
+  return facts.sender ?? NONE_CELL;
+}
+
+function engineCell(facts: LocalTaskFacts | null): string {
+  if (facts === null) return UNKNOWN_CELL;
+  return facts.engine ?? NONE_CELL;
+}
+
+/** Pad to a column width measured over the rows actually being printed —
+ *  capped so one pathological 200-char sender (b4's own `MAX_SENDER`) cannot
+ *  push the state column off the right edge of every other line. */
+const MAX_COLUMN_WIDTH = 32;
+
+function padCell(value: string, width: number): string {
+  const clipped = value.length > MAX_COLUMN_WIDTH ? `${value.slice(0, MAX_COLUMN_WIDTH - 1)}…` : value;
+  return clipped.padEnd(Math.min(width, MAX_COLUMN_WIDTH));
+}
+
+/**
+ * The one-line explanation printed under a task list that contains at least
+ * one unknown cell. It states WHY, per journal status, so `?` is never left
+ * looking like a bug: the whole point of x19 is that "we do not know" is said
+ * out loud instead of being filled in with the nearest plausible identity.
+ */
+function unknownSenderNote(journal: LocalJournalReading | null, unknownCount: number): string | null {
+  if (unknownCount === 0) return null;
+  const subject = `sender/engine unknown for ${unknownCount} task${unknownCount === 1 ? '' : 's'}`;
+  switch (journal?.status) {
+    case 'ok':
+      return `  ${UNKNOWN_CELL} ${subject} — not run on this machine.`;
+    case 'unreadable':
+      return `  ⚠ ${subject}: this machine's runner journal could not be read (${journal.message ?? 'unknown error'}) — ${journal.path}`;
+    case 'unlocatable':
+      return `  ${UNKNOWN_CELL} ${subject} — ${journal.message ?? "pipeline-runner's data directory could not be located"}.`;
+    case 'absent':
+    default:
+      return `  ${UNKNOWN_CELL} ${subject} — no local runner journal on this machine; they ran elsewhere.`;
+  }
+}
+
 /**
  * 05 §6's `Free plan · department 1 of 3 · 47 of 100 actions used today
  * (resets 00:00 UTC)` line, built ENTIRELY from `GET /api/v1/dept-usage`'s
@@ -2214,9 +2303,19 @@ function renderStatusHuman(out: (s: string) => void, snapshot: StatusSnapshot, n
     out(`${marker} ${snapshot.slug} — ${headline} (offline — no cloud connection)\n`);
     if (snapshot.localBindError !== undefined) out(`  ⚠ ${snapshot.localBindError}\n`);
     if (snapshot.cloudError !== undefined) out(`  (${snapshot.cloudError})\n`);
+    // x19: the journal is the ONE thing here that survives the network being
+    // down, so say what it holds rather than nothing. It is not a task list —
+    // it records executions this machine admitted, with no state or outcome —
+    // so it is reported as a count, never rendered as one.
+    const journal = snapshot.localJournal;
+    if (journal?.status === 'ok' && journal.executions > 0) {
+      out(`  This machine's runner journal has ${journal.executions} recorded execution${journal.executions === 1 ? '' : 's'} for this department.\n`);
+    }
     out(
-      '  Department id, sender, engine, budget and task history all need the\n' +
-        '  control plane — they show as — until it is reachable.\n',
+      '  The department id, the budget and the task history all need the control\n' +
+        '  plane — they stay hidden until it is reachable. Sender and engine come\n' +
+        "  from this machine's own runner journal and appear against each task as\n" +
+        '  soon as that list is.\n',
     );
     return;
   }
@@ -2266,11 +2365,55 @@ function renderStatusHuman(out: (s: string) => void, snapshot: StatusSnapshot, n
     return;
   }
   out('\n');
-  for (const t of [...tasks].sort((x, y) => x.updatedAt.localeCompare(y.updatedAt))) {
-    const icon = TASK_STATE_ICON[t.state] ?? '•';
-    const label = TASK_STATE_LABEL[t.state] ?? t.state;
-    out(`${hhmm(t.updatedAt)}  ${shortId(t.id)}  ${t.originPrincipal || '—'}  ${icon} ${label}\n`);
+  // x19: `who asked` + `what ran it`, joined from the LOCAL runner journal.
+  // The column here used to be `originPrincipal` — the cloud's authenticated
+  // CALLER, which is a different identity from the sender and was being read
+  // as one. A cell this machine cannot vouch for now says so (`?`) instead.
+  const rows = joinTaskRows(tasks, snapshot.localJournal).sort((x, y) => x.task.updatedAt.localeCompare(y.task.updatedAt));
+  const senderWidth = Math.max(...rows.map((r) => senderCell(r.facts).length));
+  const engineWidth = Math.max(...rows.map((r) => engineCell(r.facts).length));
+  for (const { task, facts } of rows) {
+    const icon = TASK_STATE_ICON[task.state] ?? '•';
+    const label = TASK_STATE_LABEL[task.state] ?? task.state;
+    out(
+      `${hhmm(task.updatedAt)}  ${shortId(task.id)}  ${padCell(senderCell(facts), senderWidth)}  ` +
+        `${padCell(engineCell(facts), engineWidth)}  ${icon} ${label}\n`,
+    );
   }
+  const note = unknownSenderNote(snapshot.localJournal, rows.filter((r) => r.facts === null).length);
+  if (note !== null) out(`${note}\n`);
+}
+
+/** The journal, for `--json`: the same four facts the human view uses to
+ *  decide what to print and what to say about `?`. `byTaskId` is NOT emitted
+ *  here — it is emitted per task, where a consumer needs it. */
+function localJournalJson(journal: LocalJournalReading | null): Record<string, unknown> | null {
+  if (journal === null) return null;
+  return {
+    status: journal.status,
+    path: journal.path,
+    executions: journal.executions,
+    skippedLines: journal.skipped,
+    ...(journal.message !== undefined ? { message: journal.message } : {}),
+  };
+}
+
+/**
+ * A task, with the local join applied — the SAME fields the human view shows
+ * (DoD box 4). `localRecord` is what makes `sender: null` unambiguous in JSON:
+ * `true` means this machine ran it and recorded no sender; `false` means this
+ * machine has no record of the task at all (the human `?`). Every cloud field
+ * is passed through untouched, `originPrincipal` included — it is a real field
+ * with a real meaning (the authenticated CALLER); it is simply not the sender,
+ * which is why the human view no longer prints it where a sender belongs.
+ */
+function taskJson(row: TaskRow): Record<string, unknown> {
+  return {
+    ...row.task,
+    sender: row.facts?.sender ?? null,
+    engine: row.facts?.engine ?? null,
+    localRecord: row.facts !== null,
+  };
 }
 
 function toStatusJson(snapshot: StatusSnapshot, now: Date): Record<string, unknown> {
@@ -2280,6 +2423,7 @@ function toStatusJson(snapshot: StatusSnapshot, now: Date): Record<string, unkno
       slug: snapshot.slug,
       localDigest: snapshot.localDigest,
       boundLocally: snapshot.boundLocally,
+      localJournal: localJournalJson(snapshot.localJournal),
       cloud: null,
       ...(snapshot.localBindError !== undefined ? { localBindError: snapshot.localBindError } : {}),
       ...(snapshot.cloudError !== undefined ? { cloudError: snapshot.cloudError } : {}),
@@ -2292,6 +2436,7 @@ function toStatusJson(snapshot: StatusSnapshot, now: Date): Record<string, unkno
     slug: snapshot.slug,
     localDigest: snapshot.localDigest,
     boundLocally: snapshot.boundLocally,
+    localJournal: localJournalJson(snapshot.localJournal),
     cloud: {
       org: cloud.orgSlug,
       online: cloud.profile.online,
@@ -2305,7 +2450,9 @@ function toStatusJson(snapshot: StatusSnapshot, now: Date): Record<string, unkno
       ...(cloud.usageError !== undefined ? { usageError: cloud.usageError } : {}),
       running: tasks.filter((t) => t.state === 'WORKING').length,
       completedToday: tasks.filter((t) => t.state === 'COMPLETED' && isSameUtcDay(t.updatedAt, now)).length,
-      tasks: cloud.tasks,
+      // x19: `null` (task history unavailable) stays `null`; a real list
+      // carries the same sender/engine the human view renders.
+      tasks: cloud.tasks === null ? null : joinTaskRows(cloud.tasks, snapshot.localJournal).map(taskJson),
       ...(cloud.tasksError !== undefined ? { tasksError: cloud.tasksError } : {}),
     },
     warnings: snapshot.warnings,

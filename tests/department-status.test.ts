@@ -29,6 +29,7 @@ import {
 } from '../src/commands/department';
 import type { ServeHttpInit, ServeHttpResponse } from '../src/lib/department-serve';
 import { credentialFilePath, type CloudFs } from '../src/lib/cloud-config';
+import { departmentIndexPath, resolveRunnerJournalRoot } from '../src/lib/department-journal';
 import type { ShellResult } from '../src/lib/runner-enrol';
 
 // ---------------------------------------------------------------------------
@@ -507,11 +508,12 @@ describe('retire — DoD box 3: refuses without --yes when non-interactive', () 
 // `status` — DoD boxes 1, 4, 5
 // ---------------------------------------------------------------------------
 
-function fakeCloudFs(initial: Record<string, string> = {}): CloudFs {
+function fakeCloudFs(initial: Record<string, string> = {}, unreadable: ReadonlySet<string> = new Set()): CloudFs {
   const files = new Map<string, string>(Object.entries(initial));
   return {
     existsSync: (p) => files.has(p),
     readFileSync: (p) => {
+      if (unreadable.has(p)) throw Object.assign(new Error(`EACCES: ${p}`), { code: 'EACCES' });
       const v = files.get(p);
       if (v === undefined) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
       return v;
@@ -540,12 +542,48 @@ const CRED_HOME = '/fake-cred-home';
 // so the fake filesystem's key matches whatever the real function resolves.
 const CRED_PATH = credentialFilePath({ platform: 'linux', env: { PIPELINE_CLOUD_HOME: CRED_HOME }, homedir: CRED_HOME });
 
+// x19: pipeline-runner's per-department execution index, computed exactly the
+// way the command computes it (the shipped helpers, not a hand-built string),
+// so the fake filesystem's key matches whatever those functions resolve.
+const RUNNER_HOME = '/fake-runner-home';
+const RUNNER_ENV = { PIPELINE_RUNNER_HOME: RUNNER_HOME };
+const JOURNAL_INDEX = departmentIndexPath(resolveRunnerJournalRoot(RUNNER_ENV, 'linux')!, DEPT_ID);
+
+const TASK_1 = '8f3c2a1b-0000-0000-0000-000000000001';
+const TASK_2 = '9d11e4f2-0000-0000-0000-000000000002';
+
+/** One `department.execution_started` line, byte-shaped like pipeline-runner's
+ *  `buildDepartmentIndexEntry` (b4). `undefined` field -> the default value;
+ *  `null` -> the writer's own "recorded, but nothing to state". */
+function indexLine(o: { taskId: string; sender?: string | null; engine?: string | null; runId?: string }): string {
+  return JSON.stringify({
+    schema: 1,
+    ts: '2026-07-27T14:00:00.000Z',
+    type: 'department.execution_started',
+    department_id: DEPT_ID,
+    run_id: o.runId ?? `dexec-${o.taskId}`,
+    task_id: o.taskId,
+    context_id: 'ctx-1',
+    engine: o.engine === undefined ? 'claude-code' : o.engine,
+    sender: o.sender === undefined ? 'ivan@acme.dev' : o.sender,
+    journal_path: `/fake-runner-home/data/department/${o.runId ?? 'dexec'}/events.jsonl`,
+  });
+}
+
 interface StatusWorldOpts {
   cwd: string;
   /** When set, seeds a live (never-expiring) stored credential. */
   signedIn?: boolean;
   bindingsDeptId?: string | null;
   fetchOverride?: (url: string, init: ServeHttpInit) => Promise<ServeHttpResponse> | ServeHttpResponse;
+  /** x19: the contents of this department's execution index. Undefined -> no
+   *  index file at all (the ordinary "no runner ever ran here" state). */
+  journal?: string;
+  /** x19: the index exists but the OS refuses the read (permissions). */
+  journalUnreadable?: boolean;
+  /** x19: no `PIPELINE_RUNNER_HOME` and no HOME/XDG — the data directory
+   *  cannot be computed from the environment at all. */
+  noRunnerHome?: boolean;
 }
 
 function makeStatusWorld(opts: StatusWorldOpts) {
@@ -606,12 +644,17 @@ function makeStatusWorld(opts: StatusWorldOpts) {
     fetch: async (url, init) => (opts.fetchOverride ? await opts.fetchOverride(url, init) : await defaultFetch(url, init)),
     out: (s) => (out += s),
     err: (s) => (out += s),
-    env: { PIPELINE_CLOUD_HOME: CRED_HOME },
+    env: { PIPELINE_CLOUD_HOME: CRED_HOME, ...(opts.noRunnerHome ? {} : RUNNER_ENV) },
     cwd: opts.cwd,
     fs: fakeCloudFs(
-      opts.signedIn
-        ? { [CRED_PATH]: JSON.stringify({ version: 1, servers: { [SERVER]: { access_token: 'tok', token_type: 'bearer', org_slug: ORG } } }) }
-        : {},
+      {
+        ...(opts.signedIn
+          ? { [CRED_PATH]: JSON.stringify({ version: 1, servers: { [SERVER]: { access_token: 'tok', token_type: 'bearer', org_slug: ORG } } }) }
+          : {}),
+        ...(opts.journal !== undefined ? { [JOURNAL_INDEX]: opts.journal } : {}),
+        ...(opts.journalUnreadable ? { [JOURNAL_INDEX]: 'unreadable' } : {}),
+      },
+      opts.journalUnreadable ? new Set([JOURNAL_INDEX]) : new Set(),
     ),
     platform: 'linux',
     homedir: CRED_HOME,
@@ -743,6 +786,205 @@ describe('status — online: budget line, task counts, stale-digest flag', () =>
     expect(parsed.cloud.running).toBe(1);
     expect(parsed.cloud.completedToday).toBe(1);
     expect(parsed.cloud.usage.dailyActions).toEqual({ limit: 100, used: 47, remaining: 53, resetAt: '2026-07-28T00:00:00.000Z' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `status` — x19: sender + engine, joined from the LOCAL runner journal
+//
+// The e3 gate failed a10's "renders sender and engine for real tasks" box:
+// pipeline-runner's b4 writes both into its own execution journal, and nothing
+// anywhere read them back. These cover the consumer half — including every way
+// the journal can be missing, since a machine that never ran the work is the
+// ORDINARY case, not an error.
+// ---------------------------------------------------------------------------
+
+describe('status — x19: sender and engine come from the local runner journal', () => {
+  test('a task the journal knows renders its sender and its engine', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      journal: `${indexLine({ taskId: TASK_1 })}\n${indexLine({ taskId: TASK_2, sender: 'dana@acme.dev', engine: 'pipeline' })}\n`,
+    });
+    const code = await runDepartmentStatus(['--server', SERVER], w.deps);
+    expect(code).toBe(0);
+    expect(w.out()).toContain('ivan@acme.dev');
+    expect(w.out()).toContain('claude-code');
+    expect(w.out()).toContain('dana@acme.dev');
+    expect(w.out()).toContain('pipeline');
+    // Nothing is unknown, so no `?` legend is printed.
+    expect(w.out()).not.toContain('sender/engine unknown');
+  });
+
+  test('the cloud `originPrincipal` is NEVER printed where a sender belongs (the misattribution x19 fixes)', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      journal: `${indexLine({ taskId: TASK_1 })}\n`,
+    });
+    await runDepartmentStatus(['--server', SERVER], w.deps);
+    // `user:<uuid>` is the AUTHENTICATED CALLER, a different identity from the
+    // sender — it used to occupy this column and be read as "who asked".
+    expect(w.out()).not.toContain(`user:${USER_ID}`);
+  });
+
+  test('a task the journal does NOT know renders as unknown, never misattributed', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      // Only TASK_1 ran here; TASK_2 came from another machine.
+      journal: `${indexLine({ taskId: TASK_1 })}\n`,
+    });
+    const code = await runDepartmentStatus(['--server', SERVER], w.deps);
+    expect(code).toBe(0);
+    expect(w.out()).toContain('sender/engine unknown for 1 task — not run on this machine.');
+    // The known task keeps its real sender; the unknown one borrows nothing.
+    const lines = w.out().split('\n');
+    const unknownLine = lines.find((l) => l.includes('9d11e4f2'))!;
+    expect(unknownLine).toContain('?');
+    expect(unknownLine).not.toContain('ivan@acme.dev');
+    expect(unknownLine).not.toContain(`user:${USER_ID}`);
+  });
+
+  test('an ABSENT journal (no runner ever ran here) is an ordinary state — exit 0, all unknown', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({ cwd: dir, signedIn: true, bindingsDeptId: DEPT_ID });
+    const code = await runDepartmentStatus(['--server', SERVER], w.deps);
+    expect(code).toBe(0);
+    expect(w.out()).toContain('● unity-review — online');
+    expect(w.out()).toContain('no local runner journal on this machine');
+  });
+
+  test('an UNREADABLE journal (permissions) is reported, never fatal', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({ cwd: dir, signedIn: true, bindingsDeptId: DEPT_ID, journalUnreadable: true });
+    const code = await runDepartmentStatus(['--server', SERVER], w.deps);
+    expect(code).toBe(0);
+    expect(w.out()).toContain('runner journal could not be read (permission denied)');
+    expect(w.out()).toContain(JOURNAL_INDEX);
+  });
+
+  test('an UNLOCATABLE data directory (no PIPELINE_RUNNER_HOME, no HOME) degrades, never crashes', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({ cwd: dir, signedIn: true, bindingsDeptId: DEPT_ID, noRunnerHome: true });
+    const code = await runDepartmentStatus(['--server', SERVER], w.deps);
+    expect(code).toBe(0);
+    expect(w.out()).toContain("could not determine pipeline-runner's data directory");
+  });
+
+  test('a PARTIAL journal — a truncated final line after a hard kill — still yields the lines before it', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      journal: `${indexLine({ taskId: TASK_1 })}\n${indexLine({ taskId: TASK_2 }).slice(0, 40)}`,
+    });
+    const code = await runDepartmentStatus(['--server', SERVER], w.deps);
+    expect(code).toBe(0);
+    expect(w.out()).toContain('ivan@acme.dev');
+    expect(w.out()).toContain('sender/engine unknown for 1 task');
+  });
+
+  test('a schema-1 line (no sender/engine at all) is still a valid entry — recorded, nothing to state', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      journal: `${indexLine({ taskId: TASK_1, sender: null, engine: null })}\n`,
+    });
+    await runDepartmentStatus(['--server', SERVER, '--json'], w.deps);
+    const parsed = JSON.parse(w.out()) as { cloud: { tasks: { id: string; sender: string | null; engine: string | null; localRecord: boolean }[] } };
+    const known = parsed.cloud.tasks.find((t) => t.id === TASK_1)!;
+    // Known to this machine (`localRecord: true`) but with nothing recorded —
+    // distinct in JSON from the task it has never heard of.
+    expect(known).toMatchObject({ sender: null, engine: null, localRecord: true });
+    const unknown = parsed.cloud.tasks.find((t) => t.id === TASK_2)!;
+    expect(unknown).toMatchObject({ sender: null, engine: null, localRecord: false });
+  });
+
+  test('a re-run task takes its LATEST execution — the engine that most recently ran it', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      journal:
+        `${indexLine({ taskId: TASK_1, engine: 'pipeline', runId: 'dexec-a' })}\n` +
+        `${indexLine({ taskId: TASK_1, engine: 'claude-code', runId: 'dexec-b' })}\n`,
+    });
+    await runDepartmentStatus(['--server', SERVER, '--json'], w.deps);
+    const parsed = JSON.parse(w.out()) as { cloud: { tasks: { id: string; engine: string | null }[] } };
+    expect(parsed.cloud.tasks.find((t) => t.id === TASK_1)!.engine).toBe('claude-code');
+  });
+
+  test('--json carries the same sender/engine the human view shows, plus the journal it came from', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      journal: `${indexLine({ taskId: TASK_1 })}\n`,
+    });
+    await runDepartmentStatus(['--server', SERVER, '--json'], w.deps);
+    const parsed = JSON.parse(w.out()) as {
+      localJournal: { status: string; path: string; executions: number; skippedLines: number };
+      cloud: { tasks: { id: string; sender: string | null; engine: string | null; localRecord: boolean; originPrincipal: string }[] };
+    };
+    expect(parsed.localJournal).toEqual({ status: 'ok', path: JOURNAL_INDEX, executions: 1, skippedLines: 0 });
+    const t1 = parsed.cloud.tasks.find((t) => t.id === TASK_1)!;
+    expect(t1.sender).toBe('ivan@acme.dev');
+    expect(t1.engine).toBe('claude-code');
+    expect(t1.localRecord).toBe(true);
+    // The cloud's own field survives in JSON — it is real, it is just not the
+    // sender, which is why it no longer occupies the sender COLUMN.
+    expect(t1.originPrincipal).toBe(`user:${USER_ID}`);
+  });
+
+  test('offline: the journal is still read and reported as a count, never rendered as a task list', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: false,
+      bindingsDeptId: DEPT_ID,
+      journal: `${indexLine({ taskId: TASK_1 })}\n${indexLine({ taskId: TASK_2 })}\n`,
+    });
+    const code = await runDepartmentStatus(['--server', SERVER], w.deps);
+    expect(code).toBe(0);
+    expect(w.out()).toContain('2 recorded executions for this department');
+    // No fabricated task states, and no sender printed against a task the
+    // offline view cannot list.
+    expect(w.out()).not.toContain('running');
+    expect(w.out()).not.toContain('ivan@acme.dev');
+  });
+
+  test('offline --json reports the journal without inventing a `cloud` object', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: false,
+      bindingsDeptId: DEPT_ID,
+      journal: `${indexLine({ taskId: TASK_1 })}\n`,
+    });
+    await runDepartmentStatus(['--server', SERVER, '--json'], w.deps);
+    const parsed = JSON.parse(w.out()) as { cloud: unknown; localJournal: { status: string; executions: number } };
+    expect(parsed.cloud).toBeNull();
+    expect(parsed.localJournal).toMatchObject({ status: 'ok', executions: 1 });
+  });
+
+  test('offline and unbound: no department id, so there is not even a file to name', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({ cwd: dir, signedIn: false, bindingsDeptId: null });
+    await runDepartmentStatus(['--server', SERVER, '--json'], w.deps);
+    const parsed = JSON.parse(w.out()) as { localJournal: unknown };
+    expect(parsed.localJournal).toBeNull();
   });
 });
 
