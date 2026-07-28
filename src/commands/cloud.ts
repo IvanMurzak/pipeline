@@ -576,7 +576,18 @@ export function parseConnectArgs(args: string[]): ConnectOptions | { error: stri
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-async function doFetch(deps: CloudDeps, url: string, init: HttpInit): Promise<HttpResponse> {
+/**
+ * Generic in the response type so the SAME wrapper serves `CloudDeps`'
+ * `FetchLike` (`HttpResponse`, with `text()`) and the narrower seam
+ * {@link MachineExchangeDeps} carries (x50: `department status`'s fetch has
+ * `status`/`json()` only). Inference gives `R = HttpResponse` at every
+ * pre-existing call site, so nothing else here changes.
+ */
+async function doFetch<R>(
+  deps: { fetch: (url: string, init: HttpInit) => Promise<R> },
+  url: string,
+  init: HttpInit,
+): Promise<R> {
   try {
     return await deps.fetch(url, init);
   } catch (e) {
@@ -591,8 +602,10 @@ const FORM_HEADERS = { 'content-type': 'application/x-www-form-urlencoded', acce
 /** RFC 8628 §3.4's registered grant-type URN for the device access token request. */
 const DEVICE_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
 
-/** Best-effort parse of an error body's `error` code (tolerant of non-JSON). */
-async function errorCode(res: HttpResponse): Promise<string | undefined> {
+/** Best-effort parse of an error body's `error` code (tolerant of non-JSON).
+ *  Typed on `json()` alone — the only method it calls — so it also serves the
+ *  narrow response shape {@link MachineExchangeDeps} carries. */
+async function errorCode(res: { json(): Promise<unknown> }): Promise<string | undefined> {
   try {
     const body = (await res.json()) as { error?: unknown };
     return typeof body.error === 'string' ? body.error : undefined;
@@ -607,7 +620,7 @@ async function errorCode(res: HttpResponse): Promise<string | undefined> {
  *  (04-cloud-auth.md §9's exact wording, reissue URL included) — every
  *  reject reason collapses to this one string server-side, so relaying it
  *  verbatim is correct, not a shortcut. */
-async function errorDescription(res: HttpResponse): Promise<string | undefined> {
+async function errorDescription(res: { json(): Promise<unknown> }): Promise<string | undefined> {
   try {
     const body = (await res.json()) as { error_description?: unknown };
     return typeof body.error_description === 'string' ? body.error_description : undefined;
@@ -791,6 +804,28 @@ async function exchangeAuthorizationCode(
 // ---------------------------------------------------------------------------
 
 /**
+ * The ONLY side effect {@link exchangeMachineCredential} performs — deliberately
+ * narrower than `CloudDeps` so a command with a different (narrower) HTTP seam
+ * can run the SAME exchange instead of writing a second one.
+ *
+ * x50: `pipeline department status` is that command. Its `StatusCommandDeps`
+ * carries `department-serve.ts`'s `ServeFetch`, whose response has `status` +
+ * `json()` and no `text()` — which is all this exchange has ever touched
+ * (`errorCode`/`errorDescription` parse JSON; nothing here reads a body as
+ * text). `CloudDeps` satisfies this shape structurally, so `connect`'s own
+ * call site is unchanged.
+ */
+export interface MachineExchangeDeps {
+  fetch: (url: string, init: HttpInit) => Promise<{ status: number; json(): Promise<unknown> }>;
+}
+
+/** What a machine-credential exchange returns: an access token and nothing
+ *  else that matters. NO `refresh_token` — RFC 6749 §4.4.3 / OAuth 2.1 §4.2
+ *  forbid one for `client_credentials`, so re-exchanging the credential IS
+ *  the refresh (what pipeline-runner's own client does too). */
+export type MachineToken = Pick<TokenResponse, 'access_token' | 'token_type' | 'expires_in' | 'scope'>;
+
+/**
  * `POST /oauth/token` (grant_type=client_credentials, scope=machine:credential,
  * resource=<server>/api) — the machine-credential exchange
  * (mesh-oauth/routes.ts's `issueMachineCredentialToken`, read directly, see
@@ -805,11 +840,11 @@ async function exchangeAuthorizationCode(
  * that parameterized either could not silently start sending this
  * credential's secret to `/mcp` without this guard firing first.
  */
-async function exchangeMachineCredential(
-  deps: CloudDeps,
+export async function exchangeMachineCredential(
+  deps: MachineExchangeDeps,
   server: string,
   rawToken: string,
-): Promise<TokenResponse> {
+): Promise<MachineToken> {
   const split = splitMachineCredential(rawToken);
   if (!split) {
     throw new CloudError(
@@ -1364,6 +1399,11 @@ async function authenticateWithMachineCredential(
     access_token: tok.access_token,
     token_type: tok.token_type ?? 'bearer',
     expires_at: tok.expires_in ? now + tok.expires_in * 1000 : undefined,
+    // x50: record the RUNG, not just the token. Without it, a later command
+    // reading this store cannot tell a machine credential from a human one,
+    // and `/api/v1/me` — which 401s for this class by construction — is the
+    // only thing it can ask.
+    principal: 'machine',
   };
   persistCredential(deps, credPath, store);
   say('Authenticated with a machine credential. Credential stored securely (not in this project).\n');

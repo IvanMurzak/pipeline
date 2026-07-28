@@ -1581,6 +1581,27 @@ describe('runCloud connect — machine credential (task a4)', () => {
     expect(readFileSync(credPath, 'utf-8')).not.toContain('rt_SHOULD_NEVER_BE_STORED');
   });
 
+  test('x50: the stored credential records WHICH rung minted it (`principal: "machine"`)', async () => {
+    // Without this marker, a later command reading the store cannot tell a
+    // machine credential from a human one, and `GET /api/v1/me` — which 401s
+    // for this class BY CONSTRUCTION — is the only thing it can ask.
+    // `pipeline department status` did exactly that and reported "offline"
+    // forever on the documented no-human path.
+    const log: FetchLog[] = [];
+    const fsPair = recordingFs();
+    const { deps } = makeDeps(machineScriptedFetch({ log }), fsPair, {
+      env: { PIPELINE_MACHINE_TOKEN: MACHINE_TOKEN },
+    });
+    expect(await runCloud(['connect', '--org', 'acme'], deps)).toBe(0);
+
+    const credPath = credentialFilePath({ platform: 'linux', env: deps.env, homedir: deps.homedir });
+    const stored = JSON.parse(readFileSync(credPath, 'utf-8')).servers['https://api.ai-pipeline.dev'];
+    expect(stored.principal).toBe('machine');
+    // …together with the org slug the operator passed, which is the ONLY
+    // source of one for this credential class.
+    expect(stored.org_slug).toBe('acme');
+  });
+
   test('a malformed token is rejected LOCALLY — no network call at all', async () => {
     const log: FetchLog[] = [];
     const { deps, err } = makeDeps(machineScriptedFetch({ log }), recordingFs(), {

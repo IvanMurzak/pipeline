@@ -21,9 +21,13 @@ import { runDepartment, runDepartmentNew, runDepartmentValidate } from '../src/c
 import { copyTemplateTree } from '../src/lib/templates';
 import {
   DEPARTMENT_MANIFEST_FILENAME,
+  ENGINES,
   parseDepartmentManifest,
   readDepartmentManifest,
 } from '../src/lib/department-manifest';
+// x51: the parity test below drives the SAME predicate `serve` binds on, so
+// "validate says yes / serve says no" cannot come back for a second field.
+import { runtimeBindingFor } from '../src/lib/department-serve';
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -821,6 +825,115 @@ runtime:
 });
 
 // ---------------------------------------------------------------------------
+// `validate` — x51: what `validate` accepts, `serve` can bind
+// ---------------------------------------------------------------------------
+
+/** A `pipeline`-engine department whose pipeline really exists on disk, so the
+ *  only thing under test is the FIELD, never a missing path. `omit` drops one
+ *  `runtime:` key from the file. */
+function pipelineDepartment(omit?: 'pipelineRoot' | 'startIteration'): string {
+  const proj = tempProject();
+  const root = join(proj, '.claude', 'pipeline', 'review');
+  mkdirSync(join(root, 'steps'), { recursive: true });
+  writeFileSync(join(root, 'PIPELINE.md'), '# Review\n\n## End State\nReviewed.\n');
+  writeFileSync(join(root, 'steps', '01-plan.md'), '# Plan\n');
+  const lines = [
+    'apiVersion: department.ai-pipeline.dev/v1',
+    'name: unity-review',
+    'description: >-',
+    '  Reviews Unity and C# architecture, identifies risks, and produces actionable',
+    '  refactoring plans.',
+    'visibility: organization',
+    '',
+    'skills:',
+    '  - id: unity-architecture-review',
+    '    name: Unity Architecture Review',
+    '    description: Review a Unity project or design proposal for architectural risk.',
+    '',
+    'runtime:',
+    '  engine: pipeline',
+    ...(omit === 'pipelineRoot' ? [] : ['  pipelineRoot: .claude/pipeline/review']),
+    ...(omit === 'startIteration' ? [] : ['  startIteration: steps/01-plan.md']),
+    '',
+  ];
+  const file = join(proj, DEPARTMENT_MANIFEST_FILENAME);
+  writeFileSync(file, lines.join('\n'));
+  return file;
+}
+
+describe('validate — x51: a manifest validate accepts is one serve can bind', () => {
+  test('a `pipeline` manifest with no runtime.startIteration is an ERROR, not "0 errors"', () => {
+    // The reported bug verbatim: this file validated clean and was then
+    // refused by `serve`, which needs `--start` to invoke `pipeline drive`.
+    const file = pipelineDepartment('startIteration');
+    const { code, stdout } = validateCmd(['--file', file]);
+    expect(code).toBe(1);
+    expect(stdout).toContain('runtime.startIteration');
+    expect(stdout).not.toContain('0 errors');
+  });
+
+  test('the complete manifest is still clean — the check fires on absence, not on the engine', () => {
+    const { code, stdout } = validateCmd(['--file', pipelineDepartment()]);
+    expect(code).toBe(0);
+    expect(stdout).toContain('0 errors, 0 warnings.');
+  });
+
+  test('every required field the registry declares is reported by BOTH validate and serve, with the same sentence', () => {
+    // The general form of x51 (and the x32 shape it borrows): written over
+    // `ENGINES` rather than over a list of fields, so a required field added
+    // to any engine row is covered by this test the moment it lands — and
+    // cannot be enforced by one command and ignored by the other.
+    for (const def of ENGINES) {
+      for (const required of def.requiredRuntimeFields) {
+        const proj = tempProject();
+        const file = join(proj, DEPARTMENT_MANIFEST_FILENAME);
+        const runtimeLines = def.requiredRuntimeFields
+          .filter((r) => r.field !== required.field)
+          .map((r) => `  ${r.field}: ${r.field === 'command' ? './bin/dept' : 'x'}`);
+        const text =
+          'apiVersion: department.ai-pipeline.dev/v1\n' +
+          'name: unity-review\n' +
+          'description: A department used to check the required-field contract end to end.\n' +
+          'visibility: organization\n\n' +
+          'skills:\n' +
+          '  - id: one\n' +
+          '    name: One\n' +
+          '    description: A skill description long enough not to trip the advisory.\n\n' +
+          'runtime:\n' +
+          `  engine: ${def.engine}\n` +
+          (runtimeLines.length > 0 ? `${runtimeLines.join('\n')}\n` : '');
+        writeFileSync(file, text);
+
+        // 1. validate reports it, at the severity the registry declares, with
+        //    the registry's own sentence.
+        const { stdout } = validateCmd(['--file', file, '--json']);
+        const parsed = JSON.parse(stdout) as { findings: Array<{ severity: string; field: string; message: string }> };
+        const finding = parsed.findings.find((f) => f.field === `runtime.${required.field}`);
+        expect(finding, `${def.engine}: validate said nothing about runtime.${required.field}`).toBeDefined();
+        expect(finding!.severity).toBe(required.severity);
+        expect(finding!.message).toBe(required.why);
+
+        // 2. serve refuses it — whatever the severity — and says the same thing.
+        const { manifest } = parseDepartmentManifest(text);
+        expect(manifest).not.toBeNull();
+        const binding = runtimeBindingFor(manifest!, { manifestDir: proj });
+        expect(binding.ok, `${def.engine}: serve accepted a manifest missing runtime.${required.field}`).toBe(false);
+        if (binding.ok) return;
+        expect(binding.message).toContain(required.why);
+      }
+    }
+  });
+
+  test('validate states what it structurally cannot check, so "0 errors" is never read as "this will serve"', () => {
+    const { code, stdout } = validateCmd(['--file', pipelineDepartment()]);
+    expect(code).toBe(0);
+    expect(stdout).toContain('Not checked here');
+    expect(stdout).toContain('pipeline department serve');
+    expect(stdout).toContain('pipeline-runner');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // `validate` --json
 // ---------------------------------------------------------------------------
 
@@ -854,15 +967,20 @@ describe('pipeline department validate --json', () => {
     writeFileSync(file, `${DESIGN_SAMPLE_FIXED}visibility: organization\n`);
     const { code, stdout } = validateCmd(['--file', file, '--json']);
     expect(code).toBe(0);
-    const parsed = JSON.parse(stdout) as { valid: boolean; errors: number; warnings: number };
-    expect(parsed).toEqual({ file, valid: true, errors: 0, warnings: 0, findings: [] } as never);
+    const parsed = JSON.parse(stdout) as { valid: boolean; errors: number; warnings: number; notChecked: string[] };
+    // x51: `notChecked` rides alongside — a clean file is still exactly
+    // `valid: true, 0, 0, []`, but the document now also says what a clean
+    // result does NOT establish.
+    const { notChecked, ...shape } = parsed;
+    expect(shape).toEqual({ file, valid: true, errors: 0, warnings: 0, findings: [] } as never);
+    expect(notChecked.length).toBeGreaterThan(0);
   });
 
-  test('the missing-file JSON shape matches the clean-parse shape (same 5 keys)', () => {
+  test('the missing-file JSON shape matches the clean-parse shape (same 6 keys)', () => {
     const proj = tempProject();
     const { stdout } = validateCmd(['--file', join(proj, DEPARTMENT_MANIFEST_FILENAME), '--json']);
     const parsed = JSON.parse(stdout) as Record<string, unknown>;
-    expect(Object.keys(parsed).sort()).toEqual(['errors', 'file', 'findings', 'valid', 'warnings']);
+    expect(Object.keys(parsed).sort()).toEqual(['errors', 'file', 'findings', 'notChecked', 'valid', 'warnings']);
   });
 });
 

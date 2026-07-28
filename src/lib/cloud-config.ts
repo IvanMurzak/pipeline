@@ -103,6 +103,22 @@ export interface StoredCredential {
   refresh_token?: string;
   /** Epoch ms when the token expires (absent = unknown/non-expiring). */
   expires_at?: number;
+  /**
+   * x50 — WHICH rung of the 04§4 ladder minted this credential, and therefore
+   * whether a human identity exists behind it at all. `machine` is written
+   * only by `cloud connect`'s machine-credential branch; ABSENT means `user`
+   * (every credential written before this field existed, and every human one
+   * since).
+   *
+   * It exists because the difference is not observable from the token: a
+   * machine credential's bearer makes `GET /api/v1/me` 401 BY CONSTRUCTION
+   * (its `auth.userId` is a `machine_credentials` row id, never a `users`
+   * one), so a command that resolves its org through `/me` — as `department
+   * status` did — reads "no identity" as "offline" forever. Recording the
+   * rung at connect time is what lets a later command skip a call it already
+   * knows the answer to, instead of guessing from a 401.
+   */
+  principal?: 'user' | 'machine';
   /** Non-secret display fields captured at connect time. */
   org_slug?: string;
   user_email?: string;

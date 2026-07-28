@@ -195,6 +195,42 @@ export interface EngineDefinition {
    * cannot be bound at all.
    */
   defaultCommand?: string;
+  /**
+   * x51 — the `runtime:` keys this engine cannot be BOUND without, declared
+   * once so `validate` and `serve` cannot disagree about them.
+   *
+   * They used to be two hand-written lists in two modules: `serve` refused a
+   * `pipeline` department with no `runtime.startIteration`
+   * (`department-serve.ts`'s `runtimeBindingFor`), and `validate` never looked
+   * — it checked `pipelineRoot`, and only checked `startIteration` if one was
+   * already there. So `validate` printed "0 errors" and `serve` refused the
+   * same file on the next screen. That is exactly the split x32 closed for the
+   * ENGINE field, in a second field, and this row is the same remedy: one
+   * table, two readers ({@link missingRequiredRuntimeFields}).
+   *
+   * `severity` is how `validate` reports an absence; `serve` refuses on ANY
+   * missing entry regardless, because a binding without it cannot exist. The
+   * one deliberate `warning` is `runtime.command` on the engines whose command
+   * line IS the department: `department new --engine process` scaffolds
+   * without one on purpose (there is no honest placeholder for another
+   * project's binary), so an error there would make `new` produce a file its
+   * own `validate` rejects. That exception is now DECLARED here, where both
+   * readers can see it, instead of being an accident of which module checked
+   * what.
+   */
+  requiredRuntimeFields: readonly RequiredRuntimeField[];
+}
+
+/** One `runtime:` key an engine cannot be bound without — see
+ *  {@link EngineDefinition.requiredRuntimeFields}. */
+export interface RequiredRuntimeField {
+  /** The key, spelled as the author writes it under `runtime:`. */
+  field: 'command' | 'pipelineRoot' | 'startIteration';
+  /** ONE sentence, printed verbatim by BOTH `validate`'s finding and `serve`'s
+   *  refusal — so the linter and the publisher literally say the same thing. */
+  why: string;
+  /** How `validate` classifies the absence. `serve` refuses either way. */
+  severity: 'error' | 'warning';
 }
 
 /**
@@ -232,6 +268,10 @@ export const ENGINES: readonly EngineDefinition[] = [
     // `--mcp-config`, the allowed receiver tools) and appends `runtime.args`
     // verbatim, so a claude-code department authors no command line at all.
     defaultCommand: 'claude',
+    // Nothing to author: the command is defaulted and the adapter builds the
+    // rest. This is why `department new` (which writes claude-code) produces a
+    // file that both validates AND serves with no further edits.
+    requiredRuntimeFields: [],
   },
   {
     engine: 'pipeline',
@@ -255,6 +295,20 @@ export const ENGINES: readonly EngineDefinition[] = [
     // the same binary `pipeline-runner`'s own dispatch path uses
     // (`dispatch/matcher.ts`'s `pipelineBin`).
     defaultCommand: 'pipeline',
+    // Both halves of that command line are AUTHORED — `--root` and `--start`
+    // have no defaults, and `pipeline-runner`'s `PipelineDriveAdapter` builds
+    // the invocation from them. x51: `startIteration` is the field that used
+    // to pass `validate` and be refused by `serve`.
+    requiredRuntimeFields: [
+      { field: 'pipelineRoot', severity: 'error', why: 'is required for engine: pipeline — the department has no pipeline to run' },
+      {
+        field: 'startIteration',
+        severity: 'error',
+        why:
+          'is required for engine: pipeline — it is the first iteration file, relative to pipelineRoot, and the ' +
+          'supervisor passes it to `pipeline drive --start`',
+      },
+    ],
   },
   {
     engine: 'process',
@@ -264,6 +318,18 @@ export const ENGINES: readonly EngineDefinition[] = [
     capabilities: null,
     supportedLifecycles: null,
     takesLocalExecFields: true,
+    requiredRuntimeFields: [
+      {
+        field: 'command',
+        // WARNING, not error — `department new --engine process` scaffolds
+        // without one. See `EngineDefinition.requiredRuntimeFields`' doc: the
+        // exception is declared, and `serve` still refuses.
+        severity: 'warning',
+        why:
+          "is required before this department can be served — engine 'process' runs a command you supply, and the " +
+          'supervisor has nothing to start without one',
+      },
+    ],
   },
   {
     engine: 'container',
@@ -271,6 +337,15 @@ export const ENGINES: readonly EngineDefinition[] = [
     capabilities: null,
     supportedLifecycles: null,
     takesLocalExecFields: true,
+    requiredRuntimeFields: [
+      {
+        field: 'command',
+        severity: 'warning',
+        why:
+          "is required before this department can be served — engine 'container' runs a command you supply, and the " +
+          'supervisor has nothing to start without one',
+      },
+    ],
   },
 ];
 
@@ -304,6 +379,31 @@ export function engineDefinition(engine: string): EngineDefinition | undefined {
  */
 export function isSupportedEngine(engine: string): boolean {
   return engineDefinition(engine) !== undefined;
+}
+
+/**
+ * x51 — THE required-runtime-field predicate, and the reason `validate` and
+ * `serve` can no longer disagree about what a manifest is missing.
+ *
+ * The `runtime:` keys named by this manifest's engine that are absent (or
+ * empty), in registry order, each carrying the sentence BOTH callers print:
+ * `commands/department.ts`'s `validate` renders them as findings at their
+ * declared severity; `department-serve.ts`'s `runtimeBindingFor` refuses on
+ * the first one, whatever its severity, because a binding without it cannot
+ * exist.
+ *
+ * An UNKNOWN engine returns `[]`: "which fields does it need" is unanswerable
+ * for an engine with no row, and that absence is already its own finding
+ * (`isSupportedEngine`) and its own refusal. This function never invents a
+ * second complaint about it.
+ */
+export function missingRequiredRuntimeFields(manifest: DepartmentManifest): readonly RequiredRuntimeField[] {
+  const def = engineDefinition(manifest.runtime.engine);
+  if (def === undefined) return [];
+  return def.requiredRuntimeFields.filter((r) => {
+    const value = manifest.runtime[r.field];
+    return typeof value !== 'string' || value.trim().length === 0;
+  });
 }
 
 /** `engine:` → `adapterId`, the one place the translation happens.

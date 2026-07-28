@@ -97,6 +97,7 @@ import {
   engineDefinition,
   hasErrors,
   isSupportedEngine,
+  missingRequiredRuntimeFields,
   parseDepartmentManifest,
   readDepartmentManifest,
   SUPPORTED_ENGINES,
@@ -160,6 +161,7 @@ import {
   realFs,
   SERVER_ENV,
   type CloudFs,
+  type StoredCredential,
 } from '../lib/cloud-config';
 import {
   enrolRunner,
@@ -179,7 +181,12 @@ import {
 // `connect` cannot disagree about what the machine credential is called); the
 // implementation arrives through `ServeCommandDeps.authenticate`, whose
 // production wiring dynamic-imports it at call time.
-import { MACHINE_TOKEN_ENV, type ApiAuth, type ApiAuthOptions } from './cloud';
+// x50: `exchangeMachineCredential` joins them — a VALUE, deliberately. It is
+// the machine rung of that same ladder and the only rung that is silent by
+// construction (one `client_credentials` POST, no TTY, no browser), which is
+// what lets `status` — which must never prompt — run it directly instead of
+// growing a second machine-credential flow. Nothing interactive is imported.
+import { exchangeMachineCredential, MACHINE_TOKEN_ENV, type ApiAuth, type ApiAuthOptions } from './cloud';
 import { findFirstIteration, findManifests, parseManifest as parsePipelineManifest } from '../lib/match';
 // a11: `notify` is the SAME poll/toast/journal daemon as before (task a1),
 // just addressed as a `department` verb instead of the standalone `mesh`
@@ -572,9 +579,12 @@ function validateHelpText(): string {
     `Validate a hand-written or hand-edited ${DEPARTMENT_MANIFEST_FILENAME} (05 §4):\n` +
     'schema + apiVersion, coherence (engine vs. declared capabilities), engine\n' +
     'support, advisory nits, and local filesystem facts.\n\n' +
+    'It checks the FILE and the local paths it names. It cannot check a runner,\n' +
+    'a credential or the control plane — the report ends with the list of what\n' +
+    '`serve` checks that this command structurally cannot.\n\n' +
     'Options:\n' +
     `  --file <path>  File to validate (default: ./${DEPARTMENT_MANIFEST_FILENAME}).\n` +
-    '  --json         Print {file, valid, errors, warnings, findings}.\n' +
+    '  --json         Print {file, valid, errors, warnings, findings, notChecked}.\n' +
     '  --help, -h     Show this help.\n'
   );
 }
@@ -645,18 +655,24 @@ function coherenceFindings(m: DepartmentManifest): ManifestFinding[] {
       message: "'required' needs runtime.lifecycle 'per-context' or 'daemon' — 'per-task' cannot hold context across tasks",
     });
   }
-  // An engine that carries its own exec fields has nothing to start without
-  // `command`. A WARNING, not an error: `department new --engine process`
-  // deliberately scaffolds without one (there is no honest placeholder for
-  // another project's binary), so failing here would make `new` produce a file
-  // its own `validate` rejects. `serve` refuses it outright at step 1 — see
-  // `runtimeBindingFor` — because a binding without a command cannot exist.
-  if (def !== undefined && def.takesLocalExecFields && !m.runtime.command) {
-    out.push({
-      severity: 'warning',
-      field: 'runtime.command',
-      message: `engine '${m.runtime.engine}' runs a command you supply — set runtime.command before serving`,
-    });
+  // x51 — every `runtime:` key this engine cannot be bound without, from the
+  // SAME registry rows `serve` refuses on (`missingRequiredRuntimeFields`),
+  // with the SAME sentence.
+  //
+  // This replaced a hand-written `runtime.command` check that was validate's
+  // only required-field rule, while `serve` had three. The missing one —
+  // `runtime.startIteration` for `engine: pipeline` — is x51: validate printed
+  // "0 errors" for a manifest serve then refused. There is no longer a list
+  // here to fall behind the one over there.
+  //
+  // Severity comes from the row, so the ONE deliberate disagreement survives
+  // and is now declared rather than accidental: `runtime.command` is a
+  // WARNING because `department new --engine process` scaffolds without one
+  // (no honest placeholder exists for another project's binary), and `serve`
+  // still refuses it at step 1. A warning that names `serve` is the honest
+  // shape for "valid file, not yet servable"; silence was not.
+  for (const missing of missingRequiredRuntimeFields(m)) {
+    out.push({ severity: missing.severity, field: `runtime.${missing.field}`, message: missing.why });
   }
   return out;
 }
@@ -671,13 +687,11 @@ function coherenceFindings(m: DepartmentManifest): ManifestFinding[] {
 function localFindings(m: DepartmentManifest, manifestDir: string): ManifestFinding[] {
   const out: ManifestFinding[] = [];
   if (m.runtime.engine === 'pipeline') {
-    if (!m.runtime.pipelineRoot) {
-      out.push({
-        severity: 'error',
-        field: 'runtime.pipelineRoot',
-        message: 'is required for engine: pipeline — the department has no pipeline to run',
-      });
-    } else {
+    // x51: the PRESENCE of `pipelineRoot`/`startIteration` is no longer
+    // checked here — it is a registry fact (`missingRequiredRuntimeFields`,
+    // reported by `coherenceFindings` and enforced by `serve`). What is left
+    // is what only THIS machine can answer: whether the paths they name exist.
+    if (m.runtime.pipelineRoot) {
       const rootAbs = resolve(manifestDir, m.runtime.pipelineRoot);
       if (!existsSync(rootAbs) || !statSync(rootAbs).isDirectory()) {
         out.push({ severity: 'error', field: 'runtime.pipelineRoot', message: `does not exist: ${rootAbs}` });
@@ -844,6 +858,35 @@ function buildJsonResult(filePath: string, findings: ManifestFinding[]): Validat
   return { file: filePath, valid: errors === 0, errors, warnings, findings };
 }
 
+/**
+ * x51 — what `validate` structurally CANNOT decide, said out loud.
+ *
+ * The required-field fix above closes the case where validate and `serve`
+ * disagreed about the FILE. These are the checks that genuinely cannot run at
+ * validate time — they need a runner, a credential, or a control plane — and
+ * the honest thing is to name them rather than let "0 errors" be read as
+ * "this will serve". A user who has just been told a manifest is valid and is
+ * then refused by `serve` has been misled by validate's silence, whether the
+ * cause was a missing field (a bug, fixed) or an unreachable machine fact (not
+ * a bug, but still worth stating).
+ *
+ * Deliberately short and deliberately not a to-do list: each line is a thing
+ * `serve` checks, in the order `serve` checks it.
+ */
+const VALIDATE_NOT_CHECKED: readonly string[] = [
+  'that `pipeline-runner` is installed on this machine and its supervisor can start this engine',
+  'that the control plane accepts the registration — sign-in, org, plan limits, and (per policy) an admin approving this machine',
+  'that the paths above exist on the OTHER machines serving this department — every filesystem check here is about this one',
+];
+
+/** The `--json` document `validate` itself emits: `buildJsonResult` plus x51's
+ *  `notChecked`. Separate from `buildJsonResult` because the other commands
+ *  that render manifest findings (`serve`/`stop`/`retire`/`status`) are not
+ *  reporting on a validation run and have nothing to say about its limits. */
+function buildValidateJson(filePath: string, findings: ManifestFinding[]): ValidateJson & { notChecked: readonly string[] } {
+  return { ...buildJsonResult(filePath, findings), notChecked: VALIDATE_NOT_CHECKED };
+}
+
 /** The human-readable renderer — a summary line per core field (✓/✗
  *  depending on whether an error already covers it) mirroring 05 §4's
  *  transcript in SPIRIT, then every finding, then the tally line whose exact
@@ -970,20 +1013,24 @@ export function runDepartmentValidate(args: string[]): number {
   const inspection = inspectManifestFile(filePath);
 
   if (inspection.fatal !== undefined) {
-    if (a.json) out(JSON.stringify(buildJsonResult(filePath, inspection.findings), null, 2) + '\n');
+    if (a.json) out(JSON.stringify(buildValidateJson(filePath, inspection.findings), null, 2) + '\n');
     else err(`pipeline department validate: ${inspection.fatal}\n`);
     return 2;
   }
   if (inspection.manifest === null) {
-    if (a.json) out(JSON.stringify(buildJsonResult(filePath, inspection.findings), null, 2) + '\n');
+    if (a.json) out(JSON.stringify(buildValidateJson(filePath, inspection.findings), null, 2) + '\n');
     else printHuman(out, filePath, null, inspection.findings);
     return 2;
   }
 
   if (a.json) {
-    out(JSON.stringify(buildJsonResult(filePath, inspection.findings), null, 2) + '\n');
+    out(JSON.stringify(buildValidateJson(filePath, inspection.findings), null, 2) + '\n');
   } else {
     printHuman(out, filePath, inspection.manifest, inspection.findings);
+    // x51: printed by `validate` ONLY — the other renderers of `printHuman`
+    // are reporting a broken manifest, not the scope of a validation run.
+    out('\nNot checked here — `pipeline department serve` is the first command that can:\n');
+    for (const line of VALIDATE_NOT_CHECKED) out(`  · ${line}\n`);
   }
   return hasErrors(inspection.findings) ? 1 : 0;
 }
@@ -1889,9 +1936,12 @@ function parseRetireArgs(args: string[]): RetireArgs {
 function retireHelpText(): string {
   return (
     `${RETIRE_USAGE}\n\n` +
-    'The unpublish verb: stop, then soft-delete this department from the org and\n' +
-    'fail its open tasks with a stated reason (06-department-registry.md §6).\n' +
-    'Requires the owner role.\n\n' +
+    'The unpublish verb: soft-delete this department from the org, fail its open\n' +
+    'tasks with a stated reason (06-department-registry.md §6), and only then\n' +
+    'unbind it from this machine. Requires the owner role.\n\n' +
+    'The cloud half goes first on purpose: if it fails (a non-owner, an offline\n' +
+    'control plane), this machine is left exactly as it was — still bound, still\n' +
+    'serving — instead of unserved while the cloud keeps routing tasks to it.\n\n' +
     'Refused without --yes unless running interactively — this is destructive and\n' +
     'irreversible from the CLI. --json always counts as non-interactive (D27).\n\n' +
     'Options:\n' +
@@ -1996,31 +2046,91 @@ export async function runDepartmentRetire(args: string[], deps: ServeCommandDeps
     return 1;
   }
 
-  // 05 §5/§6: "retire is stop, then remove" — best-effort local unbind first.
-  // Never fatal: the DELETE below is the actual state change, and a machine
-  // that never served this department locally (retiring one served
-  // elsewhere) has nothing to unbind.
-  const bindingResult = runtimeBindingFor(manifest, { manifestDir });
-  if (bindingResult.ok) {
-    const local = resolveLocalDepartmentId(deps.shell, bindingResult.binding);
-    if (local.departmentId !== null) unbindRuntime(deps.shell, local.departmentId);
-  }
-
+  // x49 — the CLOUD half runs first, and the local unbind only after it has
+  // succeeded.
+  //
+  // It used to be the other way round: 05 §5/§6's "retire is stop, then
+  // remove" was read as an ordering instruction, and the local unbind was
+  // done up front as a best-effort no-op. It is not an ordering instruction —
+  // the two halves fail INDEPENDENTLY, and unbinding first means a failed
+  // DELETE (the observed case is a NON-OWNER retire, since `DELETE` is
+  // owner-only) leaves the department still callable in the cloud and no
+  // longer served on this machine. That is strictly worse than either outcome
+  // alone: the control plane keeps routing tasks to a department nothing will
+  // execute, and `pipeline department stop` — the obvious repair — then
+  // reports "nothing to stop", because the binding is already gone.
+  //
+  // In this order every failure lands in a state that already has a name:
+  //   · DELETE fails            -> NOTHING changed. Still registered, still
+  //                               served here, still consistent. Re-runnable.
+  //   · DELETE ok, unbind fails -> retired in the cloud (a retired department
+  //                               is never dispatched to, so it is inert, not
+  //                               split) with a stale local binding, and the
+  //                               message below names the one command that
+  //                               clears it.
+  // Nothing ever needs "restoring", because nothing local is undone until the
+  // irreversible half has already succeeded — which is why this fix reorders
+  // rather than adding a rollback that could itself fail.
   const result = await retireDepartmentRequest(deps, ctx, resolved.departmentId);
   if (!result.ok) {
     deps.err(`pipeline department retire: ${result.message}\n`);
+    deps.err(
+      `  Nothing on this machine changed: '${manifest.name}' is still bound here and still accepting tasks,\n` +
+        '  so the cloud and this machine still agree. Fix the cause above and run retire again.\n',
+    );
+    if (a.json) {
+      deps.out(
+        JSON.stringify(
+          { ok: false, slug: manifest.name, org: ctx.orgSlug, retired: false, locallyUnbound: false, error: result.message },
+          null,
+          2,
+        ) + '\n',
+      );
+    }
     return 1;
   }
+
+  // The cloud half is done and cannot be undone from here. Unbinding is
+  // best-effort and still never fatal — a machine that never served this
+  // department (retiring one served elsewhere) has nothing to unbind, which
+  // is exactly `resolveDepartmentId`'s `source: 'cloud'` — but a FAILED
+  // unbind is now reported instead of swallowed.
+  let locallyUnbound = false;
+  let unbindError: string | undefined;
+  if (resolved.source === 'local') {
+    const unbind = unbindRuntime(deps.shell, resolved.departmentId);
+    if (unbind.ok) locallyUnbound = unbind.wasBound;
+    else unbindError = unbind.message;
+  }
+
   say(`✓ Retired ${result.slug || manifest.name} from ${ctx.orgSlug}.\n`);
   say(
     result.failedTaskCount > 0
       ? `  ${result.failedTaskCount} open task${result.failedTaskCount === 1 ? '' : 's'} failed with reason "department retired".\n`
       : '  No open tasks were affected.\n',
   );
+  if (unbindError !== undefined) {
+    // Exit stays 0: the retire itself succeeded and is irreversible, so a
+    // non-zero code would push a script into re-running a DELETE that now
+    // 404s. The residue is local, inert and repairable, and saying so is the
+    // whole point — this is the message whose absence made x49 invisible.
+    deps.err(
+      `⚠ Retired in ${ctx.orgSlug}, but this machine could not unbind it — ${unbindError}\n` +
+        '  It can no longer receive tasks (a retired department is never dispatched to), but the local\n' +
+        '  binding is still here. Run `pipeline department stop` to clear it.\n',
+    );
+  }
   if (a.json) {
     deps.out(
       JSON.stringify(
-        { ok: true, slug: result.slug || manifest.name, org: ctx.orgSlug, failedTaskCount: result.failedTaskCount },
+        {
+          ok: true,
+          slug: result.slug || manifest.name,
+          org: ctx.orgSlug,
+          failedTaskCount: result.failedTaskCount,
+          locallyUnbound,
+          ...(unbindError !== undefined ? { localUnbindError: unbindError } : {}),
+        },
         null,
         2,
       ) + '\n',
@@ -2088,12 +2198,16 @@ interface StatusArgs {
   help: boolean;
   org?: string;
   server?: string;
+  /** x50 — the machine credential, same flag and same precedence as
+   *  `serve`/`retire` (`--machine-token` beats the environment). */
+  machineToken?: string;
   unknownFlag?: string;
   extra?: string;
 }
 
 const STATUS_USAGE =
-  'Usage: pipeline department status [--follow] [--json] [--file <path>] [--org <slug>] [--server <url>]';
+  'Usage: pipeline department status [--follow] [--json] [--file <path>] [--org <slug>] [--server <url>]\n' +
+  '                                  [--machine-token <token>]';
 
 function parseStatusArgs(args: string[]): StatusArgs {
   const out: StatusArgs = { follow: false, json: false, help: false };
@@ -2110,6 +2224,8 @@ function parseStatusArgs(args: string[]): StatusArgs {
     else if (eq('--org') !== undefined) out.org = eq('--org');
     else if (a === '--server') out.server = take(i++);
     else if (eq('--server') !== undefined) out.server = eq('--server');
+    else if (a === '--machine-token') out.machineToken = take(i++);
+    else if (eq('--machine-token') !== undefined) out.machineToken = eq('--machine-token');
     else if (a === '--') continue;
     else if (a.startsWith('-')) out.unknownFlag = a;
     else if (out.extra === undefined) out.extra = a;
@@ -2132,8 +2248,13 @@ function statusHelpText(): string {
     '                 interrupted.\n' +
     `  --file <path>  The manifest (default: ./${DEPARTMENT_MANIFEST_FILENAME}).\n` +
     '  --org <slug>   Which org to read, if the stored credential fits more than\n' +
-    '                 one.\n' +
+    '                 one. REQUIRED with a machine credential, which has no\n' +
+    '                 discoverable org (unless `pipeline cloud connect` already\n' +
+    '                 recorded one for this server).\n' +
     '  --server <url> Control-plane base URL.\n' +
+    `  --machine-token <t>  The no-human path; ${MACHINE_TOKEN_ENV} is the documented\n` +
+    '                 form. Exchanged silently — it never prompts, which is why\n' +
+    '                 this command accepts it at all.\n' +
     '  --json         Print one JSON object per snapshot.\n' +
     '  --help, -h     Show this help.\n'
   );
@@ -2158,22 +2279,39 @@ function parseMeOrgs(raw: unknown): MeOrgLite[] {
   return out;
 }
 
+/**
+ * What `GET /api/v1/me` answered. x50 made this a THREE-way outcome instead of
+ * `orgs | null`, because the three cases need different sentences and one of
+ * them is not a failure at all:
+ *
+ *  - `unauthorized` — 401. For a MACHINE credential this is the endpoint's
+ *    correct answer, not a broken credential: `auth.userId` is a
+ *    `machine_credentials` row id, `/me` does `getUserById` on it (cloud
+ *    `modules/auth/routes.ts`), and no `users` row will ever match. Reading
+ *    that as "offline" is exactly the bug.
+ *  - `unavailable` — anything else (network down, 5xx). The offline view is
+ *    right, and there is nothing to add to it.
+ *  - `ok` — a human identity, with the orgs it belongs to.
+ */
+type MeOutcome = { kind: 'ok'; orgs: MeOrgLite[] } | { kind: 'unauthorized' } | { kind: 'unavailable' };
+
 /** `GET /api/v1/me` — the SAME identity call `cloud connect`/`department-notify`
  *  make, duplicated in shape rather than imported (`lib/` must not depend on
  *  `commands/`, and this is a one-off read not worth a shared module — the
  *  same call this file already makes twice elsewhere, `department-notify.ts`'s
  *  `fetchMe` and `cloud.ts`'s own). */
-async function fetchMeOrgs(deps: Pick<StatusCommandDeps, 'fetch'>, server: string, accessToken: string): Promise<MeOrgLite[] | null> {
+async function fetchMeOrgs(deps: Pick<StatusCommandDeps, 'fetch'>, server: string, accessToken: string): Promise<MeOutcome> {
   try {
     const res = await deps.fetch(`${server}/api/v1/me`, {
       method: 'GET',
       headers: { accept: 'application/json', authorization: `Bearer ${accessToken}` },
     });
-    if (res.status !== 200) return null;
+    if (res.status === 401 || res.status === 403) return { kind: 'unauthorized' };
+    if (res.status !== 200) return { kind: 'unavailable' };
     const body = (await res.json()) as { orgs?: unknown };
-    return parseMeOrgs(body.orgs);
+    return { kind: 'ok', orgs: parseMeOrgs(body.orgs) };
   } catch {
-    return null;
+    return { kind: 'unavailable' };
   }
 }
 
@@ -2181,23 +2319,156 @@ interface SilentAuth {
   server: string;
   accessToken: string;
   orgSlug: string;
-  orgId: string;
+  /** The org UUID, when a human identity supplied one. ABSENT on the
+   *  machine-credential path — that token carries its own `org_id` claim, so
+   *  no `X-Org-Id` header is needed (or knowable): `cloud.ts`'s `ApiAuth` says
+   *  the same thing about the same rung of the same ladder. */
+  orgId?: string;
 }
 
 /**
- * Best-effort, NEVER-interactive auth: reuse a stored, live (or silently
- * refreshable) credential; `null` for anything else — nothing stored, an
+ * The outcome of one never-interactive auth attempt. `none` carries an
+ * optional `reason` — the sentence `status` prints under its offline line.
+ *
+ * x50: the reason is the point. Every one of these paths used to collapse to
+ * a bare `null` and render as "offline — no cloud connection", including the
+ * cases that had nothing to do with the network: no credential stored at all,
+ * an expired one, and (the reported bug) a machine credential, for which the
+ * identity endpoint's 401 is the CORRECT answer and not a connection problem.
+ */
+type SilentAuthOutcome = { kind: 'ok'; auth: SilentAuth } | { kind: 'none'; reason?: string };
+
+/** What a machine credential needs and cannot discover — the SAME sentence
+ *  `cloud connect`'s machine branch throws (`commands/cloud.ts`'s
+ *  `authenticateWithMachineCredential`), because it is the same missing fact
+ *  for the same reason. */
+const MACHINE_ORG_REQUIRED =
+  'a machine credential has no discoverable organization — pass --org <slug> (the org it was issued for)';
+
+/**
+ * One invocation's memory of an exchanged machine token — created per
+ * `runDepartmentStatus` call, never module-global (a module-global cache
+ * would outlive an injected clock and leak between tests).
+ *
+ * `--follow` gathers a fresh snapshot every 5 seconds, and a machine
+ * credential has no refresh token, so without this every poll would be a new
+ * `client_credentials` exchange: 12 token mints per minute against the AS for
+ * a read-only diagnostic. Reusing the bearer until it is nearly expired is
+ * what the runner's own client does with the same credential class.
+ */
+interface MachineTokenCache {
+  entry?: { server: string; raw: string; accessToken: string; expiresAt: number | null };
+}
+
+/** 30s of slack, so a token is re-exchanged just BEFORE it dies rather than
+ *  just after — the same posture as `credential-refresh.ts`'s skew. */
+const MACHINE_TOKEN_SKEW_MS = 30_000;
+
+function machineTokenIsStale(entry: { expiresAt: number | null }, now: number): boolean {
+  return entry.expiresAt !== null && entry.expiresAt - MACHINE_TOKEN_SKEW_MS <= now;
+}
+
+/** The stored record for `server`, or `undefined` for anything that is not a
+ *  readable one. Never throws: a corrupt store is a reason to fall back to the
+ *  local view, never to crash a diagnostic command. */
+function storedCredentialFor(deps: StatusCommandDeps, server: string): StoredCredential | undefined {
+  try {
+    const path = credentialFilePath({ platform: deps.platform, env: deps.env, homedir: deps.homedir });
+    return readCredentialStore(deps.fs, path).servers[server];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * x50 — the machine-credential rung, for `status`.
+ *
+ * `cloud connect` already solved this (04§4's ladder, top rung): exchange
+ * `PIPELINE_MACHINE_TOKEN` for a bearer, NEVER call `/api/v1/me` (it 401s for
+ * this token class by construction), and take the org SLUG from `--org` —
+ * the operator who minted the credential from that org's dashboard is the
+ * only party that knows it. This runs the very same exchange function, imported
+ * rather than re-implemented, so there is one machine-credential flow in this
+ * package and not two.
+ *
+ * It is also the one credential class `status` may obtain rather than merely
+ * reuse: the whole reason `status` never runs the ladder is that a routine or
+ * `--follow` diagnostic must not pop a browser or a device code, and a
+ * `client_credentials` exchange does neither — it is a single POST with no
+ * human in it. That is what makes the documented no-human path work here at
+ * all, including after the previous token expired (there is no refresh token
+ * for this class; re-exchanging IS the refresh, exactly as pipeline-runner's
+ * own client does it).
+ *
+ * `null` means "no machine token anywhere" — the caller falls through to the
+ * human path.
+ */
+async function tryMachineAuth(
+  deps: StatusCommandDeps,
+  opts: { org?: string; machineToken?: string; machineTokenCache?: MachineTokenCache },
+  server: string,
+): Promise<SilentAuthOutcome | null> {
+  const raw = (opts.machineToken ?? deps.env[MACHINE_TOKEN_ENV] ?? '').trim();
+  if (raw.length === 0) return null;
+
+  const cache = opts.machineTokenCache;
+  const cached = cache?.entry;
+  let accessToken: string | undefined =
+    cached !== undefined && cached.server === server && cached.raw === raw && !machineTokenIsStale(cached, deps.now())
+      ? cached.accessToken
+      : undefined;
+  if (accessToken === undefined) {
+    try {
+      const tok = await exchangeMachineCredential(deps, server, raw);
+      accessToken = tok.access_token;
+      if (cache !== undefined) {
+        cache.entry = {
+          server,
+          raw,
+          accessToken: tok.access_token,
+          expiresAt: tok.expires_in ? deps.now() + tok.expires_in * 1000 : null,
+        };
+      }
+    } catch (e) {
+      // Relayed verbatim: the server collapses every reject reason (unknown
+      // secret, revoked, expired) into one `error_description` on purpose.
+      return { kind: 'none', reason: (e as Error).message };
+    }
+  }
+
+  let orgSlug = opts.org ?? storedCredentialFor(deps, server)?.org_slug;
+  if (orgSlug === undefined) {
+    // Forward-compatibility, not a workaround: TODAY `/me` 401s for this token
+    // class and this costs one wasted request on a path that is otherwise a
+    // hard failure. If the control plane ever answers for a machine principal
+    // (it now knows it is one — `AuthContext.principalType`, x34), `status`
+    // picks the slug up with no new release.
+    const me = await fetchMeOrgs(deps, server, accessToken);
+    if (me.kind === 'ok' && me.orgs.length === 1) orgSlug = me.orgs[0]!.slug;
+  }
+  if (orgSlug === undefined) return { kind: 'none', reason: MACHINE_ORG_REQUIRED };
+  return { kind: 'ok', auth: { server, accessToken, orgSlug } };
+}
+
+/**
+ * Best-effort, NEVER-interactive auth: the machine-credential exchange when a
+ * machine token is present, otherwise a stored, live (or silently refreshable)
+ * human credential. Anything else is `none` WITH A REASON — nothing stored, an
  * expired credential with no refresh token, a refresh that needs a fresh
  * sign-in (`ensureFreshCredential`'s `REAUTH_REQUIRED_MESSAGE`), the server
- * being unreachable, or an ambiguous org. `status` treats `null` exactly like
- * "offline" (DoD box 1) — it renders what it can locally and never pretends
- * to be more than that.
+ * being unreachable, or an ambiguous org. `status` treats `none` exactly like
+ * "offline" (DoD box 1) — it renders what it can locally and never pretends to
+ * be more than that — but it now says WHICH of those happened.
  */
 async function trySilentAuth(
   deps: StatusCommandDeps,
-  opts: { server?: string; org?: string },
-): Promise<SilentAuth | null> {
+  opts: { server?: string; org?: string; machineToken?: string; machineTokenCache?: MachineTokenCache },
+): Promise<SilentAuthOutcome> {
   const server = normalizeServerUrl(opts.server ?? deps.env[SERVER_ENV] ?? DEFAULT_SERVER);
+
+  const machine = await tryMachineAuth(deps, opts, server);
+  if (machine !== null) return machine;
+
   const refreshDeps: RefreshDeps = {
     fetch: deps.fetch,
     fs: deps.fs,
@@ -2206,21 +2477,57 @@ async function trySilentAuth(
     env: deps.env,
     homedir: deps.homedir,
   };
-  let accessToken: string;
-  let storedOrgSlug: string | undefined;
+  let cred: StoredCredential;
   try {
-    const cred = await ensureFreshCredential(refreshDeps, server);
-    accessToken = cred.access_token;
-    storedOrgSlug = cred.org_slug;
-  } catch {
-    return null;
+    cred = await ensureFreshCredential(refreshDeps, server);
+  } catch (e) {
+    // An EXPIRED machine credential says so in the vocabulary that can fix it
+    // (`--reauth` is a browser flow — meaningless without a human).
+    if (storedCredentialFor(deps, server)?.principal === 'machine') {
+      return {
+        kind: 'none',
+        reason:
+          `the stored machine credential for ${server} has expired — set ${MACHINE_TOKEN_ENV} ` +
+          '(it is re-exchanged automatically) or re-run `pipeline cloud connect --machine-token <token> --org <slug>`',
+      };
+    }
+    return { kind: 'none', reason: (e as Error).message };
   }
-  const orgs = await fetchMeOrgs(deps, server, accessToken);
-  if (orgs === null || orgs.length === 0) return null;
-  const wanted = opts.org ?? storedOrgSlug;
+
+  // x50: a credential `cloud connect` recorded as a machine one skips `/me`
+  // entirely — the same decision `connect` itself makes, made from the same
+  // fact rather than re-derived from a 401.
+  if (cred.principal === 'machine') {
+    const orgSlug = opts.org ?? cred.org_slug;
+    if (orgSlug === undefined) return { kind: 'none', reason: MACHINE_ORG_REQUIRED };
+    return { kind: 'ok', auth: { server, accessToken: cred.access_token, orgSlug } };
+  }
+
+  const me = await fetchMeOrgs(deps, server, cred.access_token);
+  if (me.kind === 'unauthorized') {
+    // A credential predating the `principal` marker, or a genuinely dead one.
+    // Both are worth a sentence: "offline" alone sent the reporter of x50
+    // looking for a network problem that was never there.
+    return {
+      kind: 'none',
+      reason:
+        'the stored credential was rejected by the identity endpoint (HTTP 401). If it is a machine credential, ' +
+        `set ${MACHINE_TOKEN_ENV} or re-run \`pipeline cloud connect --machine-token <token> --org <slug>\`; ` +
+        'otherwise run `pipeline cloud connect --reauth`',
+    };
+  }
+  if (me.kind === 'unavailable') return { kind: 'none' };
+  const orgs = me.orgs;
+  if (orgs.length === 0) return { kind: 'none', reason: 'this account belongs to no organization yet' };
+  const wanted = opts.org ?? cred.org_slug;
   const org = (wanted !== undefined ? orgs.find((o) => o.slug === wanted) : undefined) ?? (orgs.length === 1 ? orgs[0] : undefined);
-  if (org === undefined) return null;
-  return { server, accessToken, orgSlug: org.slug, orgId: org.id };
+  if (org === undefined) {
+    return {
+      kind: 'none',
+      reason: `this credential fits ${orgs.length} organizations — pass --org <slug> to say which`,
+    };
+  }
+  return { kind: 'ok', auth: { server, accessToken: cred.access_token, orgSlug: org.slug, orgId: org.id } };
 }
 
 // ---- gather + render --------------------------------------------------------
@@ -2280,7 +2587,7 @@ async function gatherStatusSnapshot(
   deps: StatusCommandDeps,
   manifest: DepartmentManifest,
   manifestDir: string,
-  opts: { org?: string; server?: string },
+  opts: { org?: string; server?: string; machineToken?: string; machineTokenCache?: MachineTokenCache },
 ): Promise<StatusSnapshot> {
   const warnings: string[] = [];
   const request = buildRegistrationRequest(manifest);
@@ -2316,10 +2623,24 @@ async function gatherStatusSnapshot(
       ? null
       : readDepartmentJournal(deps.shell, deps.fs, { env: deps.env, platform: deps.platform, departmentId });
 
-  const auth = await trySilentAuth(deps, opts);
-  if (auth === null) return { ...base, localJournal: readJournal(localDepartmentId), cloud: null };
+  const outcome = await trySilentAuth(deps, opts);
+  if (outcome.kind !== 'ok') {
+    return {
+      ...base,
+      localJournal: readJournal(localDepartmentId),
+      cloud: null,
+      ...(outcome.reason !== undefined ? { cloudError: outcome.reason } : {}),
+    };
+  }
+  const auth = outcome.auth;
 
-  const ctx: CloudContext = { server: auth.server, accessToken: auth.accessToken, orgSlug: auth.orgSlug, orgId: auth.orgId };
+  const ctx: CloudContext = {
+    server: auth.server,
+    accessToken: auth.accessToken,
+    orgSlug: auth.orgSlug,
+    // Absent on the machine path — the token's own claim carries the org.
+    ...(auth.orgId !== undefined ? { orgId: auth.orgId } : {}),
+  };
   const serveDeps: ServeDeps = { fetch: deps.fetch, shell: deps.shell };
 
   let departmentId = localDepartmentId;
@@ -2775,7 +3096,13 @@ export async function runDepartmentStatus(
   }
   const manifest = inspection.manifest;
   const manifestDir = dirname(filePath);
-  const cloudOpts = { ...(a.org !== undefined ? { org: a.org } : {}), ...(a.server !== undefined ? { server: a.server } : {}) };
+  const cloudOpts = {
+    ...(a.org !== undefined ? { org: a.org } : {}),
+    ...(a.server !== undefined ? { server: a.server } : {}),
+    ...(a.machineToken !== undefined ? { machineToken: a.machineToken } : {}),
+    // Lives exactly as long as this invocation — see `MachineTokenCache`.
+    machineTokenCache: {} as MachineTokenCache,
+  };
 
   const iterations = a.follow ? maxIterations : 1;
   for (let i = 0; i < iterations; i++) {

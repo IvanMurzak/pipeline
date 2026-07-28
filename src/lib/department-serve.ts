@@ -53,7 +53,13 @@
 
 import { resolve } from 'node:path';
 import type { DepartmentManifest, DepartmentRegistrationRequest } from './department-manifest';
-import { engineDefinition, engineForAdapterId, SUPPORTED_ENGINES } from './department-manifest';
+import {
+  DEPARTMENT_MANIFEST_FILENAME,
+  engineDefinition,
+  engineForAdapterId,
+  missingRequiredRuntimeFields,
+  SUPPORTED_ENGINES,
+} from './department-manifest';
 import type { RunnerServiceState, ShellRunner } from './runner-enrol';
 
 // ---------------------------------------------------------------------------
@@ -504,6 +510,21 @@ export function runtimeBindingFor(
   }
   const adapterId = engine.adapterId;
 
+  // x51 — the required-field gate, asked of the SAME table `validate` reads
+  // (`missingRequiredRuntimeFields`) and answered with the SAME sentence.
+  //
+  // It used to be three hand-written checks down this function, and the one
+  // for `runtime.startIteration` had no counterpart in `validate` at all: a
+  // `pipeline` manifest without it passed validation with "0 errors" and was
+  // refused here on the next screen. Every refusal below now comes from a
+  // registry row, so a field added to an engine is checked by both commands
+  // or by neither — the shape x32 established for the engine list itself.
+  const missing = missingRequiredRuntimeFields(manifest);
+  const firstMissing = missing[0];
+  if (firstMissing !== undefined) {
+    return { ok: false, message: `runtime.${firstMissing.field} ${firstMissing.why}` };
+  }
+
   // x32 — the executable, resolved once, from the registry rather than from a
   // branch per engine. `EngineDefinition.defaultCommand` says which kind of
   // engine this is:
@@ -519,12 +540,20 @@ export function runtimeBindingFor(
   //    entry whose `command` is missing or empty.
   //  - UNSET (`process`, `container`): the command IS the department. Nothing
   //    can be defaulted and the refusal below is the honest answer.
+  //
+  // The "UNSET" case can no longer be empty here: `runtime.command` is a
+  // declared required field for exactly those engines, and the gate above has
+  // already refused a manifest without one. `??` keeps this total for a
+  // hypothetical future row that declares neither.
   const command =
-    engine.defaultCommand !== undefined ? (opts.runtimeCommand ?? engine.defaultCommand) : manifest.runtime.command;
+    engine.defaultCommand !== undefined
+      ? (opts.runtimeCommand ?? engine.defaultCommand)
+      : (manifest.runtime.command ?? '');
   if (!command) {
     return {
       ok: false,
-      message: `engine: ${manifest.runtime.engine} needs runtime.command — the supervisor has nothing to start`,
+      message:
+        `engine: ${manifest.runtime.engine} has no command to run — neither the registry nor ${DEPARTMENT_MANIFEST_FILENAME} supplies one`,
     };
   }
 
@@ -540,19 +569,11 @@ export function runtimeBindingFor(
     // `pipelineDrive` spec. `pipelineRoot` is made ABSOLUTE here: the
     // supervisor's working directory is its own, not the department's, so a
     // repo-relative path would resolve somewhere else entirely.
-    const pipelineRoot = manifest.runtime.pipelineRoot;
-    const startIteration = manifest.runtime.startIteration;
-    if (!pipelineRoot) {
-      return { ok: false, message: 'engine: pipeline needs runtime.pipelineRoot — there is no pipeline to run' };
-    }
-    if (!startIteration) {
-      return {
-        ok: false,
-        message:
-          'engine: pipeline needs runtime.startIteration (the first iteration file, relative to pipelineRoot) — ' +
-          "the supervisor passes it to `pipeline drive --start` and refuses a binding without it",
-      };
-    }
+    // Both are guaranteed present by the required-field gate above (they are
+    // this engine's `requiredRuntimeFields` rows) — the non-null reads below
+    // are what that gate buys, not an assumption.
+    const pipelineRoot = manifest.runtime.pipelineRoot!;
+    const startIteration = manifest.runtime.startIteration!;
     spec['pipelineDrive'] = {
       pipelineRoot: resolve(opts.manifestDir, pipelineRoot),
       // Deliberately NOT resolved: `--start` is matched against the plan's own

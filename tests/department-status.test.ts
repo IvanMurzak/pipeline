@@ -488,27 +488,157 @@ describe('retire — DoD box 3: refuses without --yes when non-interactive', () 
     expect(w.fetches.some((f) => f.init.method === 'DELETE')).toBe(false);
   });
 
-  test('best-effort local unbind happens before the cloud DELETE when this machine is bound', async () => {
+  test('the local unbind happens AFTER the cloud DELETE when this machine is bound (x49)', async () => {
     const dir = departmentProject();
+    const timeline: string[] = [];
     const calls: { cmd: string; args: string[] }[] = [];
     const w = retireDeps({
       cwd: dir,
       shell: (cmd, args) => {
         calls.push({ cmd, args });
         if (args[0] === 'bindings') {
-          return {
-            code: 0,
-            stdout: JSON.stringify({ path: '/fake', source: 'file', refusal: null, departments: { [DEPT_ID]: { adapterId: 'pipeline-drive', command: 'pipeline', cwd: dir } } }),
-            stderr: '',
-          };
+          return { code: 0, stdout: bindingsJsonFor(dir, DEPT_ID), stderr: '' };
         }
-        if (args[0] === 'unbind') return { code: 0, stdout: 'unbound\n', stderr: '' };
+        if (args[0] === 'unbind') {
+          timeline.push('unbind');
+          return { code: 0, stdout: 'unbound\n', stderr: '' };
+        }
         return { code: 1, stdout: '', stderr: 'unexpected' };
+      },
+      fetch: async (url, init) => {
+        if (init.method === 'DELETE') {
+          timeline.push('DELETE');
+          return reply(200, { department: { id: DEPT_ID, slug: 'unity-review' }, failed_task_count: 0 });
+        }
+        throw new Error(`unexpected fetch: ${init.method} ${url}`);
       },
     });
     const code = await runDepartmentRetire(['--yes'], w.deps);
     expect(code).toBe(0);
     expect(calls.some((c) => c.args[0] === 'unbind' && c.args[2] === DEPT_ID)).toBe(true);
+    // The ORDER is the fix: the irreversible half first, the local half only
+    // once it succeeded.
+    expect(timeline).toEqual(['DELETE', 'unbind']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `retire` — x49: no ordering leaves a department callable-but-unserved
+// ---------------------------------------------------------------------------
+
+/** A `pipeline-runner` whose binding store actually CHANGES when it is
+ *  unbound — the only way to observe the split state x49 is about (a cloud
+ *  registration that survives while this machine's binding does not) and the
+ *  `stop`-says-"nothing to stop" symptom it caused downstream. */
+function mutableRunner(dir: string, opts: { unbindCode?: number; unbindStderr?: string } = {}) {
+  const bound = new Set<string>([DEPT_ID]);
+  const shell = (_cmd: string, args: string[]): ShellResult => {
+    if (args[0] === 'bindings') {
+      const departments: Record<string, unknown> = {};
+      for (const id of bound) departments[id] = { adapterId: 'pipeline-drive', command: 'pipeline', cwd: dir };
+      return { code: 0, stdout: JSON.stringify({ path: '/fake', source: 'file', refusal: null, departments }), stderr: '' };
+    }
+    if (args[0] === 'unbind') {
+      if (opts.unbindCode !== undefined && opts.unbindCode !== 0) {
+        return { code: opts.unbindCode, stdout: '', stderr: opts.unbindStderr ?? 'unbind failed' };
+      }
+      const id = args[args.indexOf('--department') + 1]!;
+      const wasBound = bound.delete(id);
+      return { code: 0, stdout: wasBound ? 'unbound\n' : 'was not bound\n', stderr: '' };
+    }
+    return { code: 1, stdout: '', stderr: 'unexpected shell call' };
+  };
+  return { shell, isBound: () => bound.has(DEPT_ID) };
+}
+
+describe('retire — x49: a failed DELETE never leaves the department callable-but-unserved', () => {
+  test('a non-owner retire (403) changes NOTHING on this machine, and says so', async () => {
+    const dir = departmentProject();
+    const runner = mutableRunner(dir);
+    const w = retireDeps({
+      cwd: dir,
+      shell: runner.shell,
+      fetch: async (url, init) => {
+        if (init.method === 'DELETE') return reply(403, { error: 'forbidden' });
+        throw new Error(`unexpected fetch: ${init.method} ${url}`);
+      },
+    });
+
+    const code = await runDepartmentRetire(['--yes'], w.deps);
+    expect(code).toBe(1);
+    expect(w.err()).toContain('owner role');
+    // The department is still registered in the cloud (the DELETE was
+    // refused) AND still served here — the two halves still agree.
+    expect(runner.isBound()).toBe(true);
+    expect(w.err()).toContain('still bound here');
+  });
+
+  test('and `stop` afterwards still has something to stop — the downstream symptom is gone', async () => {
+    const dir = departmentProject();
+    const runner = mutableRunner(dir);
+    const w = retireDeps({
+      cwd: dir,
+      shell: runner.shell,
+      fetch: async (url, init) => {
+        if (init.method === 'DELETE') return reply(403, { error: 'forbidden' });
+        throw new Error(`unexpected fetch: ${init.method} ${url}`);
+      },
+    });
+
+    expect(await runDepartmentRetire(['--yes'], w.deps)).toBe(1);
+
+    // `stop`'s "nothing to stop" message was never its own bug: it was this
+    // ordering, seen from the next command. With the binding intact, `stop`
+    // has exactly what it always claimed to have, and needs no change of its
+    // own.
+    const stopCode = runDepartmentStop([], w.deps);
+    expect(stopCode).toBe(0);
+    expect(w.out()).not.toContain('nothing to stop');
+    expect(runner.isBound()).toBe(false);
+  });
+
+  test('a successful DELETE unbinds locally — the end state is unchanged', async () => {
+    const dir = departmentProject();
+    const runner = mutableRunner(dir);
+    const w = retireDeps({ cwd: dir, shell: runner.shell });
+    expect(await runDepartmentRetire(['--yes'], w.deps)).toBe(0);
+    expect(runner.isBound()).toBe(false);
+  });
+
+  test('an unbind that fails AFTER the retire is reported, never swallowed, and exit stays 0', async () => {
+    const dir = departmentProject();
+    const runner = mutableRunner(dir, { unbindCode: 1, unbindStderr: 'runner refused: store is read-only' });
+    const w = retireDeps({ cwd: dir, shell: runner.shell });
+
+    const code = await runDepartmentRetire(['--yes', '--json'], w.deps);
+    // The irreversible half succeeded; a non-zero exit would push a script
+    // into re-running a DELETE that now 404s.
+    expect(code).toBe(0);
+    expect(w.err()).toContain('could not unbind');
+    expect(w.err()).toContain('runner refused: store is read-only');
+    expect(w.err()).toContain('pipeline department stop');
+    const parsed = JSON.parse(w.out()) as { ok: boolean; locallyUnbound: boolean; localUnbindError?: string };
+    expect(parsed.ok).toBe(true);
+    expect(parsed.locallyUnbound).toBe(false);
+    expect(parsed.localUnbindError).toContain('read-only');
+  });
+
+  test('--json on a failed retire says what did NOT happen, instead of printing nothing', async () => {
+    const dir = departmentProject();
+    const runner = mutableRunner(dir);
+    const w = retireDeps({
+      cwd: dir,
+      shell: runner.shell,
+      fetch: async (url, init) => {
+        if (init.method === 'DELETE') return reply(403, { error: 'forbidden' });
+        throw new Error(`unexpected fetch: ${init.method} ${url}`);
+      },
+    });
+    expect(await runDepartmentRetire(['--yes', '--json'], w.deps)).toBe(1);
+    const parsed = JSON.parse(w.out()) as { ok: boolean; retired: boolean; locallyUnbound: boolean };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.retired).toBe(false);
+    expect(parsed.locallyUnbound).toBe(false);
   });
 });
 
@@ -602,6 +732,11 @@ interface StatusWorldOpts {
    * fail.
    */
   journalCli?: ShellResult;
+  /** x50: `PIPELINE_MACHINE_TOKEN` — the documented no-human path. */
+  machineToken?: string;
+  /** x50: extra/overriding fields on the seeded stored credential (needs
+   *  `signedIn`), e.g. `{ principal: 'machine' }`. */
+  credential?: Record<string, unknown>;
 }
 
 /** x44: an older `pipeline-runner`, answering `journal` exactly as
@@ -626,7 +761,12 @@ function makeStatusWorld(opts: StatusWorldOpts) {
   const fetchCalls: string[] = [];
 
   const defaultFetch = async (url: string, init: ServeHttpInit): Promise<ServeHttpResponse> => {
-    fetchCalls.push(`${init.method} ${url}`);
+    // x50: the machine-credential exchange (`POST /oauth/token`,
+    // grant_type=client_credentials) — the SAME call `pipeline cloud connect`
+    // makes on its top ladder rung.
+    if (url.endsWith('/oauth/token')) {
+      return reply(200, { access_token: 'machine-access-token', token_type: 'bearer', expires_in: 3600 });
+    }
     if (url.endsWith('/api/v1/me')) {
       return reply(200, { user: { id: USER_ID, email: 'ivan@example.dev' }, orgs: [{ id: ORG_ID, slug: ORG, name: 'Acme', role: 'member' }] });
     }
@@ -680,15 +820,31 @@ function makeStatusWorld(opts: StatusWorldOpts) {
       }
       return { code: 1, stdout: '', stderr: 'unexpected shell call' };
     },
-    fetch: async (url, init) => (opts.fetchOverride ? await opts.fetchOverride(url, init) : await defaultFetch(url, init)),
+    fetch: async (url, init) => {
+      // Recorded for EVERY world, override or not — x50's assertions are about
+      // a call that must NOT happen (`/api/v1/me`, which 401s for a machine
+      // credential by construction), and a fetch nobody recorded cannot be
+      // shown to be absent.
+      fetchCalls.push(`${init.method} ${url}`);
+      return opts.fetchOverride ? await opts.fetchOverride(url, init) : await defaultFetch(url, init);
+    },
     out: (s) => (out += s),
     err: (s) => (out += s),
-    env: { PIPELINE_CLOUD_HOME: CRED_HOME, ...(opts.noRunnerHome ? {} : RUNNER_ENV) },
+    env: {
+      PIPELINE_CLOUD_HOME: CRED_HOME,
+      ...(opts.noRunnerHome ? {} : RUNNER_ENV),
+      ...(opts.machineToken !== undefined ? { PIPELINE_MACHINE_TOKEN: opts.machineToken } : {}),
+    },
     cwd: opts.cwd,
     fs: fakeCloudFs(
       {
         ...(opts.signedIn
-          ? { [CRED_PATH]: JSON.stringify({ version: 1, servers: { [SERVER]: { access_token: 'tok', token_type: 'bearer', org_slug: ORG } } }) }
+          ? {
+              [CRED_PATH]: JSON.stringify({
+                version: 1,
+                servers: { [SERVER]: { access_token: 'tok', token_type: 'bearer', org_slug: ORG, ...(opts.credential ?? {}) } },
+              }),
+            }
           : {}),
         ...(opts.journal !== undefined ? { [JOURNAL_INDEX]: opts.journal } : {}),
         ...(opts.journalUnreadable ? { [JOURNAL_INDEX]: 'unreadable' } : {}),
@@ -1252,6 +1408,212 @@ describe('status — x44: a service-account journal is explained, not left as `?
     expect(w.out()).toContain('sender/engine unknown for 1 task — not run on this machine.');
     // No ownership sentence: nothing observed it, so nothing claims it.
     expect(w.out()).not.toContain('supervisor service runs as');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// x50 — `status` on the documented no-human path (a machine credential)
+// ---------------------------------------------------------------------------
+//
+// `GET /api/v1/me` 401s for a machine credential BY CONSTRUCTION: the cloud's
+// `auth.userId` is a `machine_credentials` row id and `/me` looks it up in
+// `users`. `status` resolved its org through `/me` and therefore reported
+// "offline" forever on the one path the docs tell a bot to use. The fix is the
+// rung `cloud connect` already had: exchange the machine token, never call
+// `/me`, take the org slug from `--org` (or the one `connect` recorded).
+
+const MACHINE_TOKEN = 'aip_m_client-abc.secret-xyz';
+
+describe('status — x50: a machine credential is not "offline"', () => {
+  test('PIPELINE_MACHINE_TOKEN + --org reaches the cloud, and never asks /api/v1/me', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({ cwd: dir, signedIn: false, bindingsDeptId: DEPT_ID, machineToken: MACHINE_TOKEN });
+
+    const code = await runDepartmentStatus(['--server', SERVER, '--org', ORG], w.deps);
+    expect(code).toBe(0);
+    expect(w.out()).toContain('● unity-review — online');
+    expect(w.out()).not.toContain('offline — no cloud connection');
+    // The exchange happened…
+    expect(w.fetchCalls.some((c) => c === `POST ${SERVER}/oauth/token`)).toBe(true);
+    // …and the endpoint that cannot answer for this credential class was
+    // never asked. Asking it is the bug, not a harmless extra round trip:
+    // its 401 is what used to be read as "no cloud connection".
+    expect(w.fetchCalls.some((c) => c.includes('/api/v1/me'))).toBe(false);
+  });
+
+  test('the exchange is the real client_credentials call, with HTTP Basic client auth', async () => {
+    const dir = departmentProject();
+    const seen: ServeHttpInit[] = [];
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: false,
+      bindingsDeptId: DEPT_ID,
+      machineToken: MACHINE_TOKEN,
+      fetchOverride: (url, init) => {
+        if (url.endsWith('/oauth/token')) {
+          seen.push(init);
+          return reply(200, { access_token: 'machine-access-token', token_type: 'bearer', expires_in: 3600 });
+        }
+        if (url.endsWith(`/api/v1/departments/${DEPT_ID}`) && init.method === 'GET') {
+          return reply(200, { department: { id: DEPT_ID, slug: 'unity-review', enabled: true, retired: false, online: true, manifestDigest: DIGEST } });
+        }
+        if (url.endsWith(`/api/v1/departments/${DEPT_ID}/installs`)) return reply(200, { installs: [] });
+        if (url.endsWith('/api/v1/dept-usage')) {
+          return reply(200, { departments: { limit: null, used: 1, remaining: null }, daily_actions: { limit: null, used: 0, remaining: null, reset_at: null } });
+        }
+        if (url.includes('/api/v1/dept-tasks')) return reply(200, { tasks: [] });
+        throw new Error(`unexpected fetch: ${init.method} ${url}`);
+      },
+    });
+
+    expect(await runDepartmentStatus(['--server', SERVER, '--org', ORG], w.deps)).toBe(0);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.body).toContain('grant_type=client_credentials');
+    expect(seen[0]!.body).toContain('scope=machine%3Acredential');
+    expect(seen[0]!.headers['authorization']).toBe(
+      `Basic ${Buffer.from('aip_m_client-abc:secret-xyz', 'utf8').toString('base64')}`,
+    );
+    // The SECRET never appears in a bearer header or anywhere else.
+    expect(JSON.stringify(w.fetchCalls)).not.toContain('secret-xyz');
+  });
+
+  test('--machine-token beats the environment, exactly like serve/retire', async () => {
+    const dir = departmentProject();
+    const seen: string[] = [];
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: false,
+      bindingsDeptId: DEPT_ID,
+      machineToken: 'aip_m_from-env.env-secret',
+      fetchOverride: (url, init) => {
+        if (url.endsWith('/oauth/token')) {
+          seen.push(init.headers['authorization'] ?? '');
+          return reply(200, { access_token: 'machine-access-token', token_type: 'bearer', expires_in: 3600 });
+        }
+        return reply(500, {});
+      },
+    });
+    await runDepartmentStatus(['--server', SERVER, '--org', ORG, '--machine-token', MACHINE_TOKEN], w.deps);
+    expect(seen[0]).toBe(`Basic ${Buffer.from('aip_m_client-abc:secret-xyz', 'utf8').toString('base64')}`);
+  });
+
+  test('the org slug `cloud connect` recorded is reused, so --org is not needed twice', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      credential: { principal: 'machine', org_slug: ORG },
+      bindingsDeptId: DEPT_ID,
+      machineToken: MACHINE_TOKEN,
+    });
+    expect(await runDepartmentStatus(['--server', SERVER], w.deps)).toBe(0);
+    expect(w.out()).toContain('● unity-review — online');
+    expect(w.fetchCalls.some((c) => c.includes('/api/v1/me'))).toBe(false);
+  });
+
+  test('a credential connect recorded as a machine one skips /me even with no token in the environment', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      credential: { principal: 'machine', org_slug: ORG },
+      bindingsDeptId: DEPT_ID,
+    });
+    expect(await runDepartmentStatus(['--server', SERVER], w.deps)).toBe(0);
+    expect(w.out()).toContain('● unity-review — online');
+    expect(w.fetchCalls.some((c) => c.includes('/api/v1/me'))).toBe(false);
+  });
+
+  test('no org anywhere: says which flag supplies it, instead of claiming "no cloud connection"', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: false,
+      bindingsDeptId: DEPT_ID,
+      machineToken: MACHINE_TOKEN,
+      // Today's control plane: `/me` cannot answer for this credential class.
+      fetchOverride: (url, init) => {
+        if (url.endsWith('/oauth/token')) return reply(200, { access_token: 'machine-access-token', token_type: 'bearer', expires_in: 3600 });
+        if (url.endsWith('/api/v1/me')) return reply(401, { error: 'unauthorized' });
+        throw new Error(`unexpected fetch: ${init.method} ${url}`);
+      },
+    });
+    expect(await runDepartmentStatus(['--server', SERVER], w.deps)).toBe(0);
+    expect(w.out()).toContain('no discoverable organization');
+    expect(w.out()).toContain('--org');
+  });
+
+  test('forward-compatible: if the control plane ever answers /me for a machine principal, the slug is learned', async () => {
+    // Not a workaround — a hedge. The cloud now knows a principal is a machine
+    // (`AuthContext.principalType`, x34); the day `/me` answers for one, this
+    // path picks the org up with no new release. Until then it 401s and the
+    // test above is what a user sees.
+    const dir = departmentProject();
+    const w = makeStatusWorld({ cwd: dir, signedIn: false, bindingsDeptId: DEPT_ID, machineToken: MACHINE_TOKEN });
+    expect(await runDepartmentStatus(['--server', SERVER], w.deps)).toBe(0);
+    expect(w.out()).toContain('● unity-review — online');
+  });
+
+  test('a rejected machine token relays the server’s own sentence, and stays exit 0', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: false,
+      bindingsDeptId: DEPT_ID,
+      machineToken: MACHINE_TOKEN,
+      fetchOverride: (url) => {
+        if (url.endsWith('/oauth/token')) {
+          return reply(401, {
+            error: 'invalid_client',
+            error_description: 'That machine token was rejected (expired or revoked). Issue a new one at https://example.dev/settings/machine-credentials.',
+          });
+        }
+        throw new Error('nothing else must be attempted with a rejected credential');
+      },
+    });
+    // A diagnostic command never fails because the cloud half is unavailable
+    // (DoD box 1) — but it now says WHY the cloud half is missing.
+    expect(await runDepartmentStatus(['--server', SERVER, '--org', ORG], w.deps)).toBe(0);
+    expect(w.out()).toContain('accepting tasks on this machine');
+    expect(w.out()).toContain('That machine token was rejected');
+  });
+
+  test('--json carries the reason too, so a scripted caller can tell auth from a network outage', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: false,
+      bindingsDeptId: DEPT_ID,
+      machineToken: MACHINE_TOKEN,
+      fetchOverride: (url) => {
+        if (url.endsWith('/oauth/token')) return reply(401, { error: 'invalid_client', error_description: 'That machine token was rejected.' });
+        throw new Error('unexpected');
+      },
+    });
+    expect(await runDepartmentStatus(['--server', SERVER, '--org', ORG, '--json'], w.deps)).toBe(0);
+    const parsed = JSON.parse(w.out()) as { cloud: unknown; cloudError?: string };
+    expect(parsed.cloud).toBeNull();
+    expect(parsed.cloudError).toContain('rejected');
+  });
+
+  test('--follow exchanges the credential ONCE, not on every 5s poll', async () => {
+    // A machine credential has no refresh token, so a naive implementation
+    // mints a new one per snapshot — 12 token requests a minute for a
+    // read-only diagnostic.
+    const dir = departmentProject();
+    const w = makeStatusWorld({ cwd: dir, signedIn: false, bindingsDeptId: DEPT_ID, machineToken: MACHINE_TOKEN });
+    expect(await runDepartmentStatus(['--server', SERVER, '--org', ORG, '--follow'], w.deps, 3)).toBe(0);
+    expect(w.fetchCalls.filter((c) => c.endsWith('/oauth/token')).length).toBe(1);
+    // …and it really did poll three times.
+    expect(w.fetchCalls.filter((c) => c.includes('/api/v1/dept-usage')).length).toBe(3);
+  });
+
+  test('a human credential is untouched: /me still resolves the org, exactly as before', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({ cwd: dir, signedIn: true, bindingsDeptId: DEPT_ID });
+    expect(await runDepartmentStatus(['--server', SERVER], w.deps)).toBe(0);
+    expect(w.out()).toContain('● unity-review — online');
+    expect(w.fetchCalls.some((c) => c.includes('/api/v1/me'))).toBe(true);
   });
 });
 
