@@ -147,7 +147,11 @@ import { ensureFreshCredential, type RefreshDeps } from '../lib/credential-refre
 // who ADDRESSED it and which engine executed it — pipeline-runner writes both
 // into its own execution journal (b4). Read-only, never through pipeline-runner's
 // code; see that module's doc for the three rules it keeps.
-import { readLocalDepartmentJournal, type LocalJournalReading, type LocalTaskFacts } from '../lib/department-journal';
+// x44: `readDepartmentJournal` asks `pipeline-runner journal --json` first and
+// keeps x19's own reader as the fallback — the mirror resolved the data dir as
+// the INVOKING user and therefore saw nothing at all when the runner runs as a
+// service under another OS account (x22).
+import { readDepartmentJournal, type LocalJournalReading, type LocalTaskFacts } from '../lib/department-journal';
 import {
   credentialFilePath,
   DEFAULT_SERVER,
@@ -2303,11 +2307,14 @@ async function gatherStatusSnapshot(
   };
 
   /** x19: the local journal is keyed by department id, so it can only be read
-   *  once one is known. Never throws — see `readLocalDepartmentJournal`. */
+   *  once one is known. x44: asked of `pipeline-runner journal` first, since
+   *  only the runner can follow a service-pinned home or name the account that
+   *  owns a journal this process cannot read. Never throws, and falls back to
+   *  x19's own reader — see `readDepartmentJournal`. */
   const readJournal = (departmentId: string | null): LocalJournalReading | null =>
     departmentId === null
       ? null
-      : readLocalDepartmentJournal(deps.fs, { env: deps.env, platform: deps.platform, departmentId });
+      : readDepartmentJournal(deps.shell, deps.fs, { env: deps.env, platform: deps.platform, departmentId });
 
   const auth = await trySilentAuth(deps, opts);
   if (auth === null) return { ...base, localJournal: readJournal(localDepartmentId), cloud: null };
@@ -2441,25 +2448,89 @@ function padCell(value: string, width: number): string {
 }
 
 /**
+ * x44 — WHOSE journal it is, when this process could not see one.
+ *
+ * This is the sentence x22 is about, and the whole reason `status` now asks
+ * `pipeline-runner journal` rather than reading the file itself. `serve`
+ * installs a SERVICE, and on Windows `sc.exe create` with no `obj=` runs it as
+ * `LocalSystem`, whose profile directory — and therefore whose journal — is
+ * not the invoking user's. The runner reads its own installed definition and
+ * reports the account; a `?` renders "never ran here" and "ran here, under an
+ * account you cannot read" identically, and only one of those has a fix.
+ *
+ * `null` whenever nothing was observed, nothing was installed, or the backend
+ * genuinely cannot name an account (systemd/launchd install a per-user unit,
+ * so the account IS the invoking one and there is nothing to disclose). Says
+ * only what the observation established — never "another account has it"
+ * inferred from an empty read.
+ */
+function supervisorOwnershipNote(journal: LocalJournalReading | null | undefined): string | null {
+  if (journal === null || journal === undefined) return null;
+  const supervisor = journal.supervisor;
+  if (supervisor === null || supervisor === undefined || !supervisor.installed) return null;
+  // Only meaningful when this process did NOT get the journal. On `ok` it was
+  // read — the tasks are simply not in it — and telling a reader whose account
+  // owns a file we just read out of would be an explanation of nothing.
+  if (journal.status !== 'absent' && journal.status !== 'unreadable') return null;
+  // Checked FIRST, because a pinned home means the runner FOLLOWED it: the
+  // reading came from the supervisor's own journal, so whose account runs the
+  // service is no longer the interesting fact about where we looked.
+  if (supervisor.home !== null) {
+    return `This machine's supervisor service pins PIPELINE_RUNNER_HOME=${supervisor.home} — that is where this reading looked.`;
+  }
+  if (supervisor.systemAccount && supervisor.account !== null) {
+    return (
+      `This machine's supervisor service runs as ${supervisor.account}, a MACHINE account: its journal lives under ` +
+      "that account's own profile directory and cannot be read from this one. Read it as that account, or reinstall " +
+      'the service pinned to a shared home:  pipeline-runner service install --home <path>'
+    );
+  }
+  if (supervisor.account !== null) {
+    return `This machine's supervisor service runs as ${supervisor.account}; its journal belongs to that account, not this one.`;
+  }
+  return null;
+}
+
+/**
  * The one-line explanation printed under a task list that contains at least
  * one unknown cell. It states WHY, per journal status, so `?` is never left
  * looking like a bug: the whole point of x19 is that "we do not know" is said
  * out loud instead of being filled in with the nearest plausible identity.
+ *
+ * x44 adds the second line the first one could never carry: WHOSE journal was
+ * looked at. It is appended, not substituted, so x19's three states (a real
+ * sender, `—` for "the offer stated none", `?` for "no local record") and the
+ * sentences that explain them are untouched.
  */
 function unknownSenderNote(journal: LocalJournalReading | null, unknownCount: number): string | null {
   if (unknownCount === 0) return null;
   const subject = `sender/engine unknown for ${unknownCount} task${unknownCount === 1 ? '' : 's'}`;
+  const ownership = supervisorOwnershipNote(journal);
+  let head: string;
   switch (journal?.status) {
     case 'ok':
-      return `  ${UNKNOWN_CELL} ${subject} — not run on this machine.`;
+      head = `  ${UNKNOWN_CELL} ${subject} — not run on this machine.`;
+      break;
     case 'unreadable':
-      return `  ⚠ ${subject}: this machine's runner journal could not be read (${journal.message ?? 'unknown error'}) — ${journal.path}`;
+      head = `  ⚠ ${subject}: this machine's runner journal could not be read (${journal.message ?? 'unknown error'}) — ${journal.path}`;
+      break;
     case 'unlocatable':
-      return `  ${UNKNOWN_CELL} ${subject} — ${journal.message ?? "pipeline-runner's data directory could not be located"}.`;
+      head = `  ${UNKNOWN_CELL} ${subject} — ${journal.message ?? "pipeline-runner's data directory could not be located"}.`;
+      break;
     case 'absent':
     default:
-      return `  ${UNKNOWN_CELL} ${subject} — no local runner journal on this machine; they ran elsewhere.`;
+      // x19's sentence, and its claim ("they ran elsewhere"), hold only while
+      // nothing has been observed to the contrary. Once the runner has named
+      // an owner for the journal, "elsewhere" is a cause nothing established
+      // — the x39 rule — so the head narrows to what the read actually did
+      // and the ownership line below carries the rest.
+      head =
+        ownership === null
+          ? `  ${UNKNOWN_CELL} ${subject} — no local runner journal on this machine; they ran elsewhere.`
+          : `  ${UNKNOWN_CELL} ${subject} — nothing was recorded for them in the runner journal this account can read.`;
+      break;
   }
+  return ownership === null ? head : `${head}\n    ${ownership}`;
 }
 
 /**
@@ -2502,6 +2573,11 @@ function renderStatusHuman(out: (s: string) => void, snapshot: StatusSnapshot, n
     if (journal?.status === 'ok' && journal.executions > 0) {
       out(`  This machine's runner journal has ${journal.executions} recorded execution${journal.executions === 1 ? '' : 's'} for this department.\n`);
     }
+    // x44: the same ownership fact the task list prints under its `?` column.
+    // It survives the network being down for the same reason the journal does
+    // — it comes from this machine's own installed service definition.
+    const offlineOwnership = supervisorOwnershipNote(journal);
+    if (offlineOwnership !== null) out(`  ${offlineOwnership}\n`);
     out(
       '  The department id, the budget and the task history all need the control\n' +
         '  plane — they stay hidden until it is reachable. Sender and engine come\n' +
@@ -2575,9 +2651,15 @@ function renderStatusHuman(out: (s: string) => void, snapshot: StatusSnapshot, n
   if (note !== null) out(`${note}\n`);
 }
 
-/** The journal, for `--json`: the same four facts the human view uses to
- *  decide what to print and what to say about `?`. `byTaskId` is NOT emitted
- *  here — it is emitted per task, where a consumer needs it. */
+/** The journal, for `--json`: the same facts the human view uses to decide
+ *  what to print and what to say about `?`. `byTaskId` is NOT emitted here —
+ *  it is emitted per task, where a consumer needs it.
+ *
+ *  x44 adds `source`/`supervisor`/`homeSource`/`fallbackReason` — additively,
+ *  so nothing a script already reads moves. `source` is what lets a scripted
+ *  caller tell a reading pipeline-runner vouched for from one this CLI made by
+ *  guessing at the runner's path conventions, and `supervisor` carries the
+ *  account that owns a journal this process could not read. */
 function localJournalJson(journal: LocalJournalReading | null): Record<string, unknown> | null {
   if (journal === null) return null;
   return {
@@ -2586,6 +2668,10 @@ function localJournalJson(journal: LocalJournalReading | null): Record<string, u
     executions: journal.executions,
     skippedLines: journal.skipped,
     ...(journal.message !== undefined ? { message: journal.message } : {}),
+    source: journal.source,
+    ...(journal.homeSource !== undefined ? { homeSource: journal.homeSource } : {}),
+    ...(journal.supervisor !== undefined ? { supervisor: journal.supervisor } : {}),
+    ...(journal.fallbackReason !== undefined ? { fallbackReason: journal.fallbackReason } : {}),
   };
 }
 

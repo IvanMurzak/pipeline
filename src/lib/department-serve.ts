@@ -53,7 +53,7 @@
 
 import { resolve } from 'node:path';
 import type { DepartmentManifest, DepartmentRegistrationRequest } from './department-manifest';
-import { engineDefinition, SUPPORTED_ENGINES } from './department-manifest';
+import { engineDefinition, engineForAdapterId, SUPPORTED_ENGINES } from './department-manifest';
 import type { RunnerServiceState, ShellRunner } from './runner-enrol';
 
 // ---------------------------------------------------------------------------
@@ -420,12 +420,15 @@ function describeHttpFailure(what: string, result: JsonResult): string {
  * is actually authored) and fails loudly on a mismatch. It is a detector, not
  * the cure. The cure is x14.
  *
- * NOTE for whoever closes x14: `pipeline-runner bind` does NOT validate
- * `--adapter` against its own registry (`cli.ts`'s `runBind` writes whatever
- * it is given; b1 validates shape, not existence). Teaching it to reject an
- * adapter id it has no module for would move this fact to the package that
- * owns it, over a seam — argv — that already exists and that D26 already
- * sanctions, with no npm dependency in either direction.
+ * **x44 — that note's premise has since changed, and so has the detector.**
+ * `pipeline-runner bind` NOW validates `--adapter` against its own
+ * `ENGINE_REGISTRY` and refuses an id it has no module for, naming the ones it
+ * has. The mirror is unchanged and x14 stays open (deleting it is that task's
+ * architectural call, not this one's), but the drift is no longer only
+ * detectable by a source-tree comparison that never runs anywhere real:
+ * `parseAdapterRefusal()` below reads that refusal at the point of use and
+ * reports it as what it is. See its doc for why this is the detector that
+ * matters and the side-by-side test is not.
  *
  * The per-engine executable this module used to hard-code (`'pipeline'`) now
  * lives on the same one table as `EngineDefinition.defaultCommand`, for the
@@ -705,6 +708,93 @@ export type BindOutcome =
   | { ok: true; detail: string; daemon: LocalDaemonState }
   | { ok: false; message: string };
 
+// ---------------------------------------------------------------------------
+// x44 — the ENGINES mirror, checked by the only thing that can contradict it
+// ---------------------------------------------------------------------------
+//
+// POSITION (x44's stated call; x14's — delete the mirror — is NOT taken here).
+//
+// `ENGINES` (`./department-manifest.ts`) is a hand-written copy of
+// `pipeline-runner`'s `ENGINE_REGISTRY`. x32 fixed the symptom of one drift
+// and filed the structure as x14. The only guard added at the time was a
+// side-by-side source comparison in `tests/department-serve.test.ts`, and x32's
+// own worker said plainly what it is worth: it is VACUOUS on this repo's CI,
+// where `public/pipeline-runner` is not on disk, so it silently passes. It is
+// also vacuous for every user, who has no runner source tree at all — only an
+// INSTALLED runner, which is the only build whose registry can actually hurt
+// them. A checked-out `main` agreeing with a checked-out `main` says nothing
+// about the `@baizor/pipeline-runner` on the machine running the department.
+//
+// So: keep the mirror, and make the drift observable where it does damage.
+//
+//  - `pipeline-runner bind --adapter` now REFUSES an id it has no module for
+//    and names the ones it has. That refusal is authoritative (it is the
+//    registry itself answering), it is about the INSTALLED build, and `serve`
+//    already provokes it at step 6 on every single invocation. Nothing has to
+//    be added to get it — only READ, which is what `parseAdapterRefusal`
+//    below does, turning "could not write the runtime binding: <text>" into a
+//    named drift between two packages that ship on independent versions.
+//  - No second, weaker probe is added. `pipeline-runner --help` also prints
+//    its registered adapters, but scraping a usage banner to pre-empt an
+//    authoritative refusal that is one shell away is how a check acquires its
+//    own failure modes.
+//  - The side-by-side test stays (it costs nothing and catches a superrepo
+//    edit before it ships) but is now labelled as the developer aid it is,
+//    with the runtime detector carrying the real load.
+//
+// What this does NOT do is make the mirror correct. Nothing short of deleting
+// it can, and that is x14.
+
+/** What the runner's `bind` refusal established about this machine. */
+export interface AdapterRegistryDrift {
+  /** The adapter id this CLI's `ENGINES` chose, which the runner has no module for. */
+  adapterId: string;
+  /** The `engine:` name that maps to it here — the vocabulary `department.yml`
+   *  uses. `null` when no row claims the id, which is itself a finding. */
+  engine: string | null;
+  /** The adapters the installed runner named, verbatim (it annotates each with
+   *  its engine name), or `null` when the refusal carried no list. */
+  runnerAdapters: string | null;
+}
+
+/**
+ * Recognize `pipeline-runner bind`'s x14 refusal in a failed `bind`'s output.
+ * `null` for every other failure — a store it could not write, a missing
+ * `--command`, a binary that is not there — each of which has its own message
+ * and must not be relabelled as a registry problem.
+ *
+ * Matched on the runner's own two sentences (`unknown --adapter '<id>'` and
+ * `Adapters this build has: …`). A future rewording costs the RICHER message
+ * and falls back to the generic one, which is the correct direction to fail.
+ */
+export function parseAdapterRefusal(text: string): AdapterRegistryDrift | null {
+  const named = /unknown --adapter '([^']*)'/.exec(text);
+  if (named === null) return null;
+  const adapterId = named[1] ?? '';
+  const listed = /adapters this build has:\s*([^\n]+)/i.exec(text);
+  return {
+    adapterId,
+    engine: engineForAdapterId(adapterId) ?? null,
+    runnerAdapters: listed?.[1]?.trim() ?? null,
+  };
+}
+
+/** The refusal, said in `department.yml`'s vocabulary and named as what it is:
+ *  two independently-versioned packages disagreeing about one table. */
+export function describeAdapterRegistryDrift(d: AdapterRegistryDrift): string {
+  const authored = d.engine !== null ? `\`engine: ${d.engine}\`` : "this department's engine";
+  return (
+    `Could not write the runtime binding: this machine's \`pipeline-runner\` has no engine module for adapter ` +
+    `'${d.adapterId}', so it could not execute a single task for this department.\n` +
+    `  ${authored} maps to that adapter in this CLI's engine registry` +
+    (d.runnerAdapters !== null ? `, and the installed runner registers: ${d.runnerAdapters}.` : '.') +
+    '\n  The two packages ship on independent versions and each carries its own copy of that table, so this is a ' +
+    'VERSION SKEW between them.\n' +
+    '  Upgrade whichever is behind — `bun add -g @baizor/pipeline-runner` / `bun add -g @baizor/pipeline` — or author ' +
+    'an engine the installed runner has.'
+  );
+}
+
 /**
  * Step 6: hand the binding to `pipeline-runner bind`, which writes its own
  * file-backed store (b1) and signals a RUNNING supervisor to reload it — the
@@ -727,13 +817,17 @@ export function bindRuntime(deps: ServeDeps, departmentId: string, binding: Runt
     // already prints `could not write the runtime binding: <path> (<reason>)`
     // when the store refuses, so its stderr IS the recovery-bearing text.
     const detail = (r.stderr || r.stdout || `exit ${r.code}`).trim();
-    return {
-      ok: false,
-      message:
-        r.code === 127
-          ? 'Could not write the runtime binding: `pipeline-runner` is not installed on this machine.'
-          : `Could not write the runtime binding: ${detail}`,
-    };
+    if (r.code === 127) {
+      return { ok: false, message: 'Could not write the runtime binding: `pipeline-runner` is not installed on this machine.' };
+    }
+    // x44: one failure among these is not a bad binding at all — it is this
+    // package's `ENGINES` mirror being contradicted by the registry that owns
+    // the fact. Reported as that, in `department.yml`'s vocabulary, rather
+    // than relayed as an opaque `--adapter` complaint about an id the user
+    // never typed. See `parseAdapterRefusal`'s section doc.
+    const drift = parseAdapterRefusal(detail);
+    if (drift !== null) return { ok: false, message: describeAdapterRegistryDrift(drift) };
+    return { ok: false, message: `Could not write the runtime binding: ${detail}` };
   }
   return {
     ok: true,
@@ -956,13 +1050,28 @@ export type Liveness =
   /** Nothing contradicts it and nothing confirms it. */
   | { verdict: 'undetermined'; reason: string; nextStep: string };
 
-/** How to start a supervisor that exists but is down. pipeline-runner ships
- *  `service install|uninstall|status` and no `start`/`restart` verb — but
- *  `install` is idempotent BY DESIGN on all three backends (systemd
- *  `enable --now`, launchd `unload` + `load -w`, Windows `stop`+`delete`+
- *  `create`+`start`), so re-running it on an installed-but-stopped service
- *  starts it. Named once, here, so the two places that say it cannot drift. */
-export const SUPERVISOR_START_HINT = 'pipeline-runner service install';
+/**
+ * How to start a supervisor that EXISTS but is down (x24).
+ *
+ * This used to be `service install`, and the reason was a gap rather than a
+ * choice: pipeline-runner shipped `service install|uninstall|status` and no
+ * start verb, so the only route from `stopped` to `running` was to re-run
+ * `install` — which is idempotent, but gets there by stop+delete+recreate
+ * (Windows) and needs an elevated shell to do it. x13 had meanwhile taught
+ * `serve` to detect a stopped supervisor, so the product could name the
+ * problem with no clean fix to name.
+ *
+ * `pipeline-runner service start` now exists on all three backends: it starts
+ * the already-installed service, re-registers nothing, needs no elevation on
+ * systemd/launchd, is a no-op when it is already running, and FAILS (naming
+ * `install`) when there is nothing installed to start. That last property is
+ * why this is also the right verb for the state where the service probe said
+ * nothing at all: a wrong guess is refused by the runner rather than acted on.
+ */
+export const SUPERVISOR_START_HINT = 'pipeline-runner service start';
+/** Creating one that does not exist yet — a DIFFERENT state, and still
+ *  `install`'s job. `not-installed` keeps naming this one. */
+export const SUPERVISOR_INSTALL_HINT = 'pipeline-runner service install';
 /** Running one in the foreground instead — the `--foreground` remedy. */
 export const SUPERVISOR_FOREGROUND_HINT = 'pipeline-runner start';
 
@@ -1048,15 +1157,31 @@ export function assessLiveness(e: LivenessEvidence): Liveness {
       e.supervisor === 'stopped'
         ? e.foreground
           ? `Run one here:  ${SUPERVISOR_FOREGROUND_HINT}   (or start the installed service: \`${SUPERVISOR_START_HINT}\`)`
-          : `Start it:  ${SUPERVISOR_START_HINT}   (idempotent — re-registers and starts the service)`
+          : // x24: the service EXISTS. Starting it is a different act from
+            // recreating it, and only one of them needs an elevated shell.
+            //
+            // The trailing clause is not padding. `service start` shipped on
+            // pipeline-runner's `main` and is NOT in any published release yet
+            // (0.6.0 is the latest on npm at the time of writing), so on the
+            // runner most people have installed this verb fails with `unknown
+            // service command 'start'`. It fails LOUDLY (x11), which is right
+            // — but a loud failure with no next step is still a dead end, so
+            // the next step is named. Phrased as a condition rather than a
+            // version number, so it needs no maintenance and self-obsoletes.
+            `Start it:  ${SUPERVISOR_START_HINT}   (it is installed — this starts it, and re-registers nothing.` +
+            " If that verb is unknown, this machine's runner predates it:  bun add -g @baizor/pipeline-runner)"
         : e.foreground
           ? `Run one here:  ${SUPERVISOR_FOREGROUND_HINT}`
           : serviceClause === ''
-            ? // The service probe said nothing, so neither does this: `install`
-              // is idempotent on all three backends, which makes it the right
-              // verb whether or not one is already there.
-              `Start or install one:  ${SUPERVISOR_START_HINT}   (idempotent — or run one in the foreground: ${SUPERVISOR_FOREGROUND_HINT})`
-            : `Install one:  ${SUPERVISOR_START_HINT}   (or run one in the foreground: ${SUPERVISOR_FOREGROUND_HINT})`;
+            ? // The service probe said nothing, so this names both verbs and
+              // lets the runner decide: `service start` refuses (naming
+              // `install`) when there is nothing installed to start, so the
+              // wrong guess costs a stated refusal rather than a rebuilt
+              // service.
+              `Start or install one:  ${SUPERVISOR_START_HINT}   (or \`${SUPERVISOR_INSTALL_HINT}\` if none exists yet — or run one in the foreground: ${SUPERVISOR_FOREGROUND_HINT})`
+            : // `not-installed`: there is nothing to start. This is `install`'s
+              // own state and keeps `install`'s own verb.
+              `Install one:  ${SUPERVISOR_INSTALL_HINT}   (or run one in the foreground: ${SUPERVISOR_FOREGROUND_HINT})`;
     return { verdict: 'not-live', reason, nextStep };
   }
 

@@ -14,6 +14,7 @@ import {
   realShell,
   RUNNER_PACKAGE,
   RUNNER_OAUTH_CLIENT_SECRET_ENV,
+  SHELL_TIMEOUT_CODE,
   type RunnerEnrolDeps,
   type ShellResult,
   type ShellRunner,
@@ -464,5 +465,25 @@ describe('realShell', () => {
   test('a missing binary maps to code 127, never throws', () => {
     const r = realShell('definitely-not-a-real-binary-xyz-a6', ['--version']);
     expect(r.code).toBe(127);
+  });
+
+  // x44: `status` shells `pipeline-runner journal` on a routine — possibly
+  // `--follow` — diagnostic command, so a child that never returns may not
+  // hang it. A killed child is reported DISTINCTLY (124, not 1): "it never
+  // answered" and "it answered and failed" lead to different conclusions.
+  test('timeoutMs kills a child that will not return, and reports 124', () => {
+    const started = Date.now();
+    const r = realShell(process.execPath, ['-e', 'await new Promise((res) => setTimeout(res, 30000))'], undefined, {
+      timeoutMs: 1200,
+    });
+    expect(r.code).toBe(SHELL_TIMEOUT_CODE);
+    // It really was killed rather than waited out.
+    expect(Date.now() - started).toBeLessThan(15_000);
+  });
+
+  test('without timeoutMs nothing changes — the option is opt-in per call', () => {
+    const r = realShell(process.execPath, ['-e', 'process.stdout.write("hi")']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('hi');
   });
 });

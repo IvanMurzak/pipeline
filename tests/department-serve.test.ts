@@ -32,9 +32,12 @@ import { runDepartmentServe, runDepartmentValidate, type ServeCommandDeps } from
 import {
   appOriginFor,
   assessLiveness,
+  bindRuntime,
   buildBindArgs,
   departmentUrlFor,
+  describeAdapterRegistryDrift,
   localSupervisorIsUp,
+  parseAdapterRefusal,
   readLocalDaemonState,
   renderState,
   runtimeBindingFor,
@@ -975,8 +978,11 @@ describe('serve — x13: the online claim is an observation, not an assumption',
     expect(out).not.toContain('online, ready for work');
     expect(out).toContain('○ unity-review — registered — not serving');
     expect(out).toContain("this machine's supervisor service is installed but NOT running");
-    // Actionable: the fix is named, not left for the user to discover.
-    expect(out).toContain('Start it:  pipeline-runner service install');
+    // Actionable: the fix is named, not left for the user to discover — and
+    // since x24 the named fix is the verb that STARTS the installed service
+    // rather than the one that stop+deletes+recreates it (x44).
+    expect(out).toContain('Start it:  pipeline-runner service start');
+    expect(out).not.toContain('Start it:  pipeline-runner service install');
     // …and the supervisor step said so where it was found, too.
     expect(out).toContain('⚠ Supervisor      already installed, but NOT running');
     // D26 is intact: a stopped service is still a service, so no rival one.
@@ -1146,7 +1152,7 @@ describe('serve — x13: the online claim is an observation, not an assumption',
     // The distinction the whole task is about: "not observed" is null, not false.
     expect(liveness['cloudOnline']).toBeNull();
     expect(String(liveness['reason'])).toContain('installed but NOT running');
-    expect(String(liveness['nextStep'])).toContain('pipeline-runner service install');
+    expect(String(liveness['nextStep'])).toContain('pipeline-runner service start');
     // D27: `--json` is one object on stdout, every progress line on stderr,
     // and the non-interactive flag rides down the auth ladder untouched.
     expect(w.err()).toContain('✓ Registered');
@@ -1549,6 +1555,24 @@ describe('serve — x32: a claude-code department comes online', () => {
 // repo's own CI, an npm consumer, a bare clone) or its shape is not the one
 // this reader understands, the check declines to assert rather than inventing
 // a failure. It is a detector for the superrepo, not a substitute for x14.
+//
+// x44 — WHAT THIS CHECK IS AND IS NOT WORTH, stated rather than implied.
+//
+// On this repo's CI `public/pipeline-runner` is not on disk, so
+// `readRunnerEngineRegistry()` returns null and the assertion below is
+// VACUOUS — it passes without comparing anything. That was true the day it
+// was written and x32's own worker said so. It is equally vacuous for every
+// USER, who has no runner source tree at all, only an INSTALLED runner — and
+// the installed build's registry is the only one that can actually break a
+// department. A checked-out `main` agreeing with a checked-out `main` says
+// nothing about the `@baizor/pipeline-runner` on the machine doing the work.
+//
+// So it is kept for exactly what it is worth — a superrepo edit guard, run by
+// whoever has both trees — and the load is carried at RUNTIME instead, by
+// `parseAdapterRefusal` (see its section in `lib/department-serve.ts` for the
+// argued position). What CI can prove about this file is that its parser and
+// its comparison work; `driftBetween` is extracted so it can, and the test
+// below feeds it a deliberately drifted source.
 
 const RUNNER_ENGINE_SOURCE_ENV = 'PIPELINE_RUNNER_ENGINE_TS';
 
@@ -1578,28 +1602,179 @@ function readRunnerEngineRegistry(): Record<string, string> | null {
   return out;
 }
 
+/** `ENGINES` against a runner registry, as self-explaining strings rather than
+ *  an object diff: a failure here is read by whoever just edited ONE of the two
+ *  tables, and it has to say which engine and which side without further
+ *  digging. Extracted (x44) so the comparison itself is coverable on a CI that
+ *  has no runner source to compare against. */
+function driftBetween(runner: Record<string, string>): string[] {
+  const mine: Record<string, string> = Object.fromEntries(ENGINES.map((e) => [e.engine, e.adapterId]));
+  return [...new Set([...Object.keys(mine), ...Object.keys(runner)])].sort().flatMap((engine) =>
+    mine[engine] === runner[engine]
+      ? []
+      : [
+          `${engine}: ENGINES (apps/pipeline-cli/src/lib/department-manifest.ts) says ` +
+            `${mine[engine] ?? '(no row — add one, or the engine is unusable from the CLI)'}; ` +
+            `pipeline-runner ENGINE_REGISTRY says ${runner[engine] ?? '(no row — no module ships for it)'}`,
+        ],
+  );
+}
+
 describe('x32 — engine registry drift against pipeline-runner (best effort, superrepo only)', () => {
   test('ENGINES mirrors pipeline-runner ENGINE_REGISTRY, or the copy has drifted', () => {
     const runner = readRunnerEngineRegistry();
     if (runner === null) {
-      // Nothing to compare against here. Not a failure — see the note above.
+      // Nothing to compare against here. Not a failure — and, on this repo's
+      // CI, ALWAYS the branch taken. See the x44 note above.
       expect(true).toBe(true);
       return;
     }
-    const mine: Record<string, string> = Object.fromEntries(ENGINES.map((e) => [e.engine, e.adapterId]));
-    // Reported as self-explaining strings rather than as an object diff: a
-    // failure here is read by whoever just edited ONE of the two tables, and
-    // it has to say which engine and which side without further digging.
-    const drift = [...new Set([...Object.keys(mine), ...Object.keys(runner)])].sort().flatMap((engine) =>
-      mine[engine] === runner[engine]
-        ? []
-        : [
-            `${engine}: ENGINES (apps/pipeline-cli/src/lib/department-manifest.ts) says ` +
-              `${mine[engine] ?? '(no row — add one, or the engine is unusable from the CLI)'}; ` +
-              `pipeline-runner ENGINE_REGISTRY says ${runner[engine] ?? '(no row — no module ships for it)'}`,
-          ],
+    expect(driftBetween(runner)).toEqual([]);
+  });
+
+  // x44: what CI *can* prove — that the reader and the comparison work, so a
+  // green run of the vacuous test above at least means the detector is not
+  // also broken.
+  test('the reader parses a real ENGINE_REGISTRY, and the comparison names a drifted engine', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'runner-engine-'));
+    created.push(dir);
+    const file = join(dir, 'engine.ts');
+    writeFileSync(
+      file,
+      "export const ENGINE_REGISTRY = {\n" +
+        "  'claude-code': {\n" +
+        "    // a comment between the two fields, exactly as the real file has\n" +
+        "    engine: 'claude-code',\n" +
+        "    adapterId: 'claude-code',\n" +
+        '  },\n' +
+        '  pipeline: {\n' +
+        "    engine: 'pipeline',\n" +
+        // The drift: the runner calls it something else than `ENGINES` does.
+        "    adapterId: 'drive-v2',\n" +
+        '  },\n' +
+        '};\n',
     );
-    expect(drift).toEqual([]);
+    const previous = process.env[RUNNER_ENGINE_SOURCE_ENV];
+    process.env[RUNNER_ENGINE_SOURCE_ENV] = file;
+    try {
+      const runner = readRunnerEngineRegistry();
+      expect(runner).not.toBeNull();
+      expect(runner!['claude-code']).toBe('claude-code');
+      expect(runner!['pipeline']).toBe('drive-v2');
+
+      const drift = driftBetween(runner!);
+      // The drifted engine is named, from BOTH sides…
+      expect(drift.some((d) => d.startsWith('pipeline:') && d.includes('pipeline-drive') && d.includes('drive-v2'))).toBe(true);
+      // …and so is every engine this fixture's runner has no module for.
+      expect(drift.some((d) => d.startsWith('process:') && d.includes('no module ships for it'))).toBe(true);
+      // The row that agrees is not reported.
+      expect(drift.some((d) => d.startsWith('claude-code:'))).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env[RUNNER_ENGINE_SOURCE_ENV];
+      else process.env[RUNNER_ENGINE_SOURCE_ENV] = previous;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// x44 — the drift detector that fires on a USER's machine
+// ---------------------------------------------------------------------------
+//
+// `pipeline-runner bind --adapter` now refuses an id it has no engine module
+// for and names the ones it has (its x14). `serve` provokes that refusal at
+// step 6 on every invocation, against the INSTALLED build — the only registry
+// that can actually break a department. Reading it is the whole detector; see
+// `parseAdapterRefusal`'s section doc in `lib/department-serve.ts`.
+
+/** `cli.ts`'s `runBind` refusal, verbatim in shape (stderr, exit 1). */
+const BIND_ADAPTER_REFUSAL: ShellResult = {
+  code: 1,
+  stdout: '',
+  stderr:
+    "[pipeline-runner] error: unknown --adapter 'claude-code' — this runner has no engine module for it, so it " +
+    'could not execute a single task for this department.\n' +
+    '  Adapters this build has: container, jsonl-process (engine: process), pipeline-drive (engine: pipeline)\n',
+};
+
+function bindDeps(result: ShellResult) {
+  return {
+    shell: () => result,
+    fetch: async () => {
+      throw new Error('no network in this test');
+    },
+  } as unknown as Parameters<typeof bindRuntime>[0];
+}
+
+const A_BINDING = { adapterId: 'claude-code', command: 'claude', args: [], cwd: '/dept', spec: {}, warnings: [] };
+
+describe('x44 — a refused adapter is a REGISTRY DRIFT, and is reported as one', () => {
+  test('the refusal is parsed into both sides of the disagreement', () => {
+    const drift = parseAdapterRefusal(BIND_ADAPTER_REFUSAL.stderr);
+    expect(drift).not.toBeNull();
+    expect(drift!.adapterId).toBe('claude-code');
+    // Said back in `department.yml`'s vocabulary — the user never typed an
+    // adapter id, and 06 §2 forbids printing one at them without translation.
+    expect(drift!.engine).toBe('claude-code');
+    expect(drift!.runnerAdapters).toBe('container, jsonl-process (engine: process), pipeline-drive (engine: pipeline)');
+  });
+
+  test('an adapter id no ENGINES row claims is itself a finding, not a crash', () => {
+    const drift = parseAdapterRefusal("unknown --adapter 'codex' — this runner has no engine module for it");
+    expect(drift).not.toBeNull();
+    expect(drift!.engine).toBeNull();
+    expect(drift!.runnerAdapters).toBeNull();
+  });
+
+  test('`bind` failing for ANY OTHER reason is not relabelled as a registry problem', () => {
+    for (const stderr of [
+      '[pipeline-runner] error: could not write the runtime binding: /x/departments.json (EACCES)',
+      '[pipeline-runner] error: --command <cmd> is required',
+    ]) {
+      expect(parseAdapterRefusal(stderr)).toBeNull();
+      const outcome = bindRuntime(bindDeps({ code: 1, stdout: '', stderr }), 'dept-1', A_BINDING);
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) return;
+      expect(outcome.message).toContain('Could not write the runtime binding:');
+      expect(outcome.message).not.toContain('VERSION SKEW');
+    }
+  });
+
+  test('bindRuntime turns the refusal into a message that names the skew and the fix', () => {
+    const outcome = bindRuntime(bindDeps(BIND_ADAPTER_REFUSAL), 'dept-1', A_BINDING);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.message).toContain('has no engine module for adapter');
+    expect(outcome.message).toContain('`engine: claude-code`');
+    expect(outcome.message).toContain('pipeline-drive (engine: pipeline)');
+    expect(outcome.message).toContain('VERSION SKEW');
+    expect(outcome.message).toContain('bun add -g @baizor/pipeline-runner');
+  });
+
+  test('a missing binary keeps its own message — that is not a drift either', () => {
+    const outcome = bindRuntime(bindDeps({ code: 127, stdout: '', stderr: 'spawn ENOENT' }), 'dept-1', A_BINDING);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.message).toContain('`pipeline-runner` is not installed on this machine');
+  });
+
+  test('a reworded refusal costs the RICHER message, never the answer', () => {
+    // The detector matches the runner's own sentence. If that sentence ever
+    // changes, `bind` still fails with the runner's text relayed verbatim —
+    // the correct direction to degrade.
+    const reworded = '[pipeline-runner] error: adapter `claude-code` is not registered';
+    expect(parseAdapterRefusal(reworded)).toBeNull();
+    const outcome = bindRuntime(bindDeps({ code: 1, stdout: '', stderr: reworded }), 'dept-1', A_BINDING);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.message).toContain('adapter `claude-code` is not registered');
+  });
+
+  test('describeAdapterRegistryDrift stays readable when the runner named no list', () => {
+    const text = describeAdapterRegistryDrift({ adapterId: 'codex', engine: null, runnerAdapters: null });
+    expect(text).toContain("no engine module for adapter 'codex'");
+    expect(text).toContain("this department's engine");
+    expect(text).not.toContain('undefined');
+    expect(text).not.toContain('null');
   });
 });
 
@@ -1643,12 +1818,19 @@ describe('department-serve pure helpers', () => {
       expect(stopped.verdict).toBe('not-live');
       if (stopped.verdict !== 'not-live') return;
       expect(stopped.reason).toContain('installed but NOT running');
-      expect(stopped.nextStep).toContain('pipeline-runner service install');
+      // x44/x24: an installed-but-stopped service is STARTED, not recreated.
+      expect(stopped.nextStep).toContain('pipeline-runner service start');
+      expect(stopped.nextStep).not.toContain('service install');
+      // …and because `service start` is not in a PUBLISHED runner yet, the
+      // dead end that verb hits on an older one has its own next step.
+      expect(stopped.nextStep).toContain('bun add -g @baizor/pipeline-runner');
 
       const none = assessLiveness({ ...base, supervisor: 'not-installed', cloudOnline });
       expect(none.verdict).toBe('not-live');
       if (none.verdict !== 'not-live') return;
       expect(none.reason).toContain('no supervisor service');
+      // …and `not-installed` is a DIFFERENT state, which keeps `install`.
+      expect(none.nextStep).toContain('pipeline-runner service install');
     }
 
     // …and `--foreground` gets the remedy that fits it.
@@ -1796,6 +1978,11 @@ describe('department-serve pure helpers', () => {
     });
     if (v.verdict !== 'not-live') throw new Error('expected not-live');
     expect(v.reason).toBe("no supervisor process is running in this machine's runner home");
+    // The service probe said nothing at all, so BOTH verbs are named and the
+    // runner decides: `service start` refuses (naming `install`) when there is
+    // nothing installed to start, so the wrong guess costs a refusal rather
+    // than a rebuilt service.
+    expect(v.nextStep).toContain('pipeline-runner service start');
     expect(v.nextStep).toContain('pipeline-runner service install');
   });
 

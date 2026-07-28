@@ -53,12 +53,39 @@ export interface ShellResult {
 }
 
 /**
+ * Per-invocation knobs that are NOT part of the child's environment.
+ *
+ * x44: added for the one caller that must bound its own wait — `status`
+ * shelling `pipeline-runner journal` on a routine, possibly-`--follow`
+ * diagnostic command. Optional so every existing `ShellRunner` (including
+ * every two-argument test fake) still satisfies the type unchanged, and so no
+ * pre-existing call site's behaviour moves: without `timeoutMs`, `spawnSync`
+ * is called with exactly the options it always was.
+ */
+export interface ShellOptions {
+  /** Kill the child after this many milliseconds and report {@link SHELL_TIMEOUT_CODE}. */
+  timeoutMs?: number;
+}
+
+/** The exit code `realShell` reports for a child it killed on `timeoutMs` —
+ *  `timeout(1)`'s own convention, and deliberately not `1`, so a caller can
+ *  tell "the command answered, and failed" from "the command never answered".
+ *  (127 already means "no such binary", the same way `nodeServiceExec` uses
+ *  it.) */
+export const SHELL_TIMEOUT_CODE = 124;
+
+/**
  * Runs an external command. `envOverride` is MERGED over the ambient
  * environment for ONLY this one invocation — the mechanism `registerRunner`
  * uses to hand the child process a fresh secret without ever putting it in
  * `args` (see this file's module doc).
  */
-export type ShellRunner = (cmd: string, args: string[], envOverride?: Record<string, string>) => ShellResult;
+export type ShellRunner = (
+  cmd: string,
+  args: string[],
+  envOverride?: Record<string, string>,
+  opts?: ShellOptions,
+) => ShellResult;
 
 /** The real subprocess spawner (child_process.spawnSync — SYNCHRONOUS, same
  *  idiom as `commands/init.ts`'s `realClaudeCli` and pipeline-runner's own
@@ -66,15 +93,20 @@ export type ShellRunner = (cmd: string, args: string[], envOverride?: Record<str
  *  validates connectivity before returning, so this call can legitimately
  *  block for up to ~30s (pipeline-runner's `REGISTER_ONCE_TIMEOUT_MS`) —
  *  acceptable for a one-time enrolment step, consistent with this package's
- *  existing synchronous-subprocess conventions. */
-export const realShell: ShellRunner = (cmd, args, envOverride) => {
+ *  existing synchronous-subprocess conventions. A caller that cannot afford
+ *  that wait passes `opts.timeoutMs` (x44). */
+export const realShell: ShellRunner = (cmd, args, envOverride, opts) => {
   const r = spawnSync(cmd, args, {
     encoding: 'utf8',
     windowsHide: true,
     env: envOverride ? { ...process.env, ...envOverride } : process.env,
+    ...(opts?.timeoutMs !== undefined ? { timeout: opts.timeoutMs } : {}),
   });
   if (r.error) {
-    const code = (r.error as NodeJS.ErrnoException).code === 'ENOENT' ? 127 : 1;
+    const errCode = (r.error as NodeJS.ErrnoException).code;
+    // A child killed by `timeout` is reported distinctly: it produced no
+    // answer, which is a different fact from an answer that failed.
+    const code = errCode === 'ENOENT' ? 127 : errCode === 'ETIMEDOUT' ? SHELL_TIMEOUT_CODE : 1;
     return { code, stdout: r.stdout ?? '', stderr: String((r.error as Error).message ?? r.error) };
   }
   return { code: r.status ?? 0, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
@@ -108,7 +140,10 @@ export interface RunnerEnrolDeps {
 // Constants
 // ---------------------------------------------------------------------------
 
-const RUNNER_CLI_BIN = 'pipeline-runner';
+/** The runner's own executable name, as it resolves on PATH. Exported since
+ *  x44 so `./department-journal.ts` shells the same binary this file does
+ *  rather than repeating the literal. */
+export const RUNNER_CLI_BIN = 'pipeline-runner';
 export const RUNNER_PACKAGE = '@baizor/pipeline-runner';
 
 /** Mirrors pipeline-runner's OWN `cli.ts#CLIENT_SECRET_ENV` byte-for-byte —

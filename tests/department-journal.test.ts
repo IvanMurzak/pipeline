@@ -20,13 +20,18 @@ import { describe, expect, test } from 'bun:test';
 import { join } from 'node:path';
 import {
   departmentIndexPath,
+  interpretRunnerJournal,
+  readDepartmentJournal,
   readLocalDepartmentJournal,
   resolveRunnerDataDir,
   resolveRunnerHome,
   resolveRunnerJournalRoot,
+  RUNNER_JOURNAL_SCHEMA,
+  RUNNER_JOURNAL_TIMEOUT_MS,
   sanitizeForPath,
   type JournalFs,
 } from '../src/lib/department-journal';
+import { SHELL_TIMEOUT_CODE, type ShellResult, type ShellRunner } from '../src/lib/runner-enrol';
 
 const DEPT_ID = '22222222-2222-4222-8222-222222222222';
 
@@ -258,5 +263,288 @@ describe('reading the journal — degradation', () => {
     expect(r.byTaskId.has('newest')).toBe(true);
     expect(r.byTaskId.has('old-0')).toBe(false);
     expect(r.executions).toBeLessThanOrEqual(5000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// x44 — asking pipeline-runner instead of guessing
+// ---------------------------------------------------------------------------
+//
+// The mirror above resolves the data dir AS THE INVOKING USER, which is wrong
+// for the shape the product steers users onto: `serve` installs a SERVICE, and
+// on Windows `sc.exe create` with no `obj=` runs it as `LocalSystem` (x22).
+//
+// `readDepartmentJournal` therefore shells `pipeline-runner journal --json`
+// first. Shelling out is itself a failure surface, so the whole point of this
+// suite is the degradation matrix: an absent binary, a runner too old to know
+// the verb, a hung child, malformed stdout, a status word this reader does not
+// know, and a BREAKING schema bump must each fall back to the mirror WITH A
+// STATED REASON — never to a wrong answer, and never to a silent blank.
+
+const RUNNER_INDEX = '/service-home/data/department/by-department/dept/executions.jsonl';
+
+/** A `JournalReadOutput` as pipeline-runner's `journal --json` prints it
+ *  (`src/department/journal-read.ts`) — every key always present. */
+function runnerDoc(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema: 1,
+    department_id: DEPT_ID,
+    status: 'ok',
+    message: null,
+    path: RUNNER_INDEX,
+    home_source: 'service',
+    executions: [
+      {
+        run_id: 'dexec-1',
+        task_id: 'task-1',
+        context_id: 'ctx-1',
+        sender: 'service@acme.dev',
+        engine: 'claude-code',
+        ts: '2026-07-27T14:00:00.000Z',
+        journal_path: '/x/events.jsonl',
+      },
+    ],
+    tasks: {
+      'task-1': { sender: 'service@acme.dev', engine: 'claude-code', run_id: 'dexec-1', ts: '2026-07-27T14:00:00.000Z' },
+    },
+    counts: { executions: 1, skipped: 0, limit: 5000, truncated: false },
+    supervisor: null,
+    ...over,
+  };
+}
+
+function runnerOk(doc: Record<string, unknown> = runnerDoc(), code = 0): ShellResult {
+  return { code, stdout: `${JSON.stringify(doc, null, 2)}\n`, stderr: '' };
+}
+
+/** `cli.ts`'s `unknownCommand()`, verbatim: stderr, exit 1, NOTHING on stdout.
+ *  THE discriminator — the new `unreadable`/`unlocatable` statuses also exit 1,
+ *  but they print their document first. */
+const OLD_RUNNER: ShellResult = {
+  code: 1,
+  stdout: '',
+  stderr: "[pipeline-runner] error: unknown command 'journal' — run `pipeline-runner --help` for the command list\n",
+};
+
+/** Older still: a build predating `x11`, where EVERY unmatched command fell
+ *  into `usage()` — stdout, exit 0. A zero exit is not evidence of an answer. */
+const PRE_X11_RUNNER: ShellResult = {
+  code: 0,
+  stdout: 'usage: pipeline-runner <command>\n\n  register --url <base-url> ...\n',
+  stderr: '',
+};
+
+function shellReturning(
+  result: ShellResult,
+  calls: { cmd: string; args: string[]; opts?: unknown }[] = [],
+): ShellRunner {
+  return (cmd, args, _env, opts) => {
+    calls.push({ cmd, args, opts });
+    return result;
+  };
+}
+
+/** The mirror's own answer in these tests, so "which reader won" is decidable:
+ *  the on-disk file records a DIFFERENT sender from the runner's. */
+const MIRROR_FILES = { [INDEX]: `${entry({ sender: 'mirror@acme.dev' })}\n` };
+
+function readVia(shell: ShellRunner, files: Record<string, string> = MIRROR_FILES, unreadable: Record<string, string> = {}) {
+  return readDepartmentJournal(shell, fs(files, unreadable), { env: ENV, platform: 'linux', departmentId: DEPT_ID });
+}
+
+describe('x44 — the runner answers, the mirror is the fallback', () => {
+  test('the runner is asked first, and its answer wins over the file this process can see', () => {
+    const calls: { cmd: string; args: string[]; opts?: unknown }[] = [];
+    const r = readVia(shellReturning(runnerOk(), calls));
+
+    expect(r.source).toBe('runner');
+    expect(r.status).toBe('ok');
+    expect(r.path).toBe(RUNNER_INDEX);
+    expect(r.homeSource).toBe('service');
+    expect(r.executions).toBe(1);
+    // The runner read a home this process cannot; the mirror read one it can.
+    // Only one of those is the answer.
+    expect(r.byTaskId.get('task-1')).toEqual({ sender: 'service@acme.dev', engine: 'claude-code' });
+    expect(r.fallbackReason).toBeUndefined();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.cmd).toBe('pipeline-runner');
+    expect(calls[0]!.args).toEqual(['journal', '--department', DEPT_ID, '--json']);
+    // A hung child may not hang a `--follow` loop.
+    expect(calls[0]!.opts).toEqual({ timeoutMs: RUNNER_JOURNAL_TIMEOUT_MS });
+  });
+
+  test('ABSENT from the runner carries the account that OWNS the journal — the whole point of x22', () => {
+    const r = readVia(
+      shellReturning(
+        runnerOk(
+          runnerDoc({
+            status: 'absent',
+            tasks: {},
+            executions: [],
+            counts: { executions: 0, skipped: 0, limit: 5000, truncated: false },
+            home_source: 'default',
+            supervisor: {
+              backend: 'windows',
+              installed: true,
+              home: null,
+              account: 'LocalSystem',
+              systemAccount: true,
+              note: null,
+            },
+          }),
+        ),
+      ),
+      {},
+    );
+    expect(r.source).toBe('runner');
+    expect(r.status).toBe('absent');
+    expect(r.supervisor).toEqual({
+      backend: 'windows',
+      installed: true,
+      home: null,
+      account: 'LocalSystem',
+      systemAccount: true,
+      note: null,
+    });
+  });
+
+  test('a runner that never probed reports `supervisor` as UNDEFINED, not as null', () => {
+    // `null` is "probed, nothing observable"; absent from the document is
+    // "nothing was probed". Those are different facts and stay different.
+    const doc = runnerDoc();
+    delete doc['supervisor'];
+    const r = readVia(shellReturning(runnerOk(doc)));
+    expect(r.supervisor).toBeUndefined();
+    expect(r.status).toBe('ok');
+  });
+
+  test('`unreadable` is exit 1 WITH a document — used as the answer, not mistaken for an old runner', () => {
+    const r = readVia(
+      shellReturning(
+        runnerOk(
+          runnerDoc({
+            status: 'unreadable',
+            message: 'permission denied — the file exists but this process may not read it',
+            tasks: {},
+            executions: [],
+            counts: { executions: 0, skipped: 0, limit: 5000, truncated: false },
+          }),
+          1,
+        ),
+      ),
+    );
+    expect(r.source).toBe('runner');
+    expect(r.status).toBe('unreadable');
+    expect(r.message).toContain('permission denied');
+    expect(r.fallbackReason).toBeUndefined();
+  });
+
+  test('a NEWER runner adding keys this CLI has never heard of still answers', () => {
+    const r = readVia(
+      shellReturning(
+        runnerOk(
+          runnerDoc({
+            retention_policy: 'forever',
+            counts: { executions: 1, skipped: 0, limit: 5000, truncated: false, purged: 3 },
+          }),
+        ),
+      ),
+    );
+    expect(r.source).toBe('runner');
+    expect(r.byTaskId.get('task-1')!.sender).toBe('service@acme.dev');
+  });
+
+  test('a blank sender/engine from the runner reads back as null, never as an empty cell', () => {
+    const r = readVia(
+      shellReturning(runnerOk(runnerDoc({ tasks: { 'task-1': { sender: '', engine: null, run_id: 'x', ts: null } } }))),
+    );
+    expect(r.byTaskId.get('task-1')).toEqual({ sender: null, engine: null });
+  });
+});
+
+describe('x44 — every way the shell-out can fail degrades to the mirror, with a reason', () => {
+  /** Each case: the runner's answer, and the words the fallback has to carry. */
+  const cases: [name: string, result: ShellResult, reasonFragment: string][] = [
+    ['a runner too old to know the verb (exit 1, stderr, no JSON)', OLD_RUNNER, 'does not know the `journal` verb'],
+    ['a runner predating x11 (usage on stdout, exit 0)', PRE_X11_RUNNER, 'printed no JSON'],
+    ['no `pipeline-runner` on PATH at all', { code: 127, stdout: '', stderr: 'spawn ENOENT' }, 'not installed on this machine'],
+    ['a child that hung and was killed', { code: SHELL_TIMEOUT_CODE, stdout: '', stderr: 'ETIMEDOUT' }, 'did not answer in time'],
+    ['malformed JSON on stdout', { code: 0, stdout: '{"schema": 1, "status": "o', stderr: '' }, 'printed no JSON'],
+    ['a JSON ARRAY where an object belongs', { code: 0, stdout: '[1,2,3]', stderr: '' }, 'printed no JSON'],
+    ['JSON with no schema version', { code: 0, stdout: '{"status":"ok"}', stderr: '' }, 'no schema version'],
+    [
+      'a BREAKING schema bump — the one word reserved for "this shape no longer holds"',
+      runnerOk(runnerDoc({ schema: RUNNER_JOURNAL_SCHEMA + 1 })),
+      `speaks output schema ${RUNNER_JOURNAL_SCHEMA + 1}`,
+    ],
+    ['a status word this reader does not know', runnerOk(runnerDoc({ status: 'quarantined' })), 'status this CLI does not know'],
+    ['an exit code that contradicts the document', runnerOk(runnerDoc({ status: 'ok' }), 1), 'output contract did not hold'],
+    ['an answer about a different department', runnerOk(runnerDoc({ department_id: 'someone-else' })), 'different department'],
+  ];
+
+  for (const [name, result, fragment] of cases) {
+    test(`${name} -> the mirror, and says why`, () => {
+      const r = readVia(shellReturning(result));
+      expect(r.source).toBe('mirror');
+      expect(r.fallbackReason ?? '').toContain(fragment);
+      // Degraded to the MIRROR, not to a lie: the file this process CAN read
+      // is still read, and its facts are still reported.
+      expect(r.status).toBe('ok');
+      expect(r.byTaskId.get('task-1')).toEqual({ sender: 'mirror@acme.dev', engine: 'claude-code' });
+      expect(r.supervisor).toBeUndefined();
+    });
+  }
+
+  test('a `ShellRunner` that THROWS is caught — `status` never crashes over a subprocess', () => {
+    const r = readVia(() => {
+      throw new Error('EPERM: spawn refused');
+    });
+    expect(r.source).toBe('mirror');
+    expect(r.fallbackReason).toContain('could not be started');
+    expect(r.fallbackReason).toContain('EPERM');
+    expect(r.byTaskId.get('task-1')!.sender).toBe('mirror@acme.dev');
+  });
+
+  test("the fallback carries the mirror's OWN degradation, not a fabricated success", () => {
+    // Old runner AND an unreadable file: two failures, and the answer is the
+    // honest intersection of them.
+    const r = readVia(shellReturning(OLD_RUNNER), {}, { [INDEX]: 'EACCES' });
+    expect(r.source).toBe('mirror');
+    expect(r.status).toBe('unreadable');
+    expect(r.message).toBe('permission denied');
+    expect(r.fallbackReason).toContain('does not know the `journal` verb');
+  });
+
+  test('one stray log line before the document costs a fallback, not the answer', () => {
+    const r = readVia(
+      shellReturning({ code: 0, stdout: `[pipeline-runner] warn: something\n${JSON.stringify(runnerDoc())}\n`, stderr: '' }),
+    );
+    expect(r.source).toBe('runner');
+    expect(r.byTaskId.get('task-1')!.sender).toBe('service@acme.dev');
+  });
+});
+
+describe('x44 — interpretRunnerJournal, the pure half', () => {
+  test('counts it cannot verify fall back to what it actually understood', () => {
+    const doc = runnerDoc();
+    delete doc['counts'];
+    const out = interpretRunnerJournal(runnerOk(doc), DEPT_ID);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.reading.executions).toBe(1);
+    expect(out.reading.skipped).toBe(0);
+  });
+
+  test('a `tasks` map that is not a map of objects contributes nothing, and does not throw', () => {
+    const out = interpretRunnerJournal(runnerOk(runnerDoc({ tasks: { 'task-1': 'nope', 'task-2': null, '': {} } })), DEPT_ID);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.reading.byTaskId.size).toBe(0);
+  });
+
+  test('an OLDER schema is read (the number moves only for a BREAKING change)', () => {
+    const out = interpretRunnerJournal(runnerOk(runnerDoc({ schema: 0 })), DEPT_ID);
+    expect(out.ok).toBe(true);
   });
 });

@@ -592,7 +592,33 @@ interface StatusWorldOpts {
   /** x19: no `PIPELINE_RUNNER_HOME` and no HOME/XDG — the data directory
    *  cannot be computed from the environment at all. */
   noRunnerHome?: boolean;
+  /**
+   * x44: what `pipeline-runner journal --department <id> --json` answers.
+   *
+   * The DEFAULT is the answer an installed runner that predates the verb
+   * actually gives — `cli.ts`'s `unknownCommand()`, verbatim: stderr, exit 1,
+   * nothing on stdout. Every x19 test therefore keeps exercising the mirror,
+   * through the real fallback path rather than through a fake that happens to
+   * fail.
+   */
+  journalCli?: ShellResult;
 }
+
+/** x44: an older `pipeline-runner`, answering `journal` exactly as
+ *  `cli.ts`'s `unknownCommand()` does — the discriminator the fallback keys
+ *  off (exit 1, stderr, and crucially NO JSON on stdout, which is what
+ *  distinguishes it from the new `unreadable`/`unlocatable` exits, which
+ *  print their document and exit 1 too). */
+const OLD_RUNNER_JOURNAL: ShellResult = {
+  code: 1,
+  stdout: '',
+  stderr: "[pipeline-runner] error: unknown command 'journal' — run `pipeline-runner --help` for the command list\n",
+};
+
+/** x44: what the fallback says about {@link OLD_RUNNER_JOURNAL}. */
+const OLD_RUNNER_FALLBACK_REASON =
+  'this `pipeline-runner` build does not know the `journal` verb (it predates it), or it failed before printing: ' +
+  "[pipeline-runner] error: unknown command 'journal' — run `pipeline-runner --help` for the command list";
 
 function makeStatusWorld(opts: StatusWorldOpts) {
   let out = '';
@@ -646,6 +672,11 @@ function makeStatusWorld(opts: StatusWorldOpts) {
       }
       if (cmd === 'pipeline-runner' && args[0] === 'status') {
         return { code: 0, stdout: JSON.stringify({ base_url: SERVER, runner_id: RUNNER_ID }), stderr: '' };
+      }
+      // x44: `status` asks the runner for the journal before reading the file
+      // itself. Default: a runner too old to know the verb.
+      if (cmd === 'pipeline-runner' && args[0] === 'journal') {
+        return opts.journalCli ?? OLD_RUNNER_JOURNAL;
       }
       return { code: 1, stdout: '', stderr: 'unexpected shell call' };
     },
@@ -943,10 +974,20 @@ describe('status — x19: sender and engine come from the local runner journal',
     });
     await runDepartmentStatus(['--server', SERVER, '--json'], w.deps);
     const parsed = JSON.parse(w.out()) as {
-      localJournal: { status: string; path: string; executions: number; skippedLines: number };
+      localJournal: { status: string; path: string; executions: number; skippedLines: number; source: string; fallbackReason?: string };
       cloud: { tasks: { id: string; sender: string | null; engine: string | null; localRecord: boolean; originPrincipal: string }[] };
     };
-    expect(parsed.localJournal).toEqual({ status: 'ok', path: JOURNAL_INDEX, executions: 1, skippedLines: 0 });
+    // x44: this world's runner predates the `journal` verb, so the reading is
+    // the MIRROR's — and says so, with the reason it fell back. Everything
+    // x19 emitted is byte-identical; the two new keys are additive.
+    expect(parsed.localJournal).toEqual({
+      status: 'ok',
+      path: JOURNAL_INDEX,
+      executions: 1,
+      skippedLines: 0,
+      source: 'mirror',
+      fallbackReason: OLD_RUNNER_FALLBACK_REASON,
+    });
     const t1 = parsed.cloud.tasks.find((t) => t.id === TASK_1)!;
     expect(t1.sender).toBe('ivan@acme.dev');
     expect(t1.engine).toBe('claude-code');
@@ -993,6 +1034,224 @@ describe('status — x19: sender and engine come from the local runner journal',
     await runDepartmentStatus(['--server', SERVER, '--json'], w.deps);
     const parsed = JSON.parse(w.out()) as { localJournal: unknown };
     expect(parsed.localJournal).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `status` — x44: the journal comes from pipeline-runner, and an unreadable
+// one now says WHOSE it is
+// ---------------------------------------------------------------------------
+//
+// x19 replaced a misattributed identity with an honest `?`. x22 then found the
+// `?` was UNIVERSAL on the happy path: `serve` installs a service, on Windows
+// `sc.exe create` with no `obj=` runs it as `LocalSystem`, and the mirror —
+// which resolves the data dir as the INVOKING user — looked in the right place
+// for the wrong account. The runner's own `journal` command reads its installed
+// service definition and can name the owner; that sentence is what replaces the
+// unexplained `?`.
+
+/** `pipeline-runner journal --department <id> --json`, as the real command
+ *  prints it (`src/department/journal-read.ts`'s `JournalReadOutput`). */
+function runnerJournalCli(over: Record<string, unknown> = {}): ShellResult {
+  const doc = {
+    schema: 1,
+    department_id: DEPT_ID,
+    status: 'ok',
+    message: null,
+    path: 'C:\\Windows\\system32\\config\\systemprofile\\AppData\\Local\\pipeline-runner\\department\\by-department\\d\\executions.jsonl',
+    home_source: 'default',
+    executions: [],
+    tasks: {},
+    counts: { executions: 0, skipped: 0, limit: 5000, truncated: false },
+    supervisor: null,
+    ...over,
+  };
+  const status = String(doc.status);
+  return { code: status === 'ok' || status === 'absent' ? 0 : 1, stdout: `${JSON.stringify(doc, null, 2)}\n`, stderr: '' };
+}
+
+/** A service the invoking user cannot read the journal of: Windows' default. */
+const LOCAL_SYSTEM_SUPERVISOR = {
+  backend: 'windows',
+  installed: true,
+  home: null,
+  account: 'LocalSystem',
+  systemAccount: true,
+  note: null,
+};
+
+describe('status — x44: a service-account journal is explained, not left as `?`', () => {
+  test('the owning account replaces the unexplained `?`', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      // The invoking user's own journal is missing — which is exactly what the
+      // mirror saw, and all it could ever say about it.
+      journalCli: runnerJournalCli({ status: 'absent', supervisor: LOCAL_SYSTEM_SUPERVISOR }),
+    });
+    const code = await runDepartmentStatus(['--server', SERVER], w.deps);
+    expect(code).toBe(0);
+    const out = w.out();
+    // Still honest about the cells themselves: unknown is unknown.
+    expect(out).toContain('sender/engine unknown for 2 tasks');
+    // …but the reason is now a fact about this machine, not a shrug.
+    expect(out).toContain("This machine's supervisor service runs as LocalSystem, a MACHINE account");
+    expect(out).toContain('pipeline-runner service install --home <path>');
+    // And the cause x19's sentence used to assert — "they ran elsewhere" — is
+    // no longer claimed, because something was observed that contradicts it.
+    expect(out).not.toContain('they ran elsewhere');
+  });
+
+  test('a NAMED but ordinary account is reported without the machine-account remedy', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      journalCli: runnerJournalCli({
+        status: 'absent',
+        supervisor: { backend: 'windows', installed: true, home: null, account: 'ACME\\svc-runner', systemAccount: false, note: null },
+      }),
+    });
+    await runDepartmentStatus(['--server', SERVER], w.deps);
+    expect(w.out()).toContain("supervisor service runs as ACME\\svc-runner; its journal belongs to that account");
+    expect(w.out()).not.toContain('MACHINE account');
+  });
+
+  test('no service installed: nothing is disclosed, and x19’s own sentence survives untouched', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      journalCli: runnerJournalCli({
+        status: 'absent',
+        supervisor: { backend: 'systemd', installed: false, home: null, account: null, systemAccount: false, note: 'no user unit at /x' },
+      }),
+    });
+    await runDepartmentStatus(['--server', SERVER], w.deps);
+    expect(w.out()).toContain('no local runner journal on this machine; they ran elsewhere.');
+    expect(w.out()).not.toContain('supervisor service runs as');
+  });
+
+  test("the runner's reading is used, and x19's three states survive it", async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      // The runner reads the SERVICE's home. This process's own file is absent
+      // (no `journal:` option), so anything rendered here can only have come
+      // from the runner.
+      journalCli: runnerJournalCli({
+        home_source: 'service',
+        tasks: {
+          [TASK_1]: { sender: 'ivan@acme.dev', engine: 'claude-code', run_id: 'r1', ts: '2026-07-27T14:00:00.000Z' },
+          // b4's own "the offer stated no sender" — a fact, and NOT the same
+          // as this machine having no record.
+          [TASK_2]: { sender: null, engine: 'pipeline', run_id: 'r2', ts: '2026-07-27T15:00:00.000Z' },
+        },
+        counts: { executions: 2, skipped: 0, limit: 5000, truncated: false },
+      }),
+    });
+    await runDepartmentStatus(['--server', SERVER], w.deps);
+    const out = w.out();
+    expect(out).toContain('ivan@acme.dev');
+    expect(out).toContain('claude-code');
+    // `—` (stated absence) and `?` (no record) stay distinct, and neither task
+    // borrows the other's identity.
+    expect(out).toContain('—');
+    expect(out).not.toContain('sender/engine unknown');
+    // The cloud's authenticated CALLER never returns to the human view.
+    expect(out).not.toContain(`user:${USER_ID}`);
+  });
+
+  test('--json says which reader answered, and carries the supervisor observation', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      journalCli: runnerJournalCli({ status: 'absent', home_source: 'default', supervisor: LOCAL_SYSTEM_SUPERVISOR }),
+    });
+    await runDepartmentStatus(['--server', SERVER, '--json'], w.deps);
+    const parsed = JSON.parse(w.out()) as {
+      localJournal: { status: string; source: string; homeSource: string; supervisor: Record<string, unknown>; fallbackReason?: string };
+      cloud: { tasks: { localRecord: boolean; sender: string | null }[] };
+    };
+    expect(parsed.localJournal.source).toBe('runner');
+    expect(parsed.localJournal.status).toBe('absent');
+    expect(parsed.localJournal.homeSource).toBe('default');
+    expect(parsed.localJournal.supervisor).toEqual(LOCAL_SYSTEM_SUPERVISOR);
+    expect(parsed.localJournal.fallbackReason).toBeUndefined();
+    // Absent is absent: nothing was invented per task.
+    expect(parsed.cloud.tasks.every((t) => t.localRecord === false && t.sender === null)).toBe(true);
+  });
+
+  test('offline: the ownership fact survives the network being down', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: false,
+      bindingsDeptId: DEPT_ID,
+      journalCli: runnerJournalCli({ status: 'absent', supervisor: LOCAL_SYSTEM_SUPERVISOR }),
+    });
+    expect(await runDepartmentStatus(['--server', SERVER], w.deps)).toBe(0);
+    expect(w.out()).toContain('offline — no cloud connection');
+    expect(w.out()).toContain("This machine's supervisor service runs as LocalSystem");
+  });
+
+  test('a journal that WAS read explains nothing about accounts — that would explain nothing', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      // `ok`: the runner followed the service's pinned home and read it. The
+      // tasks are simply not in it. Naming the account that owns a file we
+      // just read out of would be an explanation of nothing.
+      journalCli: runnerJournalCli({ status: 'ok', home_source: 'service', supervisor: LOCAL_SYSTEM_SUPERVISOR }),
+    });
+    await runDepartmentStatus(['--server', SERVER], w.deps);
+    expect(w.out()).toContain('sender/engine unknown for 2 tasks — not run on this machine.');
+    expect(w.out()).not.toContain('MACHINE account');
+  });
+
+  test('a pinned home is named as WHERE this reading looked, ahead of whose account it is', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      journalCli: runnerJournalCli({
+        status: 'absent',
+        home_source: 'service',
+        supervisor: { ...LOCAL_SYSTEM_SUPERVISOR, home: 'D:\\shared\\runner' },
+      }),
+    });
+    await runDepartmentStatus(['--server', SERVER], w.deps);
+    // The runner FOLLOWED the pin, so the account is no longer the fact about
+    // where we looked — the home is.
+    expect(w.out()).toContain('pins PIPELINE_RUNNER_HOME=D:\\shared\\runner — that is where this reading looked.');
+    expect(w.out()).not.toContain('MACHINE account');
+  });
+
+  test('an old runner falls back to the mirror and renders exactly what x19 rendered', async () => {
+    const dir = departmentProject();
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      journal: `${indexLine({ taskId: TASK_1 })}\n`,
+      journalCli: OLD_RUNNER_JOURNAL,
+    });
+    expect(await runDepartmentStatus(['--server', SERVER], w.deps)).toBe(0);
+    expect(w.out()).toContain('ivan@acme.dev');
+    expect(w.out()).toContain('sender/engine unknown for 1 task — not run on this machine.');
+    // No ownership sentence: nothing observed it, so nothing claims it.
+    expect(w.out()).not.toContain('supervisor service runs as');
   });
 });
 

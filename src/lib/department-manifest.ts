@@ -312,6 +312,21 @@ export function adapterIdForEngine(engine: string): string | undefined {
   return engineDefinition(engine)?.adapterId;
 }
 
+/**
+ * `adapterId` → `engine:` — the reverse of {@link adapterIdForEngine}, and the
+ * mirror image of pipeline-runner's own `adapterIdToEngine`.
+ *
+ * x44 added it for one caller: when `pipeline-runner bind` REFUSES an adapter
+ * id, its refusal names the id (a machine seam — the flag is spelled that way)
+ * and the operator is holding an engine name. Translating back is what lets
+ * that refusal be reported in the vocabulary `department.yml` actually uses.
+ * `undefined` when no row claims the id — which, on that path, is itself the
+ * finding.
+ */
+export function engineForAdapterId(adapterId: string): string | undefined {
+  return ENGINES.find((e) => e.adapterId === adapterId)?.engine;
+}
+
 // ---------------------------------------------------------------------------
 // The parsed manifest (both halves)
 // ---------------------------------------------------------------------------
