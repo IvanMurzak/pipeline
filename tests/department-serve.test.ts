@@ -34,6 +34,8 @@ import {
   assessLiveness,
   buildBindArgs,
   departmentUrlFor,
+  localSupervisorIsUp,
+  readLocalDaemonState,
   renderState,
   runtimeBindingFor,
   type ServeHttpInit,
@@ -173,6 +175,16 @@ interface ShellScript {
   registerStderr?: string;
   bindCode?: number;
   bindStderr?: string;
+  /**
+   * x39: which of b1's four `signalSupervisorReload()` lines `pipeline-runner
+   * bind` ends with — the ONE local observation that can see a supervisor
+   * PROCESS (foreground included), which `service status` structurally
+   * cannot. `undefined` = the line is absent entirely (an older
+   * `pipeline-runner`, or an output-format drift), which must degrade to
+   * "not observed" and never to a guess — so every test written before x39
+   * keeps exercising exactly the evidence it always had.
+   */
+  bindDaemon?: 'none' | 'running-win' | 'signalled' | 'signal-failed';
   serviceInstallCode?: number;
   serviceInstallStderr?: string;
   cliAvailable?: boolean;
@@ -293,9 +305,23 @@ function makeWorld(opts: { cwd: string; cloud?: CloudScript; shell?: ShellScript
         return { code: sh.registerCode ?? 0, stdout: '', stderr: sh.registerStderr ?? '' };
       }
       if (cmd === 'pipeline-runner' && args[0] === 'bind') {
+        // b1's `runBind` prints the store line, then `signalSupervisorReload()`
+        // prints exactly one of these — verbatim from pipeline-runner's
+        // `src/cli.ts`, so a drift on either side breaks a test here rather
+        // than a user's transcript.
+        const reload =
+          sh.bindDaemon === 'none'
+            ? '[pipeline-runner] no supervisor is running for this home — the change applies at the next `start`.\n'
+            : sh.bindDaemon === 'running-win'
+              ? '[pipeline-runner] supervisor pid 4242 is running — it picks this up automatically (file watch).\n'
+              : sh.bindDaemon === 'signalled'
+                ? '[pipeline-runner] signalled supervisor pid 4242 (SIGHUP) to reload.\n'
+                : sh.bindDaemon === 'signal-failed'
+                  ? '[pipeline-runner] could not signal pid 4242 (EPERM) — its file watch still picks the change up.\n'
+                  : '';
         return {
           code: sh.bindCode ?? 0,
-          stdout: sh.bindCode ? '' : '[pipeline-runner] bound … (…/departments.json)\n',
+          stdout: sh.bindCode ? '' : `[pipeline-runner] bound … (…/departments.json)\n${reload}`,
           stderr: sh.bindStderr ?? '',
         };
       }
@@ -1086,14 +1112,17 @@ describe('serve — x13: the online claim is an observation, not an assumption',
     const dir = departmentProject();
     const w = makeWorld({
       cwd: dir,
-      shell: { serviceInstalled: true, serviceState: 'stopped', identityRunnerId: RUNNER_ID },
+      // x39: the service is down AND the runner says nothing holds this home,
+      // which is what licenses the "somewhere else" half of the sentence.
+      shell: { serviceInstalled: true, serviceState: 'stopped', identityRunnerId: RUNNER_ID, bindDaemon: 'none' },
       cloud: { profileOnline: true },
     });
 
     const code = await runDepartmentServe([], w.deps);
 
     expect(code).toBe(1);
-    expect(w.out()).toContain('another machine is serving it, but this one is not');
+    expect(w.out()).toContain('installed but NOT running');
+    expect(w.out()).toContain('served from somewhere else (another machine, or another runner home on this one)');
     expect(w.out()).not.toContain('online, ready for work');
   });
 
@@ -1132,7 +1161,15 @@ describe('serve — x13: the online claim is an observation, not an assumption',
 
     const payload = JSON.parse(w.out()) as Record<string, unknown>;
     expect(payload['state']).toBe('online');
-    expect(payload['liveness']).toEqual({ verdict: 'live', supervisorState: 'running', cloudOnline: true });
+    // x39: BOTH local probes are reported, and the process one says
+    // `unknown` — this fake `bind` prints no reload line, and "not observed"
+    // is spelled as itself rather than inferred from the service state.
+    expect(payload['liveness']).toEqual({
+      verdict: 'live',
+      supervisorState: 'running',
+      localDaemon: 'unknown',
+      cloudOnline: true,
+    });
   });
 
   test('--json on an unconfirmed run is ok:true with state "unconfirmed" — never ok:true with state "online"', async () => {
@@ -1199,6 +1236,123 @@ describe('serve — x13: the online claim is an observation, not an assumption',
     expect(code).toBe(0);
     expect(w.out()).toContain('● unity-review — online, ready for work');
     expect(w.shells.filter((c) => c.args[0] === 'service' && c.args[1] === 'install')).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // x39 — `serve --foreground` against a machine that IS serving, in the
+  // foreground, with no service installed: the P4 gate's transcript.
+  // -------------------------------------------------------------------------
+
+  test('x39: `serve --foreground` on a live FOREGROUND supervisor reports online, not "another machine"', async () => {
+    // Exactly the machine the P4 gate drove: no service (that is what
+    // `--foreground` MEANS), a daemon running in the foreground, and a
+    // control plane that agrees the department is online. x13 read the
+    // verdict off `service status` alone and printed
+    // `registered — not serving … another machine is serving it, but this one
+    // is not`, exit 1, about the very machine that was serving it.
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: { serviceInstalled: false, identityRunnerId: RUNNER_ID, bindDaemon: 'signalled' },
+      cloud: { profileOnline: true },
+    });
+
+    const code = await runDepartmentServe(['--foreground'], w.deps);
+
+    expect(code).toBe(0);
+    expect(w.out()).toContain('✓ Supervisor      a foreground supervisor is running here');
+    expect(w.out()).toContain('● unity-review — online, ready for work');
+    expect(w.out()).not.toContain('registered — not serving');
+    expect(w.out()).not.toContain('another machine');
+    // No service was installed, and none was asked for.
+    expect(w.shells.filter((c) => c.args[0] === 'service' && c.args[1] === 'install')).toHaveLength(0);
+  });
+
+  test('x39: --json carries the process observation next to the service one', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: { serviceInstalled: false, identityRunnerId: RUNNER_ID, bindDaemon: 'running-win' },
+      cloud: { profileOnline: true },
+    });
+
+    expect(await runDepartmentServe(['--foreground', '--json'], w.deps)).toBe(0);
+
+    const payload = JSON.parse(w.out()) as Record<string, unknown>;
+    expect(payload['state']).toBe('online');
+    expect(payload['liveness']).toEqual({
+      verdict: 'live',
+      supervisorState: 'not-installed',
+      localDaemon: 'running',
+      cloudOnline: true,
+    });
+    // D27: still one object on stdout, every progress line on stderr, and
+    // this run declined every optional side effect exactly as before.
+    expect(w.err()).toContain('✓ Registered');
+    expect(w.out().trimEnd().endsWith('}')).toBe(true);
+    expect(w.shells.filter((c) => c.args[0] === 'service' && c.args[1] === 'install')).toHaveLength(0);
+  });
+
+  test('x39: `--foreground` with NO supervisor running still exits 1 — x13\'s contract survives', async () => {
+    // The other direction. The runner itself says nothing holds this home, so
+    // the not-live verdict is earned rather than inferred, and the "somewhere
+    // else" half of the sentence is licensed by that same observation.
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: { serviceInstalled: false, identityRunnerId: RUNNER_ID, bindDaemon: 'none' },
+      cloud: { profileOnline: true },
+    });
+
+    const code = await runDepartmentServe(['--foreground'], w.deps);
+
+    expect(code).toBe(1);
+    expect(w.out()).toContain('○ unity-review — registered — not serving');
+    expect(w.out()).toContain('None is running here either');
+    expect(w.out()).toContain('no supervisor service on this machine (--foreground)');
+    expect(w.out()).toContain("no supervisor process is running in this machine's runner home either");
+    expect(w.out()).toContain('served from somewhere else');
+    expect(w.out()).toContain('Run one here:  pipeline-runner start');
+    expect(w.out()).not.toContain('online, ready for work');
+  });
+
+  test('x39: a stopped SERVICE next to a running process is reported as both, not as neither', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: {
+        serviceInstalled: true,
+        serviceState: 'stopped',
+        identityRunnerId: RUNNER_ID,
+        bindDaemon: 'signal-failed',
+      },
+      cloud: { profileOnline: true },
+    });
+
+    const code = await runDepartmentServe([], w.deps);
+
+    expect(code).toBe(0);
+    expect(w.out()).toContain('⚠ Supervisor      the installed service is NOT running — but a supervisor process is holding this runner home');
+    expect(w.out()).toContain('● unity-review — online, ready for work');
+    expect(w.out()).not.toContain('another machine');
+  });
+
+  test('x39: a foreground supervisor gets the confirm backoff a service one always got', async () => {
+    // The backoff exists for a supervisor that is coming up but has not
+    // reported in yet. Keyed off `service status` alone, a `--foreground` run
+    // gave the one supervisor it expects to exist zero seconds to connect.
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      shell: { serviceInstalled: false, identityRunnerId: RUNNER_ID, bindDaemon: 'signalled' },
+      cloud: { profileOnlineSequence: [false, false, true] },
+    });
+
+    const code = await runDepartmentServe(['--foreground'], w.deps);
+
+    expect(code).toBe(0);
+    expect(w.out()).toContain('· Confirming      waiting for the supervisor to report in …');
+    expect(w.out()).toContain('● unity-review — online, ready for work');
   });
 
   test('an approval-pending claim is still ⏸ — x13 adds no read on a path with nothing to confirm', async () => {
@@ -1513,12 +1667,15 @@ describe('department-serve pure helpers', () => {
     expect(fgStopped.reason).not.toContain('no supervisor service');
     expect(fgStopped.nextStep).toContain('pipeline-runner start');
 
-    // A department another machine is serving is not denied just because this
-    // one is down — both facts are reported.
-    const elsewhere = assessLiveness({ ...base, supervisor: 'stopped', cloudOnline: true });
+    // A department something ELSE is serving is not denied just because this
+    // machine is down — both facts are reported. x39: the "somewhere else"
+    // half is a CLAIM, so it needs the home-lock observation that rules this
+    // machine out; with it, the sentence is earned.
+    const elsewhere = assessLiveness({ ...base, supervisor: 'stopped', localDaemon: 'none', cloudOnline: true });
     expect(elsewhere.verdict).toBe('not-live');
     if (elsewhere.verdict !== 'not-live') return;
-    expect(elsewhere.reason).toContain('another machine is serving it, but this one is not');
+    expect(elsewhere.reason).toContain('installed but NOT running');
+    expect(elsewhere.reason).toContain('served from somewhere else (another machine, or another runner home on this one)');
 
     // A running supervisor the cloud cannot see: not live, and it says which
     // half is the mystery.
@@ -1537,19 +1694,121 @@ describe('department-serve pure helpers', () => {
 
   test('assessLiveness never returns "live" without a cloud answer of exactly true', () => {
     const supervisors = ['running', 'stopped', 'not-installed', 'unknown'] as const;
+    const daemons = ['running', 'none', 'unknown'] as const;
     const answers = [false, null] as const;
     for (const supervisor of supervisors) {
-      for (const cloudOnline of answers) {
-        for (const foreground of [false, true]) {
-          const v = assessLiveness({ supervisor, foreground, cloudOnline, server: 's' });
-          expect(v.verdict).not.toBe('live');
-          // Every non-live outcome is actionable — no dead ends.
-          if (v.verdict === 'live') return;
-          expect(v.reason.length).toBeGreaterThan(0);
-          expect(v.nextStep.length).toBeGreaterThan(0);
+      for (const localDaemon of daemons) {
+        for (const cloudOnline of answers) {
+          for (const foreground of [false, true]) {
+            const v = assessLiveness({ supervisor, localDaemon, foreground, cloudOnline, server: 's' });
+            expect(v.verdict).not.toBe('live');
+            // Every non-live outcome is actionable — no dead ends.
+            if (v.verdict === 'live') return;
+            expect(v.reason.length).toBeGreaterThan(0);
+            expect(v.nextStep.length).toBeGreaterThan(0);
+          }
         }
       }
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // x39 — the local diagnostic knows what it cannot see
+  // -------------------------------------------------------------------------
+
+  test('readLocalDaemonState reads b1\'s four reload lines, and guesses at nothing else (x39)', () => {
+    // Verbatim from pipeline-runner's `signalSupervisorReload()`. If any of
+    // these four drifts, this test is the tripwire — not a user's transcript.
+    expect(
+      readLocalDaemonState('[pipeline-runner] no supervisor is running for this home — the change applies at the next `start`.'),
+    ).toBe('none');
+    expect(
+      readLocalDaemonState('[pipeline-runner] supervisor pid 4242 is running — it picks this up automatically (file watch).'),
+    ).toBe('running');
+    expect(readLocalDaemonState('[pipeline-runner] signalled supervisor pid 4242 (SIGHUP) to reload.')).toBe('running');
+    // A pid that is ALIVE but could not be signalled — most often a daemon
+    // owned by another OS account. "I could not signal it" is not "it is gone".
+    expect(
+      readLocalDaemonState('[pipeline-runner] could not signal pid 4242 (EPERM) — its file watch still picks the change up.'),
+    ).toBe('running');
+
+    // The store line alone (an older `pipeline-runner`, or a format drift) is
+    // NOT evidence in either direction.
+    expect(readLocalDaemonState('[pipeline-runner] bound d -> jsonl-process: cmd (/x/departments.json)')).toBe('unknown');
+    expect(readLocalDaemonState('')).toBe('unknown');
+    // The negative line contains the word "running": a bare substring search
+    // for it would read "no supervisor is running" as `running`.
+    expect(readLocalDaemonState('[pipeline-runner] no supervisor is running for this home')).not.toBe('running');
+  });
+
+  test('a live FOREGROUND supervisor is not reported as "not serving … another machine" (x39)', () => {
+    // The P4 gate's defect, as a pure unit. `--foreground` installs no
+    // service, so the service probe says `not-installed` — and x13 read the
+    // verdict off that alone, producing a false failure with an invented
+    // cause for a department that was serving from this very machine.
+    const base = { foreground: true, supervisor: 'not-installed', server: 'https://api.example.dev' } as const;
+
+    expect(assessLiveness({ ...base, localDaemon: 'running', cloudOnline: true })).toEqual({ verdict: 'live' });
+
+    // The same machine while the cloud has not seen it yet: still not-live
+    // (05 §5's "never a bare online"), but for the reason that is TRUE.
+    const notSeen = assessLiveness({ ...base, localDaemon: 'running', cloudOnline: false });
+    expect(notSeen.verdict).toBe('not-live');
+    if (notSeen.verdict !== 'not-live') return;
+    expect(notSeen.reason).toContain('does not see it connected');
+    expect(notSeen.reason).not.toContain('another machine');
+    expect(notSeen.reason).not.toContain('no supervisor service');
+  });
+
+  test('"another machine" is said only when this machine was ruled out (x39)', () => {
+    const base = { foreground: false, supervisor: 'stopped', cloudOnline: true, server: 'https://api.example.dev' } as const;
+
+    // Ruled out: the runner itself reported that nothing holds this home.
+    const ruledOut = assessLiveness({ ...base, localDaemon: 'none' });
+    if (ruledOut.verdict !== 'not-live') throw new Error('expected not-live');
+    expect(ruledOut.reason).toContain('served from somewhere else');
+    // …and even then it names both possibilities rather than picking one: a
+    // service under another OS account has its OWN runner home, whose lock
+    // file this check cannot read (the same blind spot as x22).
+    expect(ruledOut.reason).toContain('another runner home on this one');
+
+    // NOT ruled out: the process probe said nothing, so neither does the
+    // message. It reports the two things it knows — the service is down, and
+    // the department is online — and explicitly declines the third.
+    const unknown = assessLiveness({ ...base, localDaemon: 'unknown' });
+    if (unknown.verdict !== 'not-live') throw new Error('expected not-live');
+    expect(unknown.reason).toContain('installed but NOT running');
+    expect(unknown.reason).toContain('whether a supervisor process is running here could not be determined');
+    expect(unknown.reason).toContain('cannot tell whether that is this machine');
+    expect(unknown.reason).not.toContain('another machine is serving it');
+    expect(unknown.reason).not.toContain('somewhere else');
+  });
+
+  test('the home lock alone can carry the not-live verdict when the service probe cannot (x39)', () => {
+    // `service status` unreadable (`unknown`) — x13 fell through to the cloud
+    // here. The home lock is a positive local observation in its own right.
+    const v = assessLiveness({
+      foreground: false,
+      supervisor: 'unknown',
+      localDaemon: 'none',
+      cloudOnline: false,
+      server: 's',
+    });
+    if (v.verdict !== 'not-live') throw new Error('expected not-live');
+    expect(v.reason).toBe("no supervisor process is running in this machine's runner home");
+    expect(v.nextStep).toContain('pipeline-runner service install');
+  });
+
+  test('a running process outranks a service that is merely not installed (x39)', () => {
+    // Both probes disagree BY DESIGN on a foreground machine, and the
+    // positive observation wins: a process that is demonstrably running
+    // outranks a service that is demonstrably absent.
+    expect(localSupervisorIsUp({ supervisor: 'not-installed', localDaemon: 'running' })).toBe(true);
+    expect(localSupervisorIsUp({ supervisor: 'stopped', localDaemon: 'running' })).toBe(true);
+    expect(localSupervisorIsUp({ supervisor: 'running', localDaemon: 'none' })).toBe(true);
+    // Neither probe saw anything positive.
+    expect(localSupervisorIsUp({ supervisor: 'not-installed', localDaemon: 'none' })).toBe(false);
+    expect(localSupervisorIsUp({ supervisor: 'unknown' })).toBe(false);
   });
 
   test('an engine that names its own command binds it, args and cwd included', () => {

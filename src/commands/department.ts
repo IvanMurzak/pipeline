@@ -116,6 +116,7 @@ import {
   fetchDepartmentProfile,
   fetchInstalls,
   findDepartmentBySlug,
+  localSupervisorIsUp,
   registerOrUpdateDepartment,
   renderState,
   resolveLocalDepartmentId,
@@ -129,6 +130,7 @@ import {
   type DepartmentProfile,
   type InstallSummary,
   type Liveness,
+  type LocalDaemonState,
   type ServeDeps,
   type ServeFetch,
   type ServeHttpResponse,
@@ -1150,7 +1152,9 @@ function serveHelpText(): string {
     "                         binary is not authored: 'pipeline' (engine:\n" +
     "                         pipeline) and 'claude' (engine: claude-code).\n" +
     '  --detach               Install the supervisor as a service (the default).\n' +
-    '  --foreground           Do not install a service; print how to run one.\n' +
+    '  --foreground           Do not install a service — you run the supervisor\n' +
+    '                         yourself. One ALREADY running here (foreground or\n' +
+    '                         otherwise) is detected and reported as serving.\n' +
     '  --device / --reauth    Passed to the authentication ladder.\n' +
     `  --machine-token <t>    ${MACHINE_TOKEN_ENV} is the documented form (argv is\n` +
     '                         world-readable in `ps`).\n' +
@@ -1182,10 +1186,19 @@ interface ServeJson {
    * "not observed" and is deliberately not spelled `false`. `null` on this
    * key means step 9 was never reached (an earlier step failed, or the
    * install is awaiting approval).
+   *
+   * x39: `supervisorState` is the SERVICE probe and `localDaemon` is the
+   * PROCESS probe, and they are reported separately because they answer
+   * different questions and neither subsumes the other. A `--foreground` run
+   * on a live machine is `supervisorState: "not-installed"` with
+   * `localDaemon: "running"`; reading only the first is what produced a
+   * `not-live` verdict, exit 1, and an invented "another machine" for a
+   * department that was serving from this one.
    */
   liveness: {
     verdict: Liveness['verdict'];
     supervisorState: RunnerServiceState;
+    localDaemon: LocalDaemonState;
     cloudOnline: boolean | null;
     reason?: string;
     nextStep?: string;
@@ -1446,13 +1459,31 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
     command: binding.command,
     ...(binding.lifecycle !== undefined ? { lifecycle: binding.lifecycle } : {}),
   };
+  // x39: `bind` reports whether a supervisor PROCESS holds this machine's
+  // runner home — the one local observation that sees a FOREGROUND supervisor,
+  // which `service status` structurally cannot. Step 7 and step 9 both need
+  // it; it is read exactly here, where it was produced.
+  const localDaemon = bound.daemon;
   say(`✓ Runtime bound   ${manifest.runtime.engine} → ${binding.command}\n`);
 
   // ---- Step 7: ensure the supervisor (one per machine — D26) --------------
   if (a.foreground) {
     json.supervisor = 'skipped';
-    say('· Supervisor      not installed (--foreground)\n');
-    say(`    Run it here:  ${SUPERVISOR_FOREGROUND_HINT}\n`);
+    // x39: `--foreground` means "I run the supervisor myself", so the
+    // interesting question is whether one IS running — not whether a service
+    // was installed (this run deliberately installed none). Telling a user
+    // with a live foreground supervisor to go start one is the same wrong
+    // narration step 9 used to close with.
+    if (localDaemon === 'running') {
+      say('✓ Supervisor      a foreground supervisor is running here (--foreground: no service installed)\n');
+    } else {
+      say('· Supervisor      not installed (--foreground)\n');
+      say(
+        localDaemon === 'none'
+          ? `    None is running here either. Run it here:  ${SUPERVISOR_FOREGROUND_HINT}\n`
+          : `    Run it here:  ${SUPERVISOR_FOREGROUND_HINT}\n`,
+      );
+    }
   } else {
     const supervisor = ensureSupervisor(deps, serviceInstalled);
     if (!supervisor.ok) {
@@ -1478,7 +1509,14 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
     } else if (serviceState === 'running') {
       say('✓ Supervisor      already installed and running (shared with cloud pipeline dispatch)\n');
     } else if (serviceState === 'stopped') {
-      say('⚠ Supervisor      already installed, but NOT running\n');
+      // x39: "the SERVICE is down" and "nothing is running here" are different
+      // facts, and a foreground supervisor makes the second one false without
+      // touching the first.
+      say(
+        localDaemon === 'running'
+          ? '⚠ Supervisor      the installed service is NOT running — but a supervisor process is holding this runner home\n'
+          : '⚠ Supervisor      already installed, but NOT running\n',
+      );
     } else {
       say('· Supervisor      already installed (its state could not be read)\n');
     }
@@ -1511,17 +1549,26 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
   // the one thing it can only OBSERVE — whether the result is actually taking
   // work — and 05 §5's closing rule ("never a bare `online`") is enforced by
   // making the claim a function of that observation rather than of the steps.
-  const cloud = await confirmOnline(deps, ctx, department.id, serviceState, say);
+  const evidence = { supervisor: serviceState, localDaemon, foreground: a.foreground, server: auth.server };
+  // x39: the backoff exists for a supervisor that is coming up but has not
+  // reported in yet — and a foreground one is exactly as worth waiting for as
+  // a service one. Same predicate step 9 judges by, so the wait and the
+  // verdict can never disagree about whether a supervisor is up.
+  const cloud = await confirmOnline(deps, ctx, department.id, localSupervisorIsUp(evidence), say);
   const liveness = assessLiveness({
-    supervisor: serviceState,
-    foreground: a.foreground,
+    ...evidence,
     cloudOnline: cloud.online,
     ...(cloud.error !== undefined ? { cloudError: cloud.error } : {}),
-    server: auth.server,
   });
   json.liveness = {
     verdict: liveness.verdict,
     supervisorState: serviceState,
+    // x39: the SECOND local observation, reported next to the first so a
+    // scripted caller can tell "no service, but a supervisor process is
+    // running here" from "nothing is running here" — the distinction the
+    // human transcript now makes, and the one whose absence produced a wrong
+    // verdict and an invented cause.
+    localDaemon,
     cloudOnline: cloud.online,
     ...(liveness.verdict !== 'live' ? { reason: liveness.reason, nextStep: liveness.nextStep } : {}),
     ...(cloud.error !== undefined ? { cloudError: cloud.error } : {}),
@@ -1570,6 +1617,12 @@ const ONLINE_RECHECK_BACKOFF_MS = [1000, 2000, 4000, 8000] as const;
  * supervisor is not going to connect, and a transport failure will not fix
  * itself inside fifteen seconds.
  *
+ * x39: `supervisorIsUp` is `localSupervisorIsUp()`'s answer, not
+ * `serviceState === 'running'`. A FOREGROUND supervisor that just received
+ * the binding is precisely as worth waiting for, and keying the wait off the
+ * service probe alone meant a `--foreground` run gave the one supervisor it
+ * expects to exist zero seconds to report in.
+ *
  * A read that fails returns `online: null` — "not observed" — and never
  * `false`. That distinction is the whole point: `false` is a fact about the
  * department, `null` is a fact about this command.
@@ -1578,7 +1631,7 @@ async function confirmOnline(
   deps: ServeCommandDeps,
   ctx: CloudContext,
   departmentId: string,
-  supervisor: RunnerServiceState,
+  supervisorIsUp: boolean,
   say: (s: string) => void,
 ): Promise<{ online: boolean | null; error?: string }> {
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -1589,7 +1642,7 @@ async function confirmOnline(
     if (!res.ok) return { online: null, error: res.message };
     if (res.profile.online) return { online: true };
     // Only a running supervisor is worth waiting for.
-    if (supervisor !== 'running' || attempt >= ONLINE_RECHECK_BACKOFF_MS.length) return { online: false };
+    if (!supervisorIsUp || attempt >= ONLINE_RECHECK_BACKOFF_MS.length) return { online: false };
     if (!announced) {
       say('· Confirming      waiting for the supervisor to report in …\n');
       announced = true;

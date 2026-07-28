@@ -609,7 +609,101 @@ export function buildBindArgs(departmentId: string, binding: RuntimeBinding): st
   return args;
 }
 
-export type BindOutcome = { ok: true; detail: string } | { ok: false; message: string };
+// ---------------------------------------------------------------------------
+// x39 — the supervisor PROCESS, which `service status` cannot see
+// ---------------------------------------------------------------------------
+//
+// x13 made `serve` verify liveness instead of asserting it, and gave it one
+// local probe to do that with: `pipeline-runner service status`
+// (`readRunnerServiceState`). That probe answers exactly one question — is
+// there an OS SERVICE, and is it up? — and it is structurally blind to three
+// things:
+//
+//  - **A foreground supervisor.** `pipeline-runner start` registers no
+//    service with systemd/launchd/SCM. `service status` therefore reports
+//    `not installed` for a machine that is, at that instant, serving.
+//  - **An isolated `PIPELINE_RUNNER_HOME`** (d7/D17). The service name is
+//    fixed and machine-global; a daemon started by hand in its own home is
+//    invisible to it either way.
+//  - **A service under another OS account** — a systemd *user* unit or a
+//    launchd LaunchAgent belonging to a different user (this is x22's blind
+//    spot too; see below).
+//
+// The P4 gate found the consequence: `serve --foreground` printed
+// `registered — not serving … another machine is serving it, but this one is
+// not` and exited 1 for a department that was live, locally, in the
+// foreground. Two failures in one line — a wrong verdict, and a CAUSE
+// ("another machine") that had never been established. x13 replaced a false
+// success with a false failure.
+//
+// **The evidence that was already on the wire.** `serve` step 6 shells
+// `pipeline-runner bind`, and b1's `runBind` ends with `signalSupervisorReload()`,
+// which reads `<home>/runner.lock` — the per-home exclusive lock EVERY daemon
+// takes at `start` (`core/home.ts`, 07 §2.2 "one daemon per home") — and
+// probes the recorded pid with signal 0. It then prints one of four lines.
+// That observation is exactly the one `service status` cannot make: it is
+// scoped to the runner HOME (so `PIPELINE_RUNNER_HOME` is honoured), it is
+// blind to HOW the daemon was started (service or foreground alike), and
+// `isProcessAlive` counts `EPERM` as alive, so a daemon owned by another OS
+// account still registers. No new runner-side surface was needed and none was
+// added — this reads a line `serve` was already paying for.
+//
+// **What it still cannot see, and therefore never claims.** A daemon running
+// in a DIFFERENT home (another account's service with its own
+// `PIPELINE_RUNNER_HOME`) holds a different lock file, which this cannot
+// read. That is why `'none'` licenses only "not from THIS runner home" and
+// never "this machine is idle"; and why the online-elsewhere sentence names
+// "another machine, or another runner home on this one" rather than picking
+// one.
+
+/**
+ * Whether a supervisor PROCESS — of any kind — was observed holding this
+ * machine's runner home, as reported by `pipeline-runner bind` itself.
+ *
+ *  - `running`  — a live pid holds `<home>/runner.lock`. Positive evidence.
+ *  - `none`     — the runner said no supervisor is running for this home.
+ *                 Positive evidence, scoped to THIS home.
+ *  - `unknown`  — not observed (the line did not parse, or an older
+ *                 `pipeline-runner` did not print one). Never a guess.
+ */
+export type LocalDaemonState = 'running' | 'none' | 'unknown';
+
+/**
+ * Read the supervisor-process observation out of `pipeline-runner bind`'s own
+ * stdout. Mirrored, not imported — the same one-directional mirroring rule
+ * `lib/department-journal.ts` keeps for the execution journal, and for the
+ * same reason: the two packages ship on independent versions.
+ *
+ * b1's `signalSupervisorReload()` prints exactly one of:
+ *
+ *   none      `no supervisor is running for this home — the change applies …`
+ *   win32     `supervisor pid 1234 is running — it picks this up automatically …`
+ *   posix     `signalled supervisor pid 1234 (SIGHUP) to reload.`
+ *   posix     `could not signal pid 1234 (…) — its file watch still picks …`
+ *
+ * The last one is `running` on purpose: the pid was alive (that is what got
+ * us past the liveness gate), the SIGNAL is what failed — most often because
+ * the daemon belongs to another OS account. "I could not signal it" is not
+ * "it is not there".
+ *
+ * A pid is required by every `running` pattern rather than scanning for the
+ * word "running": the phrase "no supervisor is running" contains it, and a
+ * bare substring search over a line that contains its own negation is the
+ * kind of check that works until it does not (the same trap
+ * `readRunnerServiceState` calls out).
+ */
+export function readLocalDaemonState(stdout: string): LocalDaemonState {
+  const text = stdout ?? '';
+  if (/(?:supervisor\s+)?pid\s+\d+\s+is\s+running/i.test(text)) return 'running';
+  if (/signalled\s+supervisor\s+pid\s+\d+/i.test(text)) return 'running';
+  if (/could\s+not\s+signal\s+pid\s+\d+/i.test(text)) return 'running';
+  if (/no\s+supervisor\s+is\s+running\s+for\s+this\s+home/i.test(text)) return 'none';
+  return 'unknown';
+}
+
+export type BindOutcome =
+  | { ok: true; detail: string; daemon: LocalDaemonState }
+  | { ok: false; message: string };
 
 /**
  * Step 6: hand the binding to `pipeline-runner bind`, which writes its own
@@ -620,6 +714,11 @@ export type BindOutcome = { ok: true; detail: string } | { ok: false; message: s
  * it served, which is why step 9 verifies rather than assumes (x13). This
  * function never touches `departments.json` itself; see rule 1 in the module
  * doc.
+ *
+ * x39: it also brings back WHICH of those two worlds this machine is in.
+ * `bind`'s reload line is the only local observation that can see a
+ * foreground supervisor, and step 9 is wrong without it — see the x39 section
+ * doc above.
  */
 export function bindRuntime(deps: ServeDeps, departmentId: string, binding: RuntimeBinding): BindOutcome {
   const r = deps.shell(RUNNER_CLI_BIN, buildBindArgs(departmentId, binding));
@@ -636,7 +735,13 @@ export function bindRuntime(deps: ServeDeps, departmentId: string, binding: Runt
           : `Could not write the runtime binding: ${detail}`,
     };
   }
-  return { ok: true, detail: (r.stdout || '').trim() };
+  return {
+    ok: true,
+    detail: (r.stdout || '').trim(),
+    // Both streams: the reload line is stdout today, but the observation is
+    // too load-bearing to lose to a logging change on the other side.
+    daemon: readLocalDaemonState(`${r.stdout ?? ''}\n${r.stderr ?? ''}`),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -827,6 +932,12 @@ export interface LivenessEvidence {
    *  `not-installed` is an expected outcome and its remedy is a different
    *  command. */
   foreground: boolean;
+  /** x39: whether a supervisor PROCESS holds this machine's runner home —
+   *  `pipeline-runner bind`'s own report (step 6), the ONE local observation
+   *  that can see a foreground supervisor or one in an isolated
+   *  `PIPELINE_RUNNER_HOME`. Omitted ⇒ `unknown` ⇒ "not observed", which
+   *  weakens what this function may claim and never strengthens it. */
+  localDaemon?: LocalDaemonState;
   /** `GET /api/v1/departments/:id` → `online`. `null` means the read did not
    *  happen or did not answer — NEVER "false". */
   cloudOnline: boolean | null;
@@ -856,6 +967,21 @@ export const SUPERVISOR_START_HINT = 'pipeline-runner service install';
 export const SUPERVISOR_FOREGROUND_HINT = 'pipeline-runner start';
 
 /**
+ * x39: positive evidence that a supervisor IS up on this machine. Either
+ * probe suffices, because they see different things and neither is a superset
+ * of the other: `service status` sees an installed OS service under this
+ * account; `bind`'s reload line sees any process holding this runner home.
+ *
+ * Exported so `serve` can key its own transcript and its confirm-backoff off
+ * the SAME predicate step 9 judges by — the x32 lesson, applied here: two
+ * places asking "is a supervisor up?" two different ways is how the answers
+ * drift apart.
+ */
+export function localSupervisorIsUp(e: Pick<LivenessEvidence, 'supervisor' | 'localDaemon'>): boolean {
+  return e.supervisor === 'running' || e.localDaemon === 'running';
+}
+
+/**
  * The whole of step 9's judgement, as a pure function of what was observed —
  * so the rule is testable without a network, a service, or a clock, and so
  * there is exactly ONE place that decides whether `online` may be printed.
@@ -864,44 +990,81 @@ export const SUPERVISOR_FOREGROUND_HINT = 'pipeline-runner start';
  * is a positive local observation with a concrete remedy, and because it
  * survives the cloud read failing. Only then does the cloud's answer decide
  * between `live`, `not-live` and `undetermined`.
+ *
+ * **x39 — what "not running" is allowed to mean.** x13 read that first branch
+ * off `service status` alone, which cannot see a foreground supervisor. So a
+ * live `--foreground` department was declared `not-live` AND handed a cause
+ * ("another machine is serving it") that nothing had established. Two rules
+ * come out of that, and they are the whole of this function's contract:
+ *
+ *  1. **Positive evidence in either direction wins over the absence of the
+ *     other.** A supervisor PROCESS holding this home is a supervisor, even
+ *     with no service installed; the first branch does not fire against it.
+ *  2. **A cause is stated only when it is established.** "Another machine is
+ *     serving it" requires knowing this machine is not — which needs the
+ *     home-lock observation, not the service probe. Without it the sentence
+ *     says what IS known: the department is online, and this check cannot see
+ *     from where.
  */
 export function assessLiveness(e: LivenessEvidence): Liveness {
-  // ── 1. A supervisor that is not running: known, local, actionable ────────
-  if (e.supervisor === 'stopped' || e.supervisor === 'not-installed') {
-    // The department may still be online because ANOTHER machine is serving
-    // it. That is a true fact about the department and a false one about this
-    // run, so both are said rather than either being suppressed.
+  const daemon = e.localDaemon ?? 'unknown';
+  const up = localSupervisorIsUp(e);
+  // Positive evidence that nothing is serving from here. Either probe can
+  // supply it; `up` vetoes both, because a process that is demonstrably
+  // running outranks a service that is demonstrably not.
+  const down = !up && (daemon === 'none' || e.supervisor === 'stopped' || e.supervisor === 'not-installed');
+
+  // ── 1. No supervisor running here: known, local, actionable ──────────────
+  if (down) {
+    // What the SERVICE probe established. Empty when it had nothing to say
+    // (`unknown`) and the home lock is carrying this branch on its own.
+    const serviceClause =
+      e.supervisor === 'stopped'
+        ? `this machine's supervisor service is installed but NOT running`
+        : e.supervisor === 'not-installed'
+          ? e.foreground
+            ? 'no supervisor service on this machine (--foreground)'
+            : 'this machine has no supervisor service'
+          : '';
+    // What the HOME LOCK established — the half that CAN see a foreground
+    // supervisor. When it saw nothing, say that plainly, so the service
+    // sentence above is not read as more than it is.
+    const daemonClause =
+      daemon === 'none'
+        ? serviceClause === ''
+          ? "no supervisor process is running in this machine's runner home"
+          : ", and no supervisor process is running in this machine's runner home either"
+        : ' (whether a supervisor process is running here could not be determined)';
+    // The department may still be online. WHY it is online is a SEPARATE
+    // claim, and it is made only when the home lock ruled this home out.
     const alsoOnline =
-      e.cloudOnline === true
-        ? ` — ${e.server} reports the department online, so another machine is serving it, but this one is not`
-        : '';
-    if (e.supervisor === 'stopped') {
-      return {
-        verdict: 'not-live',
-        reason: `this machine's supervisor service is installed but NOT running${alsoOnline}`,
-        nextStep: e.foreground
+      e.cloudOnline !== true
+        ? ''
+        : daemon === 'none'
+          ? ` — ${e.server} reports the department online, so it is being served from somewhere else (another machine, or another runner home on this one)`
+          : ` — ${e.server} reports the department online; this check cannot tell whether that is this machine`;
+    const reason = `${serviceClause}${daemonClause}${alsoOnline}`;
+    const nextStep =
+      e.supervisor === 'stopped'
+        ? e.foreground
           ? `Run one here:  ${SUPERVISOR_FOREGROUND_HINT}   (or start the installed service: \`${SUPERVISOR_START_HINT}\`)`
-          : `Start it:  ${SUPERVISOR_START_HINT}   (idempotent — re-registers and starts the service)`,
-      };
-    }
-    return e.foreground
-      ? {
-          verdict: 'not-live',
-          reason: `no supervisor service on this machine (--foreground)${alsoOnline}`,
-          nextStep: `Run one here:  ${SUPERVISOR_FOREGROUND_HINT}`,
-        }
-      : {
-          verdict: 'not-live',
-          reason: `this machine has no supervisor service${alsoOnline}`,
-          nextStep: `Install one:  ${SUPERVISOR_START_HINT}   (or run one in the foreground: ${SUPERVISOR_FOREGROUND_HINT})`,
-        };
+          : `Start it:  ${SUPERVISOR_START_HINT}   (idempotent — re-registers and starts the service)`
+        : e.foreground
+          ? `Run one here:  ${SUPERVISOR_FOREGROUND_HINT}`
+          : serviceClause === ''
+            ? // The service probe said nothing, so neither does this: `install`
+              // is idempotent on all three backends, which makes it the right
+              // verb whether or not one is already there.
+              `Start or install one:  ${SUPERVISOR_START_HINT}   (idempotent — or run one in the foreground: ${SUPERVISOR_FOREGROUND_HINT})`
+            : `Install one:  ${SUPERVISOR_START_HINT}   (or run one in the foreground: ${SUPERVISOR_FOREGROUND_HINT})`;
+    return { verdict: 'not-live', reason, nextStep };
   }
 
   // ── 2. The authority speaks ──────────────────────────────────────────────
   if (e.cloudOnline === true) return { verdict: 'live' };
 
   if (e.cloudOnline === false) {
-    return e.supervisor === 'running'
+    return up
       ? {
           verdict: 'not-live',
           reason: `this machine's supervisor is running, but ${e.server} does not see it connected`,
@@ -916,10 +1079,9 @@ export function assessLiveness(e: LivenessEvidence): Liveness {
   }
 
   // ── 3. Nothing confirmed it, nothing contradicted it ─────────────────────
-  const why =
-    e.supervisor === 'unknown'
-      ? `this machine's supervisor state could not be read${e.cloudError !== undefined ? `, and ${e.cloudError}` : ''}`
-      : (e.cloudError ?? `${e.server} did not answer`);
+  const why = !up
+    ? `this machine's supervisor state could not be read${e.cloudError !== undefined ? `, and ${e.cloudError}` : ''}`
+    : (e.cloudError ?? `${e.server} did not answer`);
   return {
     verdict: 'undetermined',
     reason: why,
