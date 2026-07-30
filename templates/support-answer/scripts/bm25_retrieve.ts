@@ -2,16 +2,33 @@
 // folder of docs.
 //
 // Ranks the files in a docs directory against a natural-language question using
-// Okapi BM25 (pure stdlib — no pip/npm installs, no network, no LLM) and prints
-// the top-K candidates as a JSON object on stdout:
+// Okapi BM25 (pure stdlib — no pip/npm installs, no network, no LLM).
+//
+// STDOUT IS THE SCRIPT-STEP RESULT OBJECT (docs/script-steps.md §3.5) — step
+// 01 is `type: script`, so the command layer, not an agent, reads this:
 //
 //   {
-//     "docs_dir": "<absolute path the docs were read from>",
-//     "candidates": [ { "file": "<path relative to docs_dir>", "score": <number>, "snippet": "<text>" }, ... ]
+//     "ok": true,
+//     "summary": "3 candidate(s) for \"How do I get started?\"",
+//     "flags":   { "has_candidates": true },
+//     "output":  {
+//       "docs_dir": "<absolute path the docs were read from>",
+//       "candidates": [ { "file": "<path relative to docs_dir>", "score": <number>, "snippet": "<text>" }, ... ]
+//     }
 //   }
+//
+// `output` is what the runtime persists to
+// `<pipeline-root>/.runtime/<run-id>/outputs/01-retrieve.json`, which is the
+// exact file steps 02/03 already read — so the envelope is a wrapper around the
+// SAME payload this script has always produced, never a different one.
 //
 // `file` is relative to `docs_dir`, so a consumer resolves the real file as
 // `<docs_dir>/<file>` with no cwd ambiguity.
+//
+// **`ok:false` means "this script could not do its job" — NEVER "the answer is
+// no".** A question that matches nothing is `ok:true` with `candidates: []`
+// (§3.6): step 02 is what decides how to handle "no source", and an `ok:false`
+// there would halt the whole run instead.
 //
 // It is READ-ONLY: it reads the docs directory and writes nothing anywhere.
 //
@@ -23,14 +40,24 @@
 //   bun scripts/bm25_retrieve.ts --docs ./sample-docs --question "How do I get started?" --top-k 5
 //   bun scripts/bm25_retrieve.ts --help
 //
-// A RELATIVE --docs is resolved against this pipeline's root (the folder holding
-// this scripts/ dir), so the bundled `./sample-docs` corpus works out of the box
-// regardless of the caller's cwd. An ABSOLUTE --docs is used verbatim — point it
-// at your own corpus.
+// Every input has three sources, in precedence order: an explicit FLAG, then the
+// matching pipeline variable in the ENVIRONMENT (`PP_DOCS_DIR` / `PP_QUESTION` /
+// `PP_TOP_K` — the runtime puts every resolved `PP_*` into the child environment,
+// docs/script-steps.md §2.5/§3.1), then the built-in default. That is why the
+// step file passes no arguments at all: running under `pipeline next`, the
+// variables arrive through the environment on their own.
+//
+// A RELATIVE docs path is resolved against this pipeline's root (the folder
+// holding this scripts/ dir), so the bundled `./sample-docs` corpus works out of
+// the box regardless of the caller's cwd (the runtime's cwd is the PROJECT root,
+// not this folder). An ABSOLUTE path is used verbatim — point it at your corpus.
 //
 // Exit codes:
 //   0 - ranking printed (0 candidates is still success — an empty corpus prints [])
-//   2 - usage error (bad flag) or the docs directory does not exist
+//   2 - the docs directory does not exist (class `env`), or a usage error (bad
+//       flag / bad --top-k, class `bug`). Both still print an `ok:false` result
+//       object on stdout so the runtime gets a CLASSIFIED failure rather than a
+//       bare non-zero exit it can only call `crash`.
 
 import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { isAbsolute, join, resolve, relative, dirname } from 'node:path';
@@ -180,7 +207,12 @@ Options:
   --top-k <n>         Number of candidates to return. Default 5.
   --help              Show this help.
 
-Prints {"candidates":[{"file","score","snippet"}]} on stdout (score-descending).
+Each option also reads its pipeline variable from the environment when the flag
+is absent: PP_DOCS_DIR, PP_QUESTION, PP_TOP_K (flag > environment > default).
+
+Prints the script-step result object on stdout:
+{"ok":true,"summary":…,"flags":{"has_candidates":…},
+ "output":{"docs_dir":…,"candidates":[{"file","score","snippet"}]}}  (score-descending)
 Read-only; no network; no LLM. Exit 0 on success, 2 on a usage/dir error.`;
 
 interface Args {
@@ -189,10 +221,43 @@ interface Args {
   topK: number;
 }
 
-/** Parse argv (supports `--flag value` and `--flag=value`). Throws a string on
- *  a usage error; returns null when `--help` was requested. */
-export function parseArgs(argv: string[]): Args | null {
-  const args: Args = { docs: './sample-docs', question: 'How do I get started?', topK: 5 };
+/** Built-in defaults — the LAST tier of `flag > environment > default`. Kept
+ *  byte-identical to the `## Variables` defaults in PIPELINE.md, so running the
+ *  script by hand and running it through the pipeline agree. */
+const DEFAULTS: Args = { docs: './sample-docs', question: 'How do I get started?', topK: 5 };
+
+/** The environment names of this pipeline's declared `PP_*` variables. */
+const ENV_NAMES = { docs: 'PP_DOCS_DIR', question: 'PP_QUESTION', topK: 'PP_TOP_K' } as const;
+
+/** Validate a top-k value from any tier. Throws a usage string (the caller
+ *  turns it into an `ok:false` / class `bug` result). `src` names the tier so a
+ *  bad `PP_TOP_K` in the environment does not read as a bad flag. */
+function parseTopK(raw: string, src: string): number {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) throw `${src} must be a positive integer (got '${raw}')`;
+  return n;
+}
+
+/** Parse argv (supports `--flag value` and `--flag=value`) over `env`. Throws a
+ *  string on a usage error; returns null when `--help` was requested.
+ *
+ *  Precedence is `flag > environment > default`, matching the CLI's own
+ *  variable resolution (`--var` > environment > manifest default) so a value
+ *  reaches this script the same way whichever path invoked it. An EMPTY
+ *  environment value is treated as absent — the runtime only exports variables
+ *  it actually resolved, and an empty `PP_DOCS_DIR` would otherwise resolve the
+ *  docs dir to the pipeline root itself. */
+export function parseArgs(argv: string[], env: Record<string, string | undefined> = {}): Args | null {
+  const fromEnv = (name: string): string | undefined => {
+    const v = env[name];
+    return v !== undefined && v.trim() !== '' ? v : undefined;
+  };
+  const envTopK = fromEnv(ENV_NAMES.topK);
+  const args: Args = {
+    docs: fromEnv(ENV_NAMES.docs) ?? DEFAULTS.docs,
+    question: fromEnv(ENV_NAMES.question) ?? DEFAULTS.question,
+    topK: envTopK !== undefined ? parseTopK(envTopK, ENV_NAMES.topK) : DEFAULTS.topK,
+  };
   for (let i = 0; i < argv.length; i++) {
     let flag = argv[i]!;
     let inlineVal: string | undefined;
@@ -218,12 +283,9 @@ export function parseArgs(argv: string[]): Args | null {
         args.question = takeVal();
         break;
       case '--top-k':
-      case '--topk': {
-        const n = Number(takeVal());
-        if (!Number.isInteger(n) || n <= 0) throw `--top-k must be a positive integer`;
-        args.topK = n;
+      case '--topk':
+        args.topK = parseTopK(takeVal(), '--top-k');
         break;
-      }
       default:
         throw `unknown flag '${flag}'`;
     }
@@ -254,15 +316,53 @@ export function loadCorpus(dir: string): Doc[] {
   return docs;
 }
 
+// --- The script-step result object (docs/script-steps.md §3.5) ---------------
+
+/** A successful result. `output` is the payload the runtime persists to the
+ *  outputs store — the RESOLVED absolute `docs_dir` travels with the candidates
+ *  so a consumer reads each file as `<docs_dir>/<file>`, never depending on its
+ *  own cwd or on re-deriving where a relative docs path pointed.
+ *
+ *  `has_candidates` is a routing flag: it is not used by this pipeline's linear
+ *  graph, but it is the hook to add a "no source found" branch without touching
+ *  any step body — routing lives in PIPELINE.md's `## Graph`. */
+export function successResult(docsDir: string, candidates: Candidate[], question: string) {
+  const q = question.length > 60 ? `${question.slice(0, 59)}…` : question;
+  return {
+    ok: true as const,
+    summary: `${candidates.length} candidate(s) for "${q}" in ${docsDir}`,
+    flags: { has_candidates: candidates.length > 0 },
+    output: { docs_dir: docsDir, candidates },
+  };
+}
+
+/** A failure result. `class` is the script's own self-classification, which the
+ *  runtime TRUSTS (§5.1): `env` = this machine/config is wrong (halts without
+ *  burning an agent on it), `bug` = this invocation was malformed. Never
+ *  `transient` — nothing here retries usefully, there is no network. */
+export function failureResult(cls: 'env' | 'bug', detail: string) {
+  return { ok: false as const, summary: `bm25_retrieve failed (${cls})`, error: { class: cls, detail } };
+}
+
+/** stdout carries the result object and NOTHING else; every human-facing line
+ *  goes to stderr (§3.5 — the runtime takes the last stdout line that parses as
+ *  a JSON object, and diagnostics on stdout are what break that). */
+function emit(result: unknown, exitCode: number): never {
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  process.exit(exitCode);
+}
+
 function main(): void {
   let args: Args | null;
   try {
-    args = parseArgs(Bun.argv.slice(2));
+    args = parseArgs(Bun.argv.slice(2), process.env);
   } catch (e) {
     process.stderr.write(`bm25_retrieve: ${String(e)}\n\n${HELP}\n`);
-    process.exit(2);
+    emit(failureResult('bug', String(e)), 2);
   }
   if (args === null) {
+    // `--help` is a human asking a question; it is not a pipeline invocation,
+    // so it prints help (not a result object) and succeeds.
     process.stdout.write(`${HELP}\n`);
     process.exit(0);
   }
@@ -273,16 +373,17 @@ function main(): void {
   const pipelineRoot = dirname(import.meta.dir);
   const docsDir = isAbsolute(args.docs) ? args.docs : resolve(pipelineRoot, args.docs);
   if (!existsSync(docsDir) || !statSync(docsDir).isDirectory()) {
-    process.stderr.write(`bm25_retrieve: docs directory not found: ${docsDir}\n`);
-    process.exit(2);
+    const detail = `docs directory not found: ${docsDir}`;
+    process.stderr.write(`bm25_retrieve: ${detail}\n`);
+    emit(failureResult('env', detail), 2);
   }
 
   const corpus = loadCorpus(docsDir);
   const candidates = bm25Rank(corpus, args.question, args.topK);
-  // Emit the RESOLVED absolute docs_dir alongside the candidates so a consumer
-  // reads each file as `<docs_dir>/<file>` — no dependence on the reader's cwd
-  // or on re-deriving where a relative --docs pointed.
-  process.stdout.write(`${JSON.stringify({ docs_dir: docsDir, candidates }, null, 2)}\n`);
+  // A question that matches nothing is a SUCCESS with an empty list (§3.6) —
+  // "no local doc covers this" is a domain answer for step 02 to handle, not a
+  // failure of retrieval.
+  emit(successResult(docsDir, candidates, args.question), 0);
 }
 
 if (import.meta.main) main();

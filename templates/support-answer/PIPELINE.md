@@ -17,18 +17,23 @@ Out:
 
 ## Project Context
 
-- Root: the consumer project this pipeline was cloned into.
-- Docs: a folder of `.md` / `.txt` files (`PP_DOCS_DIR`); a bundled
-  `sample-docs/` corpus ships so a bare run works with zero config.
-- Retrieval: `scripts/bm25_retrieve.ts` (Bun, stdlib-only, no network, no LLM);
-  it self-tests via `bun test scripts/tests/` from this pipeline root.
+- Root: the project this pipeline was cloned into.
+- Docs: `.md` / `.txt` (`PP_DOCS_DIR`); a bundled `sample-docs/` corpus ships,
+  so a bare run needs no config.
+- Retrieval: `scripts/bm25_retrieve.ts` — Bun, stdlib-only, no network, no LLM,
+  self-tested by `bun test scripts/tests/`. Step 01 is a `type: script` step.
+
+## Graph
+
+```json
+{"01-retrieve": {"goto": "02-select"}, "02-select": {"goto": "03-answer"}, "03-answer": {"done": true}}
+```
 
 ## Invariants
 
-- READ-ONLY: no step writes to the docs or the user's code; the pipeline touches
-  nothing outside its own run state.
-- Each answer is grounded in exactly ONE selected source file and cites it.
-- No network and no external installs — pure local retrieval.
+- READ-ONLY: no step writes to the docs or your code; only run state is touched.
+- Each answer is grounded in exactly ONE source file and cites it.
+- No network, no external installs — pure local retrieval.
 
 ## Variables
 

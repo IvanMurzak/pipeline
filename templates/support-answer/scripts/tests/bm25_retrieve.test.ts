@@ -9,7 +9,16 @@
 // tests/`, which scans only apps/pipeline-cli/tests/, never templates/.
 
 import { describe, expect, test } from 'bun:test';
-import { tokenize, bm25Rank, bestSnippet, parseArgs, type Doc } from '../bm25_retrieve';
+import {
+  tokenize,
+  bm25Rank,
+  bestSnippet,
+  parseArgs,
+  successResult,
+  failureResult,
+  type Candidate,
+  type Doc,
+} from '../bm25_retrieve';
 
 const CORPUS: Doc[] = [
   { file: 'getting-started.md', text: 'Getting started guide. To get started, create a note. Getting started is quick.' },
@@ -85,5 +94,88 @@ describe('parseArgs', () => {
   });
   test('unknown flag throws', () => {
     expect(() => parseArgs(['--bogus'])).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pipeline variables from the environment. Under `pipeline next` this step is a
+// `type: script` step invoked with NO arguments — every value arrives as a
+// `PP_*` entry the runtime puts in the child environment. These tests pin the
+// precedence that makes that work: flag > environment > default.
+// ---------------------------------------------------------------------------
+
+describe('parseArgs: PP_* environment tier', () => {
+  const ENV = { PP_DOCS_DIR: '/corpus', PP_QUESTION: 'from env', PP_TOP_K: '9' };
+
+  test('reads every value from the environment when no flag is given', () => {
+    expect(parseArgs([], ENV)).toEqual({ docs: '/corpus', question: 'from env', topK: 9 });
+  });
+
+  test('an explicit flag beats the environment, per value', () => {
+    // Only --question is passed: the other two must still come from the env,
+    // so this proves precedence is per-value and not all-or-nothing.
+    expect(parseArgs(['--question', 'from flag'], ENV)).toEqual({
+      docs: '/corpus',
+      question: 'from flag',
+      topK: 9,
+    });
+  });
+
+  test('an absent environment falls through to the built-in defaults', () => {
+    expect(parseArgs([], {})).toEqual(parseArgs([]));
+  });
+
+  test('an EMPTY environment value is treated as absent, not as an empty path', () => {
+    // A blank PP_DOCS_DIR would otherwise resolve the docs dir to the pipeline
+    // root itself and silently rank the pipeline's own files.
+    expect(parseArgs([], { PP_DOCS_DIR: '', PP_QUESTION: '  ' })).toEqual(parseArgs([]));
+  });
+
+  test('a malformed PP_TOP_K throws, naming the variable rather than a flag', () => {
+    expect(() => parseArgs([], { PP_TOP_K: 'abc' })).toThrow('PP_TOP_K');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The script-step result object (docs/script-steps.md §3.5/§3.6). stdout IS the
+// contract now: the command layer reads it, so its shape is load-bearing.
+// ---------------------------------------------------------------------------
+
+describe('result object', () => {
+  const CANDIDATES: Candidate[] = [{ file: 'a.md', score: 1.5, snippet: 's' }];
+
+  test('success carries ok, the routing flag, and the persisted output payload', () => {
+    const r = successResult('/docs', CANDIDATES, 'q?');
+    expect(r.ok).toBe(true);
+    expect(r.flags).toEqual({ has_candidates: true });
+    // `output` is EXACTLY what lands in .runtime/<run-id>/outputs/01-retrieve.json
+    // and what steps 02/03 read — no extra keys, no renames.
+    expect(Object.keys(r.output).sort()).toEqual(['candidates', 'docs_dir']);
+    expect(r.output).toEqual({ docs_dir: '/docs', candidates: CANDIDATES });
+  });
+
+  test('NO MATCH IS A SUCCESS — ok stays true with an empty list (§3.6)', () => {
+    // The load-bearing rule: `ok:false` means retrieval could not run, never
+    // "the docs do not cover this". Returning false here would halt the run
+    // instead of letting step 02 report "no local doc matched".
+    const r = successResult('/docs', [], 'nothing matches this');
+    expect(r.ok).toBe(true);
+    expect(r.output.candidates).toEqual([]);
+    expect(r.flags.has_candidates).toBe(false);
+  });
+
+  test('summary is one line and truncates a long question', () => {
+    const r = successResult('/docs', [], 'x'.repeat(200));
+    expect(r.summary).not.toInclude('\n');
+    expect(r.summary.length).toBeLessThan(200);
+  });
+
+  test('failure self-classifies so the runtime need not guess', () => {
+    // The runtime TRUSTS error.class (§5.1); `env` halts without spending an
+    // agent on a machine/config problem.
+    const r = failureResult('env', 'docs directory not found: /nope');
+    expect(r.ok).toBe(false);
+    expect(r.error.class).toBe('env');
+    expect(r.error.detail).toInclude('/nope');
   });
 });
