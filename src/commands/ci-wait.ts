@@ -1,4 +1,5 @@
-// `pipeline ci-wait [--pr <ref> | --branch <name> | --sha <sha>] [--repo <path>]
+// `pipeline ci-wait [--pr <ref> | --branch <name> | --sha <sha>]
+//                   [--repo <path|owner/name>]
 //                   [--timeout <sec>] [--interval <sec>] [--grace <sec>]
 //                   [--fail-fast|--no-fail-fast] [--json] [--verbose]`
 //
@@ -19,6 +20,20 @@
 //                    a later push starts a NEW gate, not a moving target).
 //   --sha <sha>      same as --branch but skips resolution.
 //
+// Which repository (`--repo`, optional — default: the current directory):
+//   accepts BOTH forms, disambiguated by EXISTENCE FIRST so a real directory
+//   literally named `owner/name` is never misread as a slug:
+//     <path>        an existing local directory — it becomes the cwd of every
+//                   gh subprocess and gh infers the repo from its origin.
+//     owner/name    a GitHub slug (what `gh --repo` itself means). The cwd stays
+//                   the current directory and the slug is written into every gh
+//                   call: `-R owner/name` for `gh pr`, and straight into the
+//                   endpoint path (`repos/owner/name/...`) for `gh api`, which
+//                   has NO -R flag (gh 2.92: "unknown shorthand flag: 'R'").
+//   anything else → exit 2 IMMEDIATELY, naming the value — never a poll loop
+//   against a cwd that cannot exist (that used to burn the whole grace period
+//   and report `no-checks`/exit 4, i.e. "CI never started").
+//
 // Terminal decision:
 //   - success  → exit 0: every check finished in pass/skipping (PR buckets) or
 //                success/skipped/neutral (check-run conclusions).
@@ -31,8 +46,9 @@
 //   - no-checks→ exit 4 when NO checks/runs appear within --grace seconds
 //                (default 120) — distinct from success so a caller can't
 //                mistake "CI never started" for a green gate.
-//   - usage/env→ exit 2 (bad flags, gh missing/unauthenticated, unresolvable
-//                branch).
+//   - usage/env→ exit 2 (bad flags — including a --repo that is neither an
+//                existing directory nor an owner/name slug — gh
+//                missing/unauthenticated, unresolvable branch).
 //
 // Output: silent while polling (opt-in `--verbose` heartbeats go to stderr);
 // the single result goes to stdout — a human one-liner, or one JSON object
@@ -40,13 +56,16 @@
 // seams (lib/git.ts) and time/sleep through injectable deps, so tests drive
 // the full state machine with scripted gh outputs and zero real waiting.
 
+import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { realGh, realGit, ghAvailable, sleepSync, type GhRunner, type GitRunner } from '../lib/git';
 
 const USAGE =
   'usage: pipeline ci-wait [--pr <number|url|branch> | --branch <name> | --sha <sha>]\n' +
-  '                        [--repo <path>] [--timeout <sec>] [--interval <sec>]\n' +
-  '                        [--grace <sec>] [--fail-fast|--no-fail-fast] [--json] [--verbose]\n';
+  '                        [--repo <path|owner/name>] [--timeout <sec>] [--interval <sec>]\n' +
+  '                        [--grace <sec>] [--fail-fast|--no-fail-fast] [--json] [--verbose]\n' +
+  '  --repo takes EITHER a local path to a checkout (becomes the cwd of every gh\n' +
+  '  call) OR a GitHub owner/name slug; an existing directory always wins.\n';
 
 export const DEFAULT_TIMEOUT_S = 1800;
 export const DEFAULT_INTERVAL_S = 15;
@@ -217,6 +236,64 @@ export function parseCiWaitArgs(args: string[]): ParsedArgs | { error: string } 
 }
 
 // ---------------------------------------------------------------------------
+// `--repo`: local path OR owner/name slug
+// ---------------------------------------------------------------------------
+
+/** How every gh subprocess is aimed at a repository. */
+export interface GhTarget {
+  /** Working directory for every gh subprocess (gh infers the repo from it
+   *  when `slug` is null). */
+  cwd: string;
+  /** `owner/name` when --repo was a slug; null when it was a local path. */
+  slug: string | null;
+}
+
+/** A GitHub `owner/name` slug: exactly two segments of the characters GitHub
+ *  allows in an owner/repo name. Deliberately narrow — anything else is a
+ *  usage error, not a guess. */
+const SLUG_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
+function isDirectory(p: string): boolean {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Disambiguate `--repo`. EXISTENCE IS CHECKED FIRST, so a real directory
+ *  literally named `owner/name` is a path and never a slug; only when no such
+ *  directory exists does the slug shape apply; anything else is an error the
+ *  caller must turn into exit 2 (before any polling). */
+export function resolveRepoTarget(
+  repo: string | null,
+  baseCwd: string = process.cwd(),
+): GhTarget | { error: string } {
+  if (repo === null) return { cwd: baseCwd, slug: null };
+  const abs = resolve(baseCwd, repo);
+  if (isDirectory(abs)) return { cwd: abs, slug: null };
+  if (SLUG_RE.test(repo)) return { cwd: baseCwd, slug: repo };
+  return {
+    error:
+      `--repo '${repo}' is not an existing directory (resolved to '${abs}') and is not a ` +
+      "GitHub 'owner/name' slug — --repo takes a LOCAL PATH to a checkout, or an owner/name slug",
+  };
+}
+
+/** The `repos/...` prefix for a `gh api` endpoint. `gh api` has NO `-R/--repo`
+ *  flag (verified against gh 2.92 — `unknown shorthand flag: 'R' in -R`); it
+ *  only substitutes `{owner}`/`{repo}` from the cwd's repo. With a slug there
+ *  is no cwd repo to read, so the slug goes straight into the path. */
+function apiRepo(target: GhTarget): string {
+  return target.slug === null ? 'repos/{owner}/{repo}' : `repos/${target.slug}`;
+}
+
+/** `gh pr` DOES take the standard `-R OWNER/REPO` selector. */
+function prRepoFlags(target: GhTarget): string[] {
+  return target.slug === null ? [] : ['-R', target.slug];
+}
+
+// ---------------------------------------------------------------------------
 // Poll snapshot — one normalized view regardless of mode
 // ---------------------------------------------------------------------------
 
@@ -249,8 +326,8 @@ function classify(checks: CiCheck[], pendingStates: Set<string>, passStates: Set
 /** PR mode: `gh pr checks` — parse stdout REGARDLESS of exit code (gh exits
  *  non-zero while checks are pending/failing, which is exactly the interesting
  *  case). Empty/unparseable stdout → "no data yet" (grace-period territory). */
-function snapshotPr(gh: GhRunner, cwd: string, pr: string): Snapshot {
-  const r = gh(['pr', 'checks', pr, '--json', 'name,state,bucket,link'], cwd);
+function snapshotPr(gh: GhRunner, target: GhTarget, pr: string): Snapshot {
+  const r = gh(['pr', 'checks', pr, '--json', 'name,state,bucket,link', ...prRepoFlags(target)], target.cwd);
   const text = r.stdout.trim();
   if (!text) return emptySnapshot(r.stderr.trim() || null);
   let rows: unknown;
@@ -273,16 +350,16 @@ function snapshotPr(gh: GhRunner, cwd: string, pr: string): Snapshot {
 
 /** Commit mode: the check-runs API (covers Actions + third-party check apps).
  *  `--paginate` may emit one JSON array per page — parse line-tolerantly. */
-function snapshotCommit(gh: GhRunner, cwd: string, sha: string): Snapshot {
+function snapshotCommit(gh: GhRunner, target: GhTarget, sha: string): Snapshot {
   const r = gh(
     [
       'api',
-      `repos/{owner}/{repo}/commits/${sha}/check-runs`,
+      `${apiRepo(target)}/commits/${sha}/check-runs`,
       '--paginate',
       '--jq',
       '[.check_runs[] | {name, status, conclusion, link: .html_url}]',
     ],
-    cwd,
+    target.cwd,
   );
   if (r.code !== 0) return emptySnapshot(r.stderr.trim() || `gh api exited ${r.code}`);
   const rows: Array<Record<string, unknown>> = [];
@@ -312,8 +389,8 @@ function snapshotCommit(gh: GhRunner, cwd: string, sha: string): Snapshot {
 
 /** Resolve a branch name to its HEAD sha via the API (works without a local
  *  fetch — the wait is about the REMOTE's CI, not the local checkout). */
-function resolveBranchSha(gh: GhRunner, cwd: string, branch: string): string | { error: string } {
-  const r = gh(['api', `repos/{owner}/{repo}/commits/${branch}`, '--jq', '.sha'], cwd);
+function resolveBranchSha(gh: GhRunner, target: GhTarget, branch: string): string | { error: string } {
+  const r = gh(['api', `${apiRepo(target)}/commits/${branch}`, '--jq', '.sha'], target.cwd);
   const sha = r.stdout.trim();
   if (r.code !== 0 || !/^[0-9a-f]{40}$/.test(sha)) {
     return { error: `could not resolve branch '${branch}' to a sha: ${r.stderr.trim() || sha || 'no output'}` };
@@ -322,8 +399,8 @@ function resolveBranchSha(gh: GhRunner, cwd: string, branch: string): string | {
 }
 
 /** The remote's default branch (API-first; no local git state required). */
-function resolveDefaultBranch(gh: GhRunner, cwd: string): string | { error: string } {
-  const r = gh(['api', 'repos/{owner}/{repo}', '--jq', '.default_branch'], cwd);
+function resolveDefaultBranch(gh: GhRunner, target: GhTarget): string | { error: string } {
+  const r = gh(['api', apiRepo(target), '--jq', '.default_branch'], target.cwd);
   const name = r.stdout.trim();
   if (r.code !== 0 || !name) {
     return { error: `could not resolve the default branch: ${r.stderr.trim() || 'no output'}` };
@@ -341,7 +418,15 @@ export function runCiWait(args: string[], deps: CiWaitDeps = realDeps): number {
     process.stderr.write(`pipeline ci-wait: ${parsed.error}\n${USAGE}`);
     return 2;
   }
-  const cwd = resolve(parsed.repo ?? process.cwd());
+  // Validate --repo BEFORE any polling: a cwd that does not exist can never
+  // produce a successful gh spawn, so polling it to the end of the grace
+  // period and reporting `no-checks` (exit 4 = "CI never started") is both a
+  // 120s lie and the wrong operator action. This is a bad flag → exit 2.
+  const target = resolveRepoTarget(parsed.repo);
+  if ('error' in target) {
+    process.stderr.write(`pipeline ci-wait: ${target.error}\n${USAGE}`);
+    return 2;
+  }
   if (deps.ghOk && !deps.ghOk()) {
     process.stderr.write("pipeline ci-wait: the 'gh' CLI is required but not invokable (install/auth gh)\n");
     return 2;
@@ -362,7 +447,7 @@ export function runCiWait(args: string[], deps: CiWaitDeps = realDeps): number {
     mode = 'commit';
     let branch = parsed.branch;
     if (branch === null) {
-      const def = resolveDefaultBranch(deps.gh, cwd);
+      const def = resolveDefaultBranch(deps.gh, target);
       if (typeof def !== 'string') {
         process.stderr.write(`pipeline ci-wait: ${def.error}\n`);
         return 2;
@@ -370,7 +455,7 @@ export function runCiWait(args: string[], deps: CiWaitDeps = realDeps): number {
       branch = def;
     }
     ref = branch;
-    const resolved = resolveBranchSha(deps.gh, cwd, branch);
+    const resolved = resolveBranchSha(deps.gh, target, branch);
     if (typeof resolved !== 'string') {
       process.stderr.write(`pipeline ci-wait: ${resolved.error}\n`);
       return 2;
@@ -428,7 +513,7 @@ export function runCiWait(args: string[], deps: CiWaitDeps = realDeps): number {
   let sawChecks = false;
   for (;;) {
     polls++;
-    const snap = mode === 'pr' ? snapshotPr(deps.gh, cwd, ref) : snapshotCommit(deps.gh, cwd, sha as string);
+    const snap = mode === 'pr' ? snapshotPr(deps.gh, target, ref) : snapshotCommit(deps.gh, target, sha as string);
     if (snap.ghError) lastGhError = snap.ghError;
 
     if (snap.checks !== null && snap.checks.length > 0) {
