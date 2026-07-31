@@ -18,8 +18,8 @@
 // worktrees, `.claude/worktrees/<name>/`).
 
 import { test, expect, afterEach } from 'bun:test';
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { mkdirSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 
 import { realGit } from '../src/lib/git';
 import { mkTmp, ident, cleanupCreated } from './_git-sandbox';
@@ -32,6 +32,35 @@ function git(cwd: string, ...args: string[]): string {
   const r = realGit(args, cwd);
   if (r.code !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr || r.stdout}`);
   return r.stdout;
+}
+
+/**
+ * One canonical spelling of a path, so two spellings of the SAME directory
+ * compare equal.
+ *
+ * GitHub's Windows runner hands out 8.3 short TEMP paths (`RUNNER~1`), and git
+ * rewrites them to their long form when it records `gitdir:`/`commondir` — so
+ * the resolver legitimately returns a differently-spelled path than the one the
+ * fixture created, pointing at the very same directory. Plain `realpathSync`
+ * does NOT expand 8.3 on Windows; `realpathSync.native` does. Paths that do not
+ * exist yet (a `.stats` tree before its first write) are canonicalized via
+ * their deepest existing ancestor.
+ */
+function canon(p: string): string {
+  const abs = resolve(p);
+  let cur = abs;
+  const tail: string[] = [];
+  while (!existsSync(cur)) {
+    const parent = dirname(cur);
+    if (parent === cur) return abs;
+    tail.unshift(basename(cur));
+    cur = parent;
+  }
+  try {
+    return join(realpathSync.native(cur), ...tail);
+  } catch {
+    return abs;
+  }
 }
 
 /** A repo with a pipeline, plus a worktree of it that the CLI knows nothing
@@ -58,30 +87,34 @@ function scaffold(): { project: string; worktree: string; mainPipelineRoot: stri
 }
 
 test('a pipeline root inside a worktree maps to the main checkout', () => {
-  const { mainPipelineRoot, wtPipelineRoot } = scaffold();
+  const { mainPipelineRoot, wtPipelineRoot, worktree } = scaffold();
   expect(existsSync(join(wtPipelineRoot, 'steps', '01-step.md'))).toBe(true);
 
-  expect(mainCheckoutPipelineRoot(wtPipelineRoot)).toBe(resolve(mainPipelineRoot));
+  const mapped = canon(mainCheckoutPipelineRoot(wtPipelineRoot));
+  expect(mapped).toBe(canon(mainPipelineRoot));
+  // The point of the exercise: it left the ephemeral tree.
+  expect(mapped.startsWith(canon(worktree))).toBe(false);
 });
 
 test('an ordinary checkout is left alone', () => {
   const { mainPipelineRoot } = scaffold();
-  expect(mainCheckoutPipelineRoot(mainPipelineRoot)).toBe(resolve(mainPipelineRoot));
+  expect(canon(mainCheckoutPipelineRoot(mainPipelineRoot))).toBe(canon(mainPipelineRoot));
 });
 
 test('statsLocation anchors a worktree run to the main .stats tree', () => {
-  const { project, mainPipelineRoot, wtPipelineRoot } = scaffold();
+  const { project, mainPipelineRoot, wtPipelineRoot, worktree } = scaffold();
 
   const fromWorktree = statsLocation(wtPipelineRoot);
   const fromMain = statsLocation(mainPipelineRoot);
 
   // Same tree, same per-pipeline subdir — a run is measured in one place
   // regardless of which checkout it executed from.
-  expect(fromWorktree).toEqual(fromMain);
-  expect(fromWorktree.base).toBe(resolve(join(project, '.claude', 'pipeline', '.stats')));
+  expect(canon(fromWorktree.base)).toBe(canon(fromMain.base));
+  expect(fromWorktree.rel).toBe(fromMain.rel);
+  expect(canon(fromWorktree.base)).toBe(canon(join(project, '.claude', 'pipeline', '.stats')));
   expect(fromWorktree.rel).toBe('demo');
   // And crucially NOT inside the ephemeral tree.
-  expect(fromWorktree.base.startsWith(resolve(wtPipelineRoot))).toBe(false);
+  expect(canon(fromWorktree.base).startsWith(canon(worktree))).toBe(false);
 });
 
 test('the readers resolve the same project root as the writer', () => {
@@ -91,9 +124,9 @@ test('the readers resolve the same project root as the writer', () => {
   // --root. Both must land on the checkout the stats were written under, or a
   // worktree run's records would be written in one place and enriched in
   // another — i.e. never enriched at all.
-  expect(findStatsProjectRoot(worktree)).toBe(resolve(project));
-  expect(findStatsProjectRoot(wtPipelineRoot)).toBe(resolve(project));
-  expect(findStatsProjectRoot(project)).toBe(resolve(project));
+  expect(canon(findStatsProjectRoot(worktree)!)).toBe(canon(project));
+  expect(canon(findStatsProjectRoot(wtPipelineRoot)!)).toBe(canon(project));
+  expect(canon(findStatsProjectRoot(project)!)).toBe(canon(project));
 });
 
 test('a project with no git at all still resolves to itself', () => {
@@ -101,7 +134,7 @@ test('a project with no git at all still resolves to itself', () => {
   const pipelineRoot = join(plain, '.claude', 'pipeline', 'demo');
   mkdirSync(pipelineRoot, { recursive: true });
 
-  expect(mainCheckoutPipelineRoot(pipelineRoot)).toBe(resolve(pipelineRoot));
-  expect(findStatsProjectRoot(pipelineRoot)).toBe(resolve(plain));
-  expect(statsLocation(pipelineRoot).base).toBe(resolve(join(plain, '.claude', 'pipeline', '.stats')));
+  expect(canon(mainCheckoutPipelineRoot(pipelineRoot))).toBe(canon(pipelineRoot));
+  expect(canon(findStatsProjectRoot(pipelineRoot)!)).toBe(canon(plain));
+  expect(canon(statsLocation(pipelineRoot).base)).toBe(canon(join(plain, '.claude', 'pipeline', '.stats')));
 });
