@@ -33,6 +33,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { ensureGeneratedDir } from './generated-dir';
+import { resolveProjectRoot } from './event';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 
 // ---------------------------------------------------------------------------
@@ -54,11 +55,58 @@ export interface StatsLocation {
   rel: string;
 }
 
+/** Memo for mainCheckoutPipelineRoot — the git layout of a path does not change
+ *  within one CLI process, and statsLocation is called several times per run. */
+const mainRootMemo = new Map<string, string>();
+
+/**
+ * The MAIN checkout's equivalent of a pipeline root that lives inside a git
+ * worktree. Identity for an ordinary checkout.
+ *
+ * A worktree is ephemeral by design — `git worktree remove` takes the whole
+ * tree with it — so measurements written inside one are destroyed exactly when
+ * a run finishes and the tree is cleaned up. They were also invisible while
+ * they existed: every reader (the dashboard's stats sweep, the Stop-hook
+ * backfill, `pipeline stats`) resolves the project through the same
+ * worktree→main mapping and so only ever looked in the main checkout.
+ *
+ * Anchoring the `.stats` tree to the main checkout makes a worktree run's
+ * numbers both durable and visible, and matches the existing rule for runs the
+ * CLI orchestrates itself, whose bookkeeping is already main-scoped (D6).
+ *
+ * Deliberately NOT applied to `.runtime/<run>/`: that is the run's live state
+ * (next.json, records, outputs, the attempt ledger) and, for an external run,
+ * is gitignored inside the worktree on purpose so finalize cannot commit it.
+ * Its lifetime IS the worktree's.
+ */
+export function mainCheckoutPipelineRoot(pipelineRoot: string): string {
+  const root = resolve(pipelineRoot);
+  const memo = mainRootMemo.get(root);
+  if (memo !== undefined) return memo;
+  let mapped = root;
+  try {
+    const { project_root, worktree } = resolveProjectRoot(root);
+    if (worktree) {
+      const rel = relative(resolve(worktree), root);
+      // Only map a path genuinely under the worktree; never climb out of it.
+      if (rel && !rel.startsWith('..') && !/^[A-Za-z]:/.test(rel)) {
+        mapped = join(resolve(project_root), rel);
+      }
+    }
+  } catch {
+    // Any git-layout surprise leaves the path alone — stats must never throw.
+  }
+  mainRootMemo.set(root, mapped);
+  return mapped;
+}
+
 /** Resolve where stats live for a pipeline root. Walks up looking for the
  *  canonical `<project>/.claude/pipeline` ancestor so every pipeline in a
- *  project (including nested targets) shares ONE `.stats/` tree. */
+ *  project (including nested targets) shares ONE `.stats/` tree. A pipeline
+ *  root inside a git worktree resolves to the MAIN checkout's tree, so the
+ *  measurements outlive the worktree. */
 export function statsLocation(pipelineRoot: string): StatsLocation {
-  const root = resolve(pipelineRoot);
+  const root = mainCheckoutPipelineRoot(pipelineRoot);
   let dir = dirname(root);
   while (true) {
     if (basename(dir) === 'pipeline' && basename(dirname(dir)) === '.claude') {

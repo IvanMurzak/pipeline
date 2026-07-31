@@ -62,6 +62,7 @@ import {
   type TokenStats,
 } from './stats';
 import { loadUsageTotals } from './envelope';
+import { resolveProjectRoot } from './event';
 import { readStepSessionRefs, foldStepSessionTranscripts } from './step-transcripts';
 // VENDORED walkers, never the sibling app: apps/pipeline-cli publishes
 // standalone to npm and the tarball contains no apps/pipeline-ui, so a
@@ -221,16 +222,33 @@ function foldHeadlessStyle(runtimeDir: string, homeOverride: string | undefined)
  *  `.claude/pipeline` — the projectRoot `backfillProject` expects. The ONE
  *  shared walk every trigger uses to derive its argument (the relay from the
  *  hook payload's cwd, the run-init kick from `--root`). Null when no such
- *  ancestor exists. */
+ *  ancestor exists.
+ *
+ *  A checkout inside a git WORKTREE resolves to its MAIN checkout, because
+ *  that is where `lib/stats.ts` anchors the `.stats` tree so measurements
+ *  outlive the ephemeral worktree. Writer and readers must agree on the
+ *  location or a worktree run's records would be written in one place and
+ *  enriched in another — i.e. never enriched at all. */
 export function findStatsProjectRoot(start: string): string | null {
   let dir = resolve(start);
   for (let i = 0; i < 16; i++) {
-    if (existsSync(join(dir, '.claude', 'pipeline'))) return dir;
+    if (existsSync(join(dir, '.claude', 'pipeline'))) return mainCheckoutOf(dir);
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
   return null;
+}
+
+/** The main checkout for `dir`, or `dir` itself when it is not a worktree.
+ *  Never throws — a git-layout surprise leaves the path alone. */
+function mainCheckoutOf(dir: string): string {
+  try {
+    const { project_root, worktree } = resolveProjectRoot(dir);
+    return worktree ? resolve(project_root) : dir;
+  } catch {
+    return dir;
+  }
 }
 
 /** A run id as `/pipeline:run` mints it: 12 lowercase hex chars
