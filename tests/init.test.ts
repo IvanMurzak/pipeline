@@ -22,6 +22,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  cloudConnectArgs,
+  cloudStepDecision,
   parseInitArgs,
   parseUiStartOutput,
   runInit,
@@ -55,6 +57,8 @@ interface Harness {
   uiCalls: number;
   driveCalls: Array<{ args: string[] }>;
   promptCalls: string[];
+  /** Every `cloud connect` argv init composed — empty when it never tried. */
+  cloudCalls: string[][];
 }
 
 interface HarnessOpts {
@@ -67,6 +71,10 @@ interface HarnessOpts {
   runDrive?: (args: string[], driveDeps: DriveDeps) => Promise<number>;
   promptAnswer?: boolean;
   env?: Record<string, string | undefined>;
+  /** Fake `cloud connect`. Default: succeeds. Never touches a network — the
+   *  real one is composed in-process (`InitDeps.cloudConnect`), so a test that
+   *  reached the wire would mean the seam had been bypassed. */
+  cloudConnect?: (args: string[]) => Promise<number>;
 }
 
 const SUPPORT_ANSWER_STEPS = ['01-retrieve', '02-select', '03-answer'];
@@ -104,6 +112,7 @@ function harness(opts: HarnessOpts = {}): Harness {
   const claudeCliCalls: string[][] = [];
   const driveCalls: Array<{ args: string[] }> = [];
   const promptCalls: string[] = [];
+  const cloudCalls: string[][] = [];
   const clock = { t: 0 };
 
   const claudeCliImpl: ClaudeCliRunner =
@@ -135,6 +144,10 @@ function harness(opts: HarnessOpts = {}): Harness {
       uiCalls++;
       return startUiImpl();
     },
+    cloudConnect: async (args) => {
+      cloudCalls.push(args);
+      return opts.cloudConnect ? opts.cloudConnect(args) : 0;
+    },
     runDrive: async (args, driveDeps) => {
       driveCalls.push({ args });
       return runDriveImpl(args, driveDeps);
@@ -154,6 +167,7 @@ function harness(opts: HarnessOpts = {}): Harness {
     },
     driveCalls,
     promptCalls,
+    cloudCalls,
   };
 }
 
@@ -162,7 +176,7 @@ function harness(opts: HarnessOpts = {}): Harness {
 // ---------------------------------------------------------------------------
 
 describe('parseInitArgs', () => {
-  test('defaults: support-answer, no flags set', () => {
+  test('defaults: support-answer, cloud ON, no flags set', () => {
     const r = parseInitArgs([]);
     expect(r).toEqual({
       template: 'support-answer',
@@ -173,6 +187,9 @@ describe('parseInitArgs', () => {
       yes: false,
       json: false,
       help: false,
+      // Cloud-first: `local` is the OPT-OUT, so its default is false.
+      local: false,
+      noRunner: false,
     });
   });
 
@@ -183,7 +200,10 @@ describe('parseInitArgs', () => {
   });
 
   test('every flag parses, including -y and --dir', () => {
-    const r = parseInitArgs(['--no-plugin', '--no-ui', '--run', '-y', '--dir', '/tmp/x', '--json']);
+    const r = parseInitArgs([
+      '--no-plugin', '--no-ui', '--run', '-y', '--dir', '/tmp/x', '--json',
+      '--server', 'http://127.0.0.1:39500', '--org', 'acme', '--project', 'proj', '--no-runner',
+    ]);
     expect(r).toEqual({
       template: 'support-answer',
       noPlugin: true,
@@ -194,6 +214,39 @@ describe('parseInitArgs', () => {
       dir: '/tmp/x',
       json: true,
       help: false,
+      local: false,
+      server: 'http://127.0.0.1:39500',
+      org: 'acme',
+      project: 'proj',
+      noRunner: true,
+    });
+  });
+
+  test('the cloud flags accept the --flag=value form too', () => {
+    const r = parseInitArgs(['--server=http://x', '--org=acme', '--project=p']);
+    expect(r).toEqual({
+      template: 'support-answer',
+      noPlugin: false, noUi: false, noRun: false, run: false, yes: false, json: false, help: false,
+      local: false, noRunner: false,
+      server: 'http://x', org: 'acme', project: 'p',
+    });
+  });
+
+  test('a cloud flag with no value is a usage error, not a silent skip', () => {
+    // `--server` eating the next flag as its value is how someone ends up
+    // connecting to a control plane named `--org`.
+    expect(parseInitArgs(['--server'])).toEqual({ error: '--server requires a value' });
+    expect(parseInitArgs(['--org'])).toEqual({ error: '--org requires a value' });
+  });
+
+  test('--local with a cloud flag is a usage error', () => {
+    // Honouring one of the two silently is how a user ends up connected when
+    // they explicitly asked not to be.
+    expect(parseInitArgs(['--local', '--org', 'acme'])).toEqual({
+      error: 'cannot combine --local and --org',
+    });
+    expect(parseInitArgs(['--local', '--no-runner'])).toEqual({
+      error: 'cannot combine --local and --no-runner',
     });
   });
 
@@ -305,7 +358,9 @@ describe('pipeline init — happy path', () => {
 describe('pipeline init --json', () => {
   test('emits the documented shape and NEVER runs without --run', async () => {
     const proj = tempProject();
-    const h = harness();
+    // `--json` with a machine credential connects silently — that is the ONE
+    // rung with no browser and no TTY, so it is the shape a CI run gets.
+    const h = harness({ env: { PIPELINE_MACHINE_TOKEN: 'mc_test' } });
     const code = await runInit(['--dir', proj, '--json'], h.deps);
     expect(code).toBe(0);
     expect(h.driveCalls.length).toBe(0);
@@ -314,6 +369,7 @@ describe('pipeline init --json', () => {
     const parsed = JSON.parse(h.stdout().trim());
     expect(parsed).toEqual({
       ok: true,
+      cloud: 'connected',
       plugin: 'installed',
       template: 'support-answer',
       path: '.claude/pipeline/support-answer',
@@ -324,7 +380,7 @@ describe('pipeline init --json', () => {
 
   test('--json --run executes and reports runOk:true', async () => {
     const proj = tempProject();
-    const h = harness();
+    const h = harness({ env: { PIPELINE_MACHINE_TOKEN: 'mc_test' } });
     const code = await runInit(['--dir', proj, '--json', '--run'], h.deps);
     expect(code).toBe(0);
     expect(h.driveCalls.length).toBe(1);
@@ -332,6 +388,7 @@ describe('pipeline init --json', () => {
     const parsed = JSON.parse(lines[lines.length - 1]!);
     expect(parsed).toEqual({
       ok: true,
+      cloud: 'connected',
       plugin: 'installed',
       template: 'support-answer',
       path: '.claude/pipeline/support-answer',
@@ -534,6 +591,148 @@ describe('flag composition', () => {
 // ---------------------------------------------------------------------------
 // "session already open" next-action line
 // ---------------------------------------------------------------------------
+
+describe('the cloud step (cloud-first default)', () => {
+  test('connects BY DEFAULT, with no flag asked for', async () => {
+    // The headline behaviour change: a bare `pipeline init` reaches the cloud.
+    const proj = tempProject();
+    const h = harness();
+    const code = await runInit(['--dir', proj, '--run'], h.deps);
+    expect(code).toBe(0);
+    expect(h.cloudCalls).toHaveLength(1);
+    // And it enrols this machine, because a machine that is not a runner
+    // cannot pick up cloud-dispatched work — the point of connecting.
+    expect(h.cloudCalls[0]).toContain('--runner');
+  });
+
+  test('--local connects to nothing at all', async () => {
+    const proj = tempProject();
+    const h = harness();
+    const code = await runInit(['--dir', proj, '--local', '--run'], h.deps);
+    expect(code).toBe(0);
+    expect(h.cloudCalls).toHaveLength(0);
+    // And it SAYS so, rather than leaving the reader to infer it.
+    expect(h.stdout()).toContain('local only');
+    expect(h.stdout()).not.toContain('⚠');
+  });
+
+  test('runs the cloud step FIRST, before the plugin install and the clone', async () => {
+    // The browser consent is the one thing needing a human. Making it wait
+    // behind a plugin install is how a user walks away mid-setup.
+    const order: string[] = [];
+    const proj = tempProject();
+    const h = harness({
+      cloudConnect: async () => {
+        order.push('cloud');
+        return 0;
+      },
+      claudeCli: () => {
+        order.push('plugin');
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    });
+    await runInit(['--dir', proj, '--no-run'], h.deps);
+    expect(order[0]).toBe('cloud');
+    expect(order).toContain('plugin');
+  });
+
+  test('a failed connect WARNS and finishes locally, exit 0', async () => {
+    // Everything below the cloud step works unconnected. An init that aborted
+    // on a declined consent screen would leave the user with nothing.
+    const proj = tempProject();
+    const h = harness({ cloudConnect: async () => 1 });
+    const code = await runInit(['--dir', proj, '--run'], h.deps);
+    expect(code).toBe(0);
+    expect(h.stdout()).toContain('Not connected');
+    expect(h.stdout()).toContain('pipeline cloud connect');
+    // The local half still happened.
+    expect(existsSync(join(proj, '.claude', 'pipeline', 'support-answer'))).toBe(true);
+    expect(h.driveCalls).toHaveLength(1);
+  });
+
+  test('a THROWING connect is contained, not propagated', async () => {
+    const proj = tempProject();
+    const h = harness({
+      cloudConnect: async () => {
+        throw new Error('socket hang up');
+      },
+    });
+    const code = await runInit(['--dir', proj, '--no-run'], h.deps);
+    expect(code).toBe(0);
+    expect(h.stdout()).toContain('socket hang up');
+  });
+
+  test('names the dashboard only when a run actually reached it', async () => {
+    const proj = tempProject();
+    const connected = harness();
+    await runInit(['--dir', proj, '--run'], connected.deps);
+    expect(connected.stdout()).toContain('on your dashboard');
+
+    // No run ⇒ no line: pointing someone at an empty dashboard is worse than
+    // saying nothing.
+    const proj2 = tempProject();
+    const noRun = harness();
+    await runInit(['--dir', proj2, '--no-run'], noRun.deps);
+    expect(noRun.stdout()).not.toContain('on your dashboard');
+  });
+
+  test('--server is honoured by the dashboard line, not just by the connect', async () => {
+    const proj = tempProject();
+    const h = harness();
+    await runInit(['--dir', proj, '--run', '--server', 'http://127.0.0.1:39500'], h.deps);
+    expect(h.stdout()).toContain('http://127.0.0.1:39500');
+    expect(h.stdout()).not.toContain('api.ai-pipeline.dev');
+  });
+});
+
+describe('cloudStepDecision / cloudConnectArgs', () => {
+  const opts = (over: Partial<ReturnType<typeof baseOpts>> = {}) => ({ ...baseOpts(), ...over });
+  function baseOpts() {
+    const parsed = parseInitArgs([]);
+    if ('error' in parsed) throw new Error('unreachable');
+    return parsed;
+  }
+
+  test('--json NEVER opens a browser, and says why', () => {
+    // CI/bots/agents run --json. A browser flow there blocks until its
+    // five-minute timeout and then fails.
+    const d = cloudStepDecision(opts({ json: true }), {});
+    expect(d.run).toBe(false);
+    expect((d as { reason: string }).reason).toContain('PIPELINE_MACHINE_TOKEN');
+  });
+
+  test('--json WITH a machine credential connects silently', () => {
+    expect(cloudStepDecision(opts({ json: true }), { PIPELINE_MACHINE_TOKEN: 'mc_x' }).run).toBe(true);
+  });
+
+  test('a blank machine token counts as absent', () => {
+    // An env var set to '' is the classic "configured but empty" CI mistake.
+    expect(cloudStepDecision(opts({ json: true }), { PIPELINE_MACHINE_TOKEN: '  ' }).run).toBe(false);
+  });
+
+  test('--local is silent, not a warning', () => {
+    const d = cloudStepDecision(opts({ local: true }), {});
+    expect(d.run).toBe(false);
+    expect((d as { reason: string | null }).reason).toBeNull();
+  });
+
+  test('every cloud flag is passed through to connect', () => {
+    const args = cloudConnectArgs(
+      opts({ server: 'http://x', org: 'acme', project: 'p', json: true }),
+    );
+    expect(args).toEqual([
+      '--server', 'http://x',
+      '--org', 'acme',
+      '--project', 'p',
+      '--runner',
+      '--json',
+    ]);
+  });
+
+  test('--no-runner reaches connect as --no-runner', () => {
+    expect(cloudConnectArgs(opts({ noRunner: true }))).toEqual(['--no-runner']);
+  });
+});
 
 describe('the next-action line', () => {
   test('no session-open signal → suggests /pipeline:design', async () => {

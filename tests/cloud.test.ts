@@ -10,6 +10,7 @@ import { test, expect, afterEach, describe } from 'bun:test';
 import {
   runCloud,
   parseConnectArgs,
+  defaultOrgName,
   selectOrg,
   splitMachineCredential,
   assertNotMcpUrl,
@@ -114,6 +115,8 @@ function scriptedFetch(opts: {
   orgs?: Array<{ id: string; slug: string; name: string; role: string }>;
   selectedOrgId?: string | null;
   meStatus?: number;
+  /** Status `POST /api/v1/orgs` answers with. Default 201 (created). */
+  createOrgStatus?: number;
   log: FetchLog[];
 }) {
   const pending = opts.pendingPolls ?? 0;
@@ -162,6 +165,17 @@ function scriptedFetch(opts: {
         orgs,
         selectedOrgId: opts.selectedOrgId ?? null,
         selectedRole: null,
+      });
+    }
+    // First-org auto-create. The wire field is `orgId`, NOT `id` — the CLI
+    // maps it, and a test that used `id` here would pass while the real
+    // control plane's shape broke it (apps/api modules/orgs/types.ts).
+    if (url.endsWith('/api/v1/orgs')) {
+      const status = opts.createOrgStatus ?? 201;
+      if (status !== 201) return reply(status, { error: 'nope' });
+      return reply(201, {
+        org: { orgId: 'org-new', slug: 'dev-s-workspace', name: "dev's workspace", role: 'owner' },
+        selected: true,
       });
     }
     throw new Error(`unexpected fetch to ${url}`);
@@ -326,6 +340,32 @@ describe('parseConnectArgs', () => {
 // selectOrg
 // ---------------------------------------------------------------------------
 
+describe('defaultOrgName', () => {
+  // The one string a user lives with forever after the auto-create, derived
+  // from input that is attacker-ish by default: an email local part carries
+  // dots, plus-addressing, quoting and non-ASCII.
+  test('reads as a name, not as a filename', () => {
+    expect(defaultOrgName('ada.lovelace@example.com')).toBe("ada lovelace's workspace");
+    expect(defaultOrgName('ada_lovelace@example.com')).toBe("ada lovelace's workspace");
+  });
+  test('drops plus-addressing', () => {
+    expect(defaultOrgName('dev+ci@example.com')).toBe("dev's workspace");
+  });
+  test('keeps non-ASCII letters rather than mangling them', () => {
+    expect(defaultOrgName('иван@example.com')).toBe("иван's workspace");
+  });
+  test('strips what the server would reject, without ending up empty', () => {
+    expect(defaultOrgName('"><script>@example.com')).toBe("script's workspace");
+    // Nothing usable left ⇒ a generic name, never an invented identity.
+    expect(defaultOrgName('!!!@example.com')).toBe('My workspace');
+    expect(defaultOrgName(undefined)).toBe('My workspace');
+    expect(defaultOrgName('')).toBe('My workspace');
+  });
+  test('stays well inside the server ceiling of 200', () => {
+    expect(defaultOrgName(`${'a'.repeat(500)}@example.com`).length).toBeLessThanOrEqual(200);
+  });
+});
+
 describe('selectOrg', () => {
   const orgs = [
     { id: 'a', slug: 'acme', name: 'Acme', role: 'owner' },
@@ -335,6 +375,12 @@ describe('selectOrg', () => {
     const r = selectOrg([], undefined, null);
     expect(r).toHaveProperty('error');
     expect((r as { error: string }).error).toContain('no organizations');
+  });
+  test('no orgs WITH --org names the way out: drop the flag', () => {
+    // Reachable only with an explicit --org now; without one the caller
+    // creates the first org instead of consulting this function.
+    const r = selectOrg([], 'acme', null) as { error: string };
+    expect(r.error).toContain('re-run without --org');
   });
   test('--org flag selects by slug', () => {
     expect(selectOrg(orgs, 'beta', null)).toEqual(orgs[1]);
@@ -612,12 +658,49 @@ describe('runCloud connect — failure outcomes', () => {
     expect(tokenPolls).toBeLessThan(10);
   });
 
-  test('no orgs → exit 1 with actionable message', async () => {
+  test('no orgs → the first one is CREATED, not a dead end', async () => {
+    // This used to exit 1 with "create one in the web dashboard, then retry".
+    // That is a dead end in the middle of a flow whose whole promise is that
+    // the dashboard is something you visit AFTER it works — and a brand-new
+    // account is exactly the account this command exists for.
+    const log: FetchLog[] = [];
+    const { deps, out } = makeDeps(scriptedFetch({ orgs: [], log }), recordingFs());
+    const code = await runCloud(['connect'], deps);
+    expect(code).toBe(0);
+    const posted = log.find((l) => l.url.endsWith('/api/v1/orgs'));
+    expect(posted?.init.method).toBe('POST');
+    expect(JSON.parse(String(posted?.init.body)).name).toBe("dev's workspace");
+    // The created slug is what the connect reports and binds — not a slug
+    // guessed client-side from the name (the server owns slug allocation).
+    expect(out()).toContain('dev-s-workspace');
+  });
+
+  test('no orgs AND an explicit --org → refuses instead of creating a different org', async () => {
+    // The user named a specific org. Silently creating one under a name they
+    // did not choose would be a worse answer than saying it does not exist.
     const log: FetchLog[] = [];
     const { deps, err } = makeDeps(scriptedFetch({ orgs: [], log }), recordingFs());
+    const code = await runCloud(['connect', '--org', 'acme'], deps);
+    expect(code).toBe(1);
+    // And the way OUT of that state is named: drop the flag.
+    expect(err()).toContain('re-run without --org');
+    expect(log.some((l) => l.url.endsWith('/api/v1/orgs') && l.init.method === 'POST')).toBe(false);
+  });
+
+  test('an org-create refusal is reported with what to do next', async () => {
+    // 403 = a credential class that may not create orgs (a machine one).
+    const log: FetchLog[] = [];
+    const { deps, err } = makeDeps(scriptedFetch({ orgs: [], createOrgStatus: 403, log }), recordingFs());
     const code = await runCloud(['connect'], deps);
     expect(code).toBe(1);
-    expect(err()).toContain('no organizations');
+    expect(err()).toContain('--org');
+  });
+
+  test('an account that already has an org never creates another', async () => {
+    const log: FetchLog[] = [];
+    const { deps } = makeDeps(scriptedFetch({ log }), recordingFs());
+    expect(await runCloud(['connect'], deps)).toBe(0);
+    expect(log.some((l) => l.url.endsWith('/api/v1/orgs') && l.init.method === 'POST')).toBe(false);
   });
 
   test('multiple orgs without --org → exit 1 asking to choose', async () => {

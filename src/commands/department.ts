@@ -188,6 +188,7 @@ import {
 // growing a second machine-credential flow. Nothing interactive is imported.
 import { exchangeMachineCredential, MACHINE_TOKEN_ENV, type ApiAuth, type ApiAuthOptions } from './cloud';
 import { findFirstIteration, findManifests, parseManifest as parsePipelineManifest } from '../lib/match';
+import { parseFrontmatter } from '../lib/frontmatter';
 // a11: `notify` is the SAME poll/toast/journal daemon as before (task a1),
 // just addressed as a `department` verb instead of the standalone `mesh`
 // top-level command (08-terminology.md / D10 / D31) — `commands/mesh.ts`
@@ -715,7 +716,58 @@ function localFindings(m: DepartmentManifest, manifestDir: string): ManifestFind
       out.push({ severity: 'error', field: 'runtime.workingDirectory', message: `does not exist: ${abs}` });
     }
   }
+  // The entry-point agent must actually EXIST inside this department: naming
+  // one that does not is the difference between a department that answers and
+  // one that fails on its first message, and only this machine can tell. WHERE
+  // to look comes off the engine's own registry row, so this check cannot
+  // outlive the engine it was written for.
+  const agentEntrypoint = engineDefinition(m.runtime.engine)?.entrypoint.agent;
+  if (m.runtime.agent !== undefined && agentEntrypoint !== undefined) {
+    const agentsDir = join(manifestDir, ...agentEntrypoint.agentsDir.split('/'));
+    if (!departmentDefinesAgent(agentsDir, m.runtime.agent)) {
+      out.push({
+        severity: 'error',
+        field: 'runtime.agent',
+        message:
+          `no agent '${m.runtime.agent}' in this department — expected a Markdown file under ` +
+          `${agentsDir} whose name (or filename) is '${m.runtime.agent}'. ` +
+          'The entry-point agent has to be defined inside the department, because that folder is the ' +
+          'only thing the engine loads.',
+      });
+    }
+  }
   return out;
+}
+
+/**
+ * Does this department define the named agent? Matched on the `name:` in an
+ * agent file's frontmatter OR on its filename, because both are how Claude
+ * Code itself resolves `--agent`, and a validator that accepted only one of
+ * them would reject working departments.
+ *
+ * An unreadable folder answers `false`: unreadable and absent are the same
+ * answer to "can the engine load this agent".
+ */
+function departmentDefinesAgent(agentsDir: string, agent: string): boolean {
+  if (!existsSync(agentsDir)) return false;
+  let entries: string[];
+  try {
+    entries = readdirSync(agentsDir);
+  } catch {
+    return false;
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith('.md')) continue;
+    if (entry.slice(0, -'.md'.length) === agent) return true;
+    try {
+      const { fields } = parseFrontmatter(fsReadFileSync(join(agentsDir, entry), 'utf8'));
+      const name = fields['name'];
+      if (typeof name === 'string' && name.trim() === agent) return true;
+    } catch {
+      // An unreadable or frontmatter-less file simply is not a match.
+    }
+  }
+  return false;
 }
 
 /**

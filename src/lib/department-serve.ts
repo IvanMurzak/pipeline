@@ -110,21 +110,29 @@ const RUNNER_CLI_BIN = 'pipeline-runner';
 // ---------------------------------------------------------------------------
 
 /**
- * The dashboard origin for a control-plane API base — `https://api.example.dev`
- * → `https://example.dev`. 07 §4's transcripts print
- * `https://ai-pipeline.dev/departments/<slug>` while the CLI talks to
- * `https://api.ai-pipeline.dev`, and no endpoint tells the CLI the app origin,
- * so it is derived: strip a leading `api.` label, leave every other host
- * (localhost, a bare custom domain, an IP) exactly as it is. A wrong guess
- * here costs a mistyped link in one message, never a misdirected request —
- * this value is only ever printed.
+ * The dashboard origin for a control-plane API base.
+ *
+ * It is the SAME origin as the API. The dashboard SPA and the `/api/v1` surface
+ * are served together — the edge routes `/api/*`, `/auth/*`, `/oauth/*`, `/mcp*`
+ * (and friends) to the API process and EVERY OTHER PATH to the SPA, which is
+ * what makes the SPA same-origin with the surface it calls
+ * (`cloud/infra/spike/Caddyfile`).
+ *
+ * ⚠ This used to strip a leading `api.` label, on the reading that the app
+ * lived at the apex. It does not: the apex is the MARKETING site, which has no
+ * `/departments` route. The failure was invisible because both hosts answer
+ * `200` — the marketing site is a SPA too, so a stripped link served its own
+ * "page not found" instead of an HTTP error, and an admin sent to approve an
+ * install landed on a marketing page with no idea why. Verified against
+ * production: the apex returns the marketing document (`<title>Pipeline — Run
+ * AI agents like you run production</title>`), `api.` returns the dashboard
+ * (`<title>ai-pipeline</title>`). The marketing repo guards the same mistake
+ * from the other side (`apps/marketing`'s "sends a reader to the dashboard
+ * host, not the marketing one" test).
  */
 export function appOriginFor(server: string): string {
   try {
     const url = new URL(server);
-    if (url.hostname.startsWith('api.') && url.hostname.length > 'api.'.length) {
-      url.hostname = url.hostname.slice('api.'.length);
-    }
     url.pathname = '';
     return url.toString().replace(/\/+$/, '');
   } catch {
@@ -592,6 +600,27 @@ export function runtimeBindingFor(
     // receiver tools from `RuntimeConfig.command` + `cwd`, so a claude-code
     // binding needs no nested spec and no authored command line at all.
     args = manifest.runtime.args ?? [];
+    // The entry-point agent (`runtime.agent`): the agent inside this
+    // department folder that receives every arriving message and answers it.
+    //
+    // The FLAG comes off the engine's own registry row (`entrypoint.agent`),
+    // so turning a second engine on is one table edit rather than a hidden
+    // dependency on this branch spelling `--agent`. It rides at the FRONT of
+    // the per-department extras, so an author who also writes `runtime.args`
+    // can still override it the way any repeated flag is overridden: last
+    // occurrence wins in the harness, and the manifest's own argv is later.
+    //
+    // Nothing in pipeline-runner has to change for this: `RuntimeConfig.args`
+    // is appended VERBATIM after the flag surface the adapter builds, and the
+    // session already runs in the department folder under
+    // `--setting-sources project,local`, so the folder's own agents are what
+    // the flag resolves against. Engines whose entry point is a different
+    // field never reach here — `parseRuntime` refuses the manifest, from this
+    // same row.
+    const agentEntrypoint = engine.entrypoint.agent;
+    if (agentEntrypoint !== undefined && manifest.runtime.agent !== undefined) {
+      args = [agentEntrypoint.flag, manifest.runtime.agent, ...args];
+    }
     if (manifest.runtime.workingDirectory) cwd = resolve(opts.manifestDir, manifest.runtime.workingDirectory);
     if (manifest.runtime.environment !== undefined) {
       // `narrowRuntimeConfig` (pipeline-runner's `department/config.ts`) has no

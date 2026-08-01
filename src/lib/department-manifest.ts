@@ -219,6 +219,29 @@ export interface EngineDefinition {
    * what.
    */
   requiredRuntimeFields: readonly RequiredRuntimeField[];
+  /**
+   * WHERE this engine's entry point is declared, and what implementing it
+   * takes. One row, three readers: the parse gate below, `serve`'s argv
+   * injection (`department-serve.ts`) and `validate`'s filesystem check
+   * (`commands/department.ts`).
+   *
+   * It is a descriptor rather than a boolean because a boolean answers only
+   * "does this engine take an entry-point agent" and every other fact then has
+   * to be re-derived somewhere else: which field to name in the refusal, which
+   * flag to pass, which folder to look in. That is the x32/x51 split again —
+   * flipping a second engine on would otherwise silently inject a Claude-Code
+   * flag into its argv and validate its manifest against a Claude-Code folder.
+   */
+  entrypoint: EngineEntrypoint;
+}
+
+/** See {@link EngineDefinition.entrypoint}. */
+export interface EngineEntrypoint {
+  /** The `runtime:` key that IS this engine's entry point. */
+  field: 'agent' | 'startIteration' | 'command';
+  /** Agent entry points only: the flag the harness takes, and where the
+   *  department's own agent definitions live inside its folder. */
+  agent?: { flag: string; agentsDir: string };
 }
 
 /** One `runtime:` key an engine cannot be bound without — see
@@ -272,6 +295,10 @@ export const ENGINES: readonly EngineDefinition[] = [
     // rest. This is why `department new` (which writes claude-code) produces a
     // file that both validates AND serves with no further edits.
     requiredRuntimeFields: [],
+    // The session already runs IN the department folder under
+    // `--setting-sources project,local`, so `.claude/agents/` is in scope and
+    // `--agent <name>` picks one of them.
+    entrypoint: { field: 'agent', agent: { flag: '--agent', agentsDir: '.claude/agents' } },
   },
   {
     engine: 'pipeline',
@@ -309,6 +336,7 @@ export const ENGINES: readonly EngineDefinition[] = [
           'supervisor passes it to `pipeline drive --start`',
       },
     ],
+    entrypoint: { field: 'startIteration' },
   },
   {
     engine: 'process',
@@ -330,6 +358,7 @@ export const ENGINES: readonly EngineDefinition[] = [
           'supervisor has nothing to start without one',
       },
     ],
+    entrypoint: { field: 'command' },
   },
   {
     engine: 'container',
@@ -346,6 +375,7 @@ export const ENGINES: readonly EngineDefinition[] = [
           'supervisor has nothing to start without one',
       },
     ],
+    entrypoint: { field: 'command' },
   },
 ];
 
@@ -353,6 +383,12 @@ export const ENGINES: readonly EngineDefinition[] = [
  *  unsupported-engine error names in full (06 §1: name every engine that
  *  exists, not just one). */
 export const SUPPORTED_ENGINES: readonly string[] = ENGINES.map((e) => e.engine);
+
+/** The engines whose entry point is an agent — the list `validate`'s refusal
+ *  names, and the only rows that carry an `entrypoint.agent` descriptor. */
+export function enginesWithAgentEntrypoint(): readonly EngineDefinition[] {
+  return ENGINES.filter((e) => e.entrypoint.field === 'agent');
+}
 
 export function engineDefinition(engine: string): EngineDefinition | undefined {
   return ENGINES.find((e) => e.engine === engine);
@@ -463,6 +499,17 @@ export interface DepartmentRuntime {
   /** `engine: pipeline` only — filesystem paths into the operator's project. LOCAL. */
   pipelineRoot?: string;
   startIteration?: string;
+  /**
+   * The department's ENTRY POINT: the name of an agent, defined inside this
+   * department folder, that receives every arriving message and answers it.
+   *
+   * Engines whose {@link EngineDefinition.entrypoint} names a different field
+   * already have an entry point of their own and refuse this field rather than
+   * ignoring it. LOCAL, like every other `runtime:` key — an agent name is a
+   * fact about how this machine implements the department, and the control
+   * plane is told what a department does, never how.
+   */
+  agent?: string;
 }
 
 export interface DepartmentScheduling {
@@ -652,6 +699,7 @@ const RUNTIME_KEYS = [
   'environment',
   'pipelineRoot',
   'startIteration',
+  'agent',
 ] as const;
 
 const SKILL_KEYS = ['id', 'name', 'description', 'tags', 'inputModes', 'outputModes'] as const;
@@ -1081,6 +1129,27 @@ function parseRuntime(doc: Record<string, unknown>, f: Findings): DepartmentRunt
   const startIteration = f.optionalString(block, 'startIteration', MAX_LOCAL_STRING_LEN, 'runtime');
   if (startIteration !== undefined) runtime.startIteration = startIteration;
 
+  // The entry-point agent. Gated on the SAME registry row `validate` prints
+  // "(supported)" from, so an engine that cannot honour it refuses here rather
+  // than accepting a field that would then do nothing — the x32/x51 rule:
+  // never let one command accept what another silently drops.
+  const agent = f.optionalString(block, 'agent', MAX_LOCAL_STRING_LEN, 'runtime');
+  if (agent !== undefined) {
+    const def = engine !== undefined ? engineDefinition(engine) : undefined;
+    if (def !== undefined && def.entrypoint.field !== 'agent') {
+      f.error(
+        'runtime.agent',
+        `is not honoured by engine: ${def.engine} — that engine's entry point is already ` +
+          `runtime.${def.entrypoint.field}. ` +
+          `Engines that take an entry-point agent: ${enginesWithAgentEntrypoint()
+            .map((e) => e.engine)
+            .join(', ')}`,
+      );
+    } else {
+      runtime.agent = agent;
+    }
+  }
+
   return runtime;
 }
 
@@ -1432,19 +1501,15 @@ export interface DepartmentRegistrationRequest {
  * one later cannot quietly ship a local filesystem path to the control plane.
  */
 export const LOCAL_ONLY_FIELD_NAMES: readonly string[] = [
+  // Every `runtime:` key, DERIVED — a new one added to RUNTIME_KEYS and
+  // forgotten here would be parsed, stored and shipped to the control plane,
+  // and `assertNoLocalFields` only knows what this list says.
+  ...RUNTIME_KEYS,
   'apiVersion',
   'runtime',
-  'engine',
   'adapterId',
-  'command',
-  'args',
-  'workingDirectory',
-  'environment',
-  'pipelineRoot',
-  'startIteration',
   'workspace',
   'path',
-  'lifecycle',
 ];
 
 /**

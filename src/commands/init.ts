@@ -37,6 +37,7 @@ import { join, resolve, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { findTemplate, copyTemplateTree, formatTemplateList, TEMPLATES } from '../lib/templates';
+import { DEFAULT_SERVER, SERVER_ENV } from '../lib/cloud-config';
 import { computePlan } from '../lib/plan';
 import { runDrive, type DriveDeps } from './drive';
 import { runUi } from './ui';
@@ -55,13 +56,22 @@ export interface InitOptions {
   dir?: string;
   json: boolean;
   help: boolean;
+  /** `--local`: skip the cloud entirely. The pre-cloud-first behaviour. */
+  local: boolean;
+  /** Passed through to `cloud connect` (see the cloud step in `runInit`). */
+  server?: string;
+  org?: string;
+  project?: string;
+  /** `--no-runner`: connect, but do not enrol THIS machine as a runner. */
+  noRunner: boolean;
 }
 
 const DEFAULT_TEMPLATE = 'support-answer'; // O4 (10-decisions.md)
 
 const USAGE =
-  'Usage: pipeline init [<template>] [--no-plugin] [--no-ui] [--no-run] [--run]\n' +
-  '                     [--yes|-y] [--dir <path>] [--json]\n';
+  'Usage: pipeline init [<template>] [--local] [--server <url>] [--org <slug>]\n' +
+  '                     [--project <slug>] [--no-runner] [--no-plugin] [--no-ui]\n' +
+  '                     [--no-run] [--run] [--yes|-y] [--dir <path>] [--json]\n';
 
 export function parseInitArgs(args: string[]): InitOptions | { error: string } {
   const out: InitOptions = {
@@ -73,11 +83,21 @@ export function parseInitArgs(args: string[]): InitOptions | { error: string } {
     yes: false,
     json: false,
     help: false,
+    local: false,
+    noRunner: false,
   };
   let sawTemplate = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i] ?? '';
     const eq = (p: string) => (a.startsWith(p + '=') ? a.slice(p.length + 1) : undefined);
+    /** `--flag value` or `--flag=value`, rejecting a missing value. */
+    const takeValue = (flag: string): string | { error: string } => {
+      const inline = eq(flag);
+      if (inline !== undefined) return inline;
+      const v = args[++i];
+      if (v === undefined) return { error: `${flag} requires a value` };
+      return v;
+    };
     if (a === '--no-plugin') out.noPlugin = true;
     else if (a === '--no-ui') out.noUi = true;
     else if (a === '--no-run') out.noRun = true;
@@ -85,7 +105,21 @@ export function parseInitArgs(args: string[]): InitOptions | { error: string } {
     else if (a === '--yes' || a === '-y') out.yes = true;
     else if (a === '--json') out.json = true;
     else if (a === '--help' || a === '-h') out.help = true;
-    else if (a === '--dir') {
+    else if (a === '--local') out.local = true;
+    else if (a === '--no-runner') out.noRunner = true;
+    else if (a === '--server' || eq('--server') !== undefined) {
+      const v = takeValue('--server');
+      if (typeof v !== 'string') return v;
+      out.server = v;
+    } else if (a === '--org' || eq('--org') !== undefined) {
+      const v = takeValue('--org');
+      if (typeof v !== 'string') return v;
+      out.org = v;
+    } else if (a === '--project' || eq('--project') !== undefined) {
+      const v = takeValue('--project');
+      if (typeof v !== 'string') return v;
+      out.project = v;
+    } else if (a === '--dir') {
       const v = args[++i];
       if (v === undefined) return { error: '--dir requires a path' };
       out.dir = v;
@@ -98,26 +132,43 @@ export function parseInitArgs(args: string[]): InitOptions | { error: string } {
     } else return { error: `unexpected extra argument '${a}' — init takes at most one <template>` };
   }
   if (out.run && out.noRun) return { error: 'cannot combine --run and --no-run' };
+  // A cloud flag alongside --local is a contradiction, and silently honouring
+  // one of them is how a user ends up connected when they asked not to be.
+  if (out.local) {
+    const cloudFlag = out.server !== undefined ? '--server' : out.org !== undefined ? '--org' : out.project !== undefined ? '--project' : out.noRunner ? '--no-runner' : undefined;
+    if (cloudFlag) return { error: `cannot combine --local and ${cloudFlag}` };
+  }
   return out;
 }
 
 function helpText(): string {
   return (
     `${USAGE}\n` +
-    'One command from a bare project to a completed run: installs the Claude\n' +
-    'Code plugin, clones a starter pipeline, starts the local dashboard, and\n' +
-    'offers to run it.\n\n' +
+    'One command from a bare project to a completed run you can watch on your\n' +
+    'account: authorizes in the browser, connects this project, installs the\n' +
+    'Claude Code plugin, clones a starter pipeline, enrols this machine as a\n' +
+    'runner, starts the local dashboard, and offers to run it.\n\n' +
+    'It connects to the cloud BY DEFAULT. `--local` does everything except\n' +
+    'that, and sends nothing anywhere.\n\n' +
     'Options:\n' +
-    '  <template>     Starter pipeline to clone. Default: support-answer.\n' +
-    '                 Same names as `pipeline clone --list`.\n' +
-    '  --no-plugin    Skip the Claude Code plugin install.\n' +
-    '  --no-ui        Do not start the local dashboard.\n' +
-    '  --no-run       Do not offer to run the starter pipeline.\n' +
-    '  --run          Run the starter pipeline without asking (pairs with --json).\n' +
-    '  --yes, -y      Assume yes to every prompt.\n' +
-    '  --dir <path>   Target project root. Default: cwd.\n' +
-    '  --json         Non-interactive; declines every optional side effect\n' +
-    '                 (the run) unless --run is also given.\n\n' +
+    '  <template>       Starter pipeline to clone. Default: support-answer.\n' +
+    '                   Same names as `pipeline clone --list`.\n' +
+    '  --local          Skip the cloud entirely: no browser, no account, no\n' +
+    '                   network to ai-pipeline.dev.\n' +
+    '  --server <url>   Control plane to connect to. Default: api.ai-pipeline.dev.\n' +
+    '  --org <slug>     Organization to bind to. Omit and, on a brand-new\n' +
+    '                   account, your first one is created for you.\n' +
+    '  --project <slug> Project slug for the binding. Default: this folder.\n' +
+    '  --no-runner      Connect, but do not enrol this machine as a runner.\n' +
+    '  --no-plugin      Skip the Claude Code plugin install.\n' +
+    '  --no-ui          Do not start the local dashboard.\n' +
+    '  --no-run         Do not offer to run the starter pipeline.\n' +
+    '  --run            Run the starter pipeline without asking (pairs with --json).\n' +
+    '  --yes, -y        Assume yes to every prompt.\n' +
+    '  --dir <path>     Target project root. Default: cwd.\n' +
+    '  --json           Non-interactive: never opens a browser, and declines\n' +
+    '                   every optional side effect (the run) unless --run is\n' +
+    '                   also given. Connects only with PIPELINE_MACHINE_TOKEN.\n\n' +
     'Available templates:\n' +
     `${formatTemplateList()}\n`
   );
@@ -147,6 +198,13 @@ export interface UiStartResult {
   detail?: string;
 }
 
+/** What the cloud step reports back to the checklist. */
+export interface CloudConnectResult {
+  status: 'connected' | 'skipped' | 'failed';
+  /** Why, when the status is not `connected` — printed verbatim. */
+  detail?: string;
+}
+
 export interface InitDeps {
   cwd: string;
   env: Record<string, string | undefined>;
@@ -157,6 +215,12 @@ export interface InitDeps {
   claudeAvailable: () => boolean;
   claudeCli: ClaudeCliRunner;
   startUi: () => Promise<UiStartResult>;
+  /** Runs `pipeline cloud connect <args>` in-process. Defaults to the real
+   *  `runCloud` — init COMPOSES the connect command rather than reproducing
+   *  the auth ladder, exactly as it composes `runUi` and `runDrive`. There is
+   *  one browser flow, one device flow and one machine-credential exchange in
+   *  this package, and this is not a second set. */
+  cloudConnect: (args: string[]) => Promise<number>;
   /** In-process pipeline drive engine — defaults to the real runDrive(). */
   runDrive: (args: string[], deps: DriveDeps) => Promise<number>;
   /** Ask a yes/no question; resolves the answer. The real implementation
@@ -303,6 +367,21 @@ export const realInitDeps: InitDeps = {
   claudeAvailable: realClaudeAvailable,
   claudeCli: realClaudeCli,
   startUi: defaultStartUi,
+  // Lazy import, mirroring `cli.ts`'s own reason for lazily importing `cloud`:
+  // it pulls in the HTTP device-flow + loopback-server machinery, which a
+  // `--local` init must never load.
+  //
+  // In `--json` mode `cloud connect` prints its OWN result object to stdout,
+  // which would make `pipeline init --json` emit two JSON documents and break
+  // every `JSON.parse(stdout)` reading it. Init owns the single-object
+  // contract, so it swallows that one — connect's human-facing progress
+  // already goes to stderr under `--json` (its own `say()`), so nothing
+  // diagnostic is lost, and a failure still arrives as a non-zero exit code.
+  cloudConnect: async (args) => {
+    const { runCloud, realDeps } = await import('./cloud');
+    const quiet = args.includes('--json');
+    return runCloud(['connect', ...args], quiet ? { ...realDeps, out: () => {} } : realDeps);
+  },
   runDrive: (args, deps) => runDrive(args, deps),
   promptYesNo: defaultPromptYesNo,
 };
@@ -327,6 +406,63 @@ function installPlugin(deps: InitDeps): { status: PluginStatus; warning?: string
     status: 'failed',
     warning: `claude plugin install failed: ${(detail || 'no output').trim()}`,
   };
+}
+
+/** The env var that names a machine credential — the ONE rung of the auth
+ *  ladder that needs no browser and no TTY (`commands/cloud.ts`). */
+const MACHINE_TOKEN_ENV = 'PIPELINE_MACHINE_TOKEN';
+
+/** Where a connected run is visible. Resolved the same way `cloud connect`
+ *  resolves its own server (flag, then the env var, then the default), so the
+ *  line init prints can never name a different host than the one it just
+ *  bound the project to. Imported from `lib/cloud-config.ts` rather than
+ *  re-spelled, so there is one literal for this URL in the package. */
+function dashboardUrl(opts: InitOptions, env: Record<string, string | undefined>): string {
+  return (opts.server ?? env[SERVER_ENV] ?? DEFAULT_SERVER).replace(/\/+$/, '');
+}
+
+/**
+ * Whether the cloud step may run, and if not, why — as a sentence a user can
+ * act on. Pure, so the whole decision table is testable without a network.
+ *
+ * The rule that matters: `--json` NEVER opens a browser. `--json` is what CI,
+ * a bot and an agent use, and there is no human there to approve a consent
+ * screen — a browser flow would block until its five-minute timeout and then
+ * fail. With a machine credential the connect is silent by construction, so it
+ * proceeds; without one, the cloud step is skipped and the rest of init still
+ * runs (exit 0), because a local setup is a perfectly good outcome and not
+ * something CI should fail on.
+ */
+export function cloudStepDecision(
+  opts: InitOptions,
+  env: Record<string, string | undefined>,
+): { run: true } | { run: false; reason: string | null } {
+  // `--local` is an explicit opt-out; it gets no explanation line, exactly
+  // like --no-ui and --no-run.
+  if (opts.local) return { run: false, reason: null };
+  const machineToken = env[MACHINE_TOKEN_ENV]?.trim();
+  if (opts.json && !machineToken) {
+    return {
+      run: false,
+      reason: `--json cannot open a browser — set ${MACHINE_TOKEN_ENV} to connect non-interactively, or run without --json`,
+    };
+  }
+  return { run: true };
+}
+
+/** The `cloud connect` argv this init composes. Pure — the flag pass-through
+ *  is exactly the kind of thing that silently drops one flag in a refactor. */
+export function cloudConnectArgs(opts: InitOptions): string[] {
+  const args: string[] = [];
+  if (opts.server !== undefined) args.push('--server', opts.server);
+  if (opts.org !== undefined) args.push('--org', opts.org);
+  if (opts.project !== undefined) args.push('--project', opts.project);
+  // Runner enrolment is answered rather than asked: `init`'s whole promise is
+  // that the first run happens without further questions, and a machine that
+  // is not a runner cannot pick up cloud-dispatched work.
+  args.push(opts.noRunner ? '--no-runner' : '--runner');
+  if (opts.json) args.push('--json');
+  return args;
 }
 
 export type CloneStatus = 'cloned' | 'already-present' | 'failed';
@@ -436,6 +572,9 @@ async function runStarter(root: string, deps: InitDeps): Promise<RunOutcome> {
 
 interface JsonResult {
   ok: boolean;
+  /** 'connected' | 'skipped' | 'failed' — a script reads THIS rather than
+   *  grepping the warnings list to find out whether the cloud half happened. */
+  cloud?: CloudConnectResult['status'];
   plugin?: PluginStatus;
   template?: string;
   path?: string;
@@ -480,8 +619,42 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
     return 1;
   }
 
+  const cloudDecision = cloudStepDecision(parsed, deps.env);
+
   if (!parsed.json) {
-    deps.out('  Pipeline — local first. No account; nothing goes to ai-pipeline.dev.\n\n');
+    deps.out(
+      cloudDecision.run
+        ? '  Pipeline — connecting to ai-pipeline.dev. Your keys and your code stay here.\n\n'
+        : '  Pipeline — local only. No account; nothing goes to ai-pipeline.dev.\n\n',
+    );
+  }
+
+  // --- Step 0.5: the cloud. FIRST, and by default (the browser consent is the
+  // one thing that needs a human, so it should not wait behind a plugin
+  // install and a clone). A failure here is a WARNING, never fatal: everything
+  // below works unconnected, and an init that aborted on a declined consent
+  // screen would leave the user with nothing at all.
+  let cloud: CloudConnectResult = { status: 'skipped' };
+  if (cloudDecision.run) {
+    try {
+      const code = await deps.cloudConnect(cloudConnectArgs(parsed));
+      cloud =
+        code === 0
+          ? { status: 'connected' }
+          : { status: 'failed', detail: `cloud connect exited ${code}` };
+    } catch (e) {
+      cloud = { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
+    }
+    if (cloud.status === 'failed') {
+      warnings.push(`cloud: ${cloud.detail ?? 'connect failed'} — continuing locally`);
+      if (!parsed.json) {
+        line(deps, `⚠ Not connected — ${cloud.detail}. Continuing locally; re-run: pipeline cloud connect`);
+      }
+    }
+  } else if (cloudDecision.reason !== null) {
+    cloud = { status: 'skipped', detail: cloudDecision.reason };
+    warnings.push(`cloud: ${cloudDecision.reason}`);
+    if (!parsed.json) line(deps, `⚠ Not connected — ${cloudDecision.reason}.`);
   }
 
   // --- Step 1/2: claude on PATH, then the plugin install. A missing `claude`
@@ -608,12 +781,19 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
             ? 'Restart Claude Code to load the plugin.'
             : 'Next: open Claude Code here and type  /pipeline:design <your goal>';
       deps.out(`\n  ${nextLine}\n`);
+      // A connected run is visible on the account; say where. Only when a run
+      // actually happened — pointing someone at an empty dashboard is worse
+      // than saying nothing.
+      if (cloud.status === 'connected' && ran) {
+        deps.out(`  This run is on your dashboard: ${dashboardUrl(parsed, deps.env)}\n`);
+      }
     }
   }
 
   if (parsed.json) {
     const result: JsonResult = {
       ok: !runFailed,
+      cloud: cloud.status,
       plugin: pluginStatus,
       template: entry.name,
       path: relPath,

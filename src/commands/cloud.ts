@@ -1056,6 +1056,120 @@ async function fetchMe(deps: CloudDeps, server: string, token: string): Promise<
   return body;
 }
 
+/**
+ * A first org's NAME, derived from whatever identity the sign-in produced.
+ *
+ * Pure and separately tested because it is the one string in the auto-create
+ * path a user sees forever afterwards, and every input here is attacker-ish by
+ * default: an email local part can carry dots, plus-addressing, quoting and
+ * non-ASCII. The server derives the SLUG from this name (with its own
+ * collision fallbacks) and independently validates both, so this only has to
+ * produce something reasonable and in-range — never something clever.
+ *
+ * No email (the device grant can complete without one) falls back to a
+ * generic name rather than inventing an identity.
+ */
+export function defaultOrgName(email: string | undefined): string {
+  const local = (email ?? '').split('@')[0] ?? '';
+  // Strip plus-addressing, then anything that is not a letter, digit, space or
+  // hyphen — dots and underscores become spaces so `ada.lovelace` reads as a
+  // name rather than as a filename.
+  const cleaned = local
+    .split('+')[0]!
+    .replace(/[._]+/g, ' ')
+    .replace(/[^\p{L}\p{N} -]/gu, '')
+    .trim()
+    .replace(/\s+/g, ' ');
+  if (cleaned === '') return 'My workspace';
+  // The server's ceiling is 200; stay well inside it and leave room for the
+  // suffix rather than relying on the server to truncate.
+  return `${cleaned.slice(0, 100)}'s workspace`;
+}
+
+/**
+ * Create the caller's first organization (`POST /api/v1/orgs`).
+ *
+ * WHY THIS EXISTS. A brand-new account has no org, and every local command
+ * that touches the cloud needs one. Before this, `selectOrg` below sent that
+ * user to "create one in the web dashboard, then retry" — which is a dead end
+ * in the middle of a flow whose entire promise is that the dashboard is
+ * something you visit AFTER it works, not a prerequisite. The endpoint has
+ * existed on the control plane the whole time; nothing but the CLI's own
+ * refusal was in the way.
+ *
+ * Only ever called when the account owns NO org (see `resolveOrg`). It is not
+ * a general "make me an org" path: a user who already has one, or who passed
+ * `--org`, never reaches it.
+ */
+async function createFirstOrg(
+  deps: CloudDeps,
+  server: string,
+  token: string,
+  email: string | undefined,
+): Promise<MeOrg> {
+  const name = defaultOrgName(email);
+  const res = await doFetch(deps, `${server}/api/v1/orgs`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json',
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ name }),
+  });
+  if (res.status !== 201) {
+    // 403 is the one worth naming: `POST /api/v1/orgs` requires a USER
+    // principal, so a machine credential is refused there by construction.
+    // That path should never reach this function (the machine rung resolves
+    // its org from `--org` and never calls `/api/v1/me`), so if it does, say
+    // what to do rather than relaying an opaque status.
+    if (res.status === 403) {
+      throw new CloudError(
+        'this credential may not create an organization — create one in the dashboard, then re-run with --org <slug>',
+      );
+    }
+    const detail = (await errorCode(res)) ?? `HTTP ${res.status}`;
+    throw new CloudError(`could not create your first organization (${detail})`);
+  }
+  const body = (await res.json()) as { org?: { orgId?: string; slug?: string; name?: string; role?: string } };
+  const org = body?.org;
+  if (!org || typeof org.orgId !== 'string' || typeof org.slug !== 'string') {
+    throw new CloudError('the control plane created an organization but returned an unreadable response');
+  }
+  // The wire calls it `orgId`; every reader in this file calls it `id`.
+  return { id: org.orgId, slug: org.slug, name: org.name ?? name, role: org.role ?? 'owner' };
+}
+
+/**
+ * The org this connect acts in: the one the account already has, or a freshly
+ * created first one.
+ *
+ * Wraps the pure `selectOrg` rather than replacing it — the selection RULES
+ * (an explicit `--org` wins, then the server's own selection, then the single
+ * org) stay pure and independently tested; only the empty case reaches the
+ * network. An account with no org and an explicit `--org <slug>` is NOT
+ * auto-created: the user named a specific org, and silently creating a
+ * different one under a name they did not choose would be a worse answer than
+ * telling them it does not exist.
+ */
+async function resolveOrg(
+  deps: CloudDeps,
+  server: string,
+  token: string,
+  me: MeResponse,
+  orgFlag: string | undefined,
+  say: (s: string) => void,
+): Promise<MeOrg> {
+  if (me.orgs.length === 0 && orgFlag === undefined) {
+    const created = await createFirstOrg(deps, server, token, me.user?.email);
+    say(`Created your first organization: '${created.slug}'.\n`);
+    return created;
+  }
+  const org = selectOrg(me.orgs, orgFlag, me.selectedOrgId);
+  if ('error' in org) throw new CloudError(org.error);
+  return org;
+}
+
 /** Pick the org whose slug the binding will record. */
 export function selectOrg(
   orgs: MeOrg[],
@@ -1063,8 +1177,16 @@ export function selectOrg(
   selectedOrgId: string | null,
 ): MeOrg | { error: string } {
   if (orgs.length === 0) {
+    // Only reachable WITH an explicit `--org` now: without one, `resolveOrg`
+    // creates the first org rather than calling this. So the remedy named here
+    // is the one that fits that case — drop the flag and let it be created —
+    // rather than the old "go to the dashboard first", which is no longer the
+    // shortest path out of this state.
     return {
-      error: 'your account has no organizations yet — create one in the web dashboard, then retry',
+      error:
+        orgFlag === undefined
+          ? 'your account has no organizations yet'
+          : `your account has no organizations yet, so there is no '${orgFlag}' to join — re-run without --org and one will be created for you`,
     };
   }
   if (orgFlag) {
@@ -1486,10 +1608,10 @@ async function authenticateAsHuman(deps: CloudDeps, opts: ApiAuthOptions, server
     token = await obtainAndPersistToken(deps, server, opts, say, store, credPath, now);
   }
 
-  // --- Resolve the org slug from the identity endpoint (the only source).
+  // --- Resolve the org slug from the identity endpoint (the only source),
+  // creating a first org when the account has none (see `resolveOrg`).
   const me = await fetchMe(deps, server, token);
-  const org = selectOrg(me.orgs, opts.org, me.selectedOrgId);
-  if ('error' in org) throw new CloudError(org.error);
+  const org = await resolveOrg(deps, server, token, me, opts.org, say);
 
   // Enrich the stored credential with non-secret display fields (best-effort).
   const cred = store.servers[server];

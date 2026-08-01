@@ -44,7 +44,12 @@ import {
   type ServeHttpInit,
   type ServeHttpResponse,
 } from '../src/lib/department-serve';
-import { buildRegistrationRequest, ENGINES, parseDepartmentManifest } from '../src/lib/department-manifest';
+import {
+  buildRegistrationRequest,
+  enginesWithAgentEntrypoint,
+  ENGINES,
+  parseDepartmentManifest,
+} from '../src/lib/department-manifest';
 import type { ShellResult } from '../src/lib/runner-enrol';
 
 // ---------------------------------------------------------------------------
@@ -463,7 +468,7 @@ describe('serve — DoD box 1: a fresh clone becomes callable', () => {
     expect((payload['runner'] as Record<string, unknown>)['id']).toBe(RUNNER_ID);
     expect((payload['binding'] as Record<string, unknown>)['adapter']).toBe('pipeline-drive');
     expect(payload['supervisor']).toBe('installed');
-    expect(payload['url']).toBe('https://example.dev/departments/unity-review');
+    expect(payload['url']).toBe('https://api.example.dev/departments/unity-review');
     expect(w.err()).toContain('✓ Registered');
   });
 });
@@ -925,7 +930,7 @@ describe('serve — DoD box 4: ○ registered — not serving, never a bare onli
 
     expect(code).toBe(0);
     expect(w.out()).toContain('⏸ unity-review — waiting for an admin to approve');
-    expect(w.out()).toContain('https://example.dev/departments/unity-review');
+    expect(w.out()).toContain('https://api.example.dev/departments/unity-review');
     expect(w.out()).toContain("You'll be notified when it's approved.");
     expect(w.out()).not.toContain('● unity-review');
   });
@@ -1783,12 +1788,20 @@ describe('x44 — a refused adapter is a REGISTRY DRIFT, and is reported as one'
 // ---------------------------------------------------------------------------
 
 describe('department-serve pure helpers', () => {
-  test('appOriginFor strips only a leading api. label', () => {
-    expect(appOriginFor('https://api.ai-pipeline.dev')).toBe('https://ai-pipeline.dev');
+  test('the dashboard is SAME-ORIGIN with the API — the host is never rewritten', () => {
+    // It used to strip a leading `api.`, sending an admin to the apex. The apex
+    // is the MARKETING site, which has no /departments route — and because that
+    // site is a SPA too, the wrong link answered 200 with its own "page not
+    // found" instead of failing loudly. Verified against production.
+    expect(appOriginFor('https://api.ai-pipeline.dev')).toBe('https://api.ai-pipeline.dev');
     expect(appOriginFor('http://localhost:3000')).toBe('http://localhost:3000');
     expect(appOriginFor('https://pipeline.example.com')).toBe('https://pipeline.example.com');
     expect(departmentUrlFor('https://api.ai-pipeline.dev', 'unity-review')).toBe(
-      'https://ai-pipeline.dev/departments/unity-review',
+      'https://api.ai-pipeline.dev/departments/unity-review',
+    );
+    // A trailing slash on the configured server must not double up in the link.
+    expect(departmentUrlFor('https://api.ai-pipeline.dev/', 'ceo')).toBe(
+      'https://api.ai-pipeline.dev/departments/ceo',
     );
   });
 
@@ -2052,5 +2065,110 @@ describe('department-serve pure helpers', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.message).toContain('runtime.startIteration');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runtime.agent — the department's entry-point agent
+//
+// "The agent that receives every arriving message and answers it", named in
+// the manifest and defined INSIDE the department. Three properties matter and
+// each is pinned below: it reaches the engine as `--agent`, it never reaches
+// the control plane, and naming one that does not exist is caught by
+// `validate` rather than at the first message.
+// ---------------------------------------------------------------------------
+
+describe('runtime.agent', () => {
+  const AGENT_YAML = '  agent: front-desk\n';
+
+  test('claude-code binds it as --agent, ahead of the manifest own args', () => {
+    const { manifest, findings } = parseDepartmentManifest(
+      departmentYaml({
+        engine: 'claude-code',
+        extra: `${AGENT_YAML}  args:\n    - "--model"\n    - opus\n`,
+      }),
+    );
+    expect(findings.filter((f) => f.severity === 'error')).toEqual([]);
+    expect(manifest!.runtime.agent).toBe('front-desk');
+
+    const result = runtimeBindingFor(manifest!, { manifestDir: resolve('/dept') });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // FIRST, so an author's own `args` can still override it the way any
+    // repeated flag is overridden — last occurrence wins in the harness.
+    expect(result.binding.args).toEqual(['--agent', 'front-desk', '--model', 'opus']);
+    // And it survives the argv the runner is actually called with.
+    expect(buildBindArgs(DEPT_ID, result.binding).join(' ')).toContain('--arg --agent --arg front-desk');
+  });
+
+  test('an engine with an entry point of its own refuses the field instead of ignoring it', () => {
+    // `pipeline`'s entry point IS `startIteration`; accepting a second one and
+    // silently dropping it is the x32/x51 failure mode this rule exists for.
+    const { findings } = parseDepartmentManifest(departmentYaml({ engine: 'pipeline', extra: AGENT_YAML }));
+    const err = findings.find((f) => f.field === 'runtime.agent' && f.severity === 'error');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('runtime.startIteration');
+    expect(err!.message).toContain('claude-code');
+  });
+
+  test('the registry is the single source for the flag, the folder and the field', () => {
+    // Same shape as x32: one table, and no second list to drift from it. The
+    // ROW carries every fact — which engines take an agent, the flag `serve`
+    // passes, and the folder `validate` looks in — so turning a second engine
+    // on cannot leave one of the three behind.
+    expect(enginesWithAgentEntrypoint().map((e) => e.engine)).toEqual(['claude-code']);
+    for (const e of ENGINES) {
+      expect(e.entrypoint.field === 'agent').toBe(e.entrypoint.agent !== undefined);
+    }
+    const claude = ENGINES.find((e) => e.engine === 'claude-code')!;
+    expect(claude.entrypoint.agent).toEqual({ flag: '--agent', agentsDir: '.claude/agents' });
+  });
+
+  test('it never reaches the control plane', () => {
+    const { manifest } = parseDepartmentManifest(
+      departmentYaml({ engine: 'claude-code', extra: AGENT_YAML }),
+    );
+    const request = buildRegistrationRequest(manifest!) as unknown as Record<string, unknown>;
+    expect(request['runtime']).toBeUndefined();
+    expect(JSON.stringify(request)).not.toContain('front-desk');
+  });
+
+  test('validate refuses an agent this department does not define', () => {
+    const dir = departmentProject(departmentYaml({ engine: 'claude-code', extra: AGENT_YAML }));
+    let out = '';
+    const orig = process.stdout.write;
+    process.stdout.write = ((s: string) => ((out += s), true)) as typeof process.stdout.write;
+    let code: number;
+    try {
+      code = runDepartmentValidate(['--file', join(dir, 'department.yml')]);
+    } finally {
+      process.stdout.write = orig;
+    }
+    expect(code).toBe(1);
+    expect(out).toContain('runtime.agent');
+    expect(out).toContain("no agent 'front-desk' in this department");
+  });
+
+  test('validate accepts one defined in the department, by filename or by frontmatter name', () => {
+    for (const [file, body] of [
+      ['front-desk.md', '# Front desk\n'],
+      ['whatever.md', '---\nname: front-desk\n---\n\n# Front desk\n'],
+    ] as const) {
+      const dir = departmentProject(departmentYaml({ engine: 'claude-code', extra: AGENT_YAML }));
+      mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
+      writeFileSync(join(dir, '.claude', 'agents', file), body, 'utf8');
+
+      let out = '';
+      const orig = process.stdout.write;
+      process.stdout.write = ((s: string) => ((out += s), true)) as typeof process.stdout.write;
+      let code: number;
+      try {
+        code = runDepartmentValidate(['--file', join(dir, 'department.yml')]);
+      } finally {
+        process.stdout.write = orig;
+      }
+      expect(code).toBe(0);
+      expect(out).not.toContain('no agent');
+    }
   });
 });
