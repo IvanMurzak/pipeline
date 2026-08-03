@@ -50,7 +50,7 @@ afterEach(() => {
 
 interface World {
   project: string; // consumer project root (git repo, cwd during the run)
-  root: string; // pipeline root at <project>/.claude/pipeline/demo
+  root: string; // pipeline root at <project>/.pipelines/demo
   steps: string;
 }
 

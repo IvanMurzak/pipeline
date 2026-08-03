@@ -56,7 +56,7 @@ function invoke(args: string[]): { code: number; stdout: string; stderr: string 
 // ---------------------------------------------------------------------------
 
 describe('pipeline clone', () => {
-  test('copies the template tree into ./.claude/pipeline/<name>/', () => {
+  test('copies the template tree into ./.pipelines/<name>/', () => {
     const proj = tempProject();
     const { code, stdout } = invoke(['example-minimal', '--dir', proj]);
     expect(code).toBe(0);

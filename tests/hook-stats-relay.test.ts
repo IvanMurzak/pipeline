@@ -58,7 +58,7 @@ function runWindow(): { startedAt: string; endedAt: string; entry1: string; entr
   };
 }
 
-/** Build one fixture project tree: `.claude/pipeline/` (so findProjectRoot
+/** Build one fixture project tree: `.pipelines/` (so findProjectRoot
  *  resolves it), a `.stats/demo/runs.jsonl` with ONE tokens:null manager
  *  record, and a manager transcript whose fold yields nonzero tokens + one
  *  tool failure (exercises both the tokens rewrite and the failure-detail

@@ -43,7 +43,7 @@ function mkTmp(prefix: string): string {
 
 // ---------------------------------------------------------------------------
 // World scaffolding — a consumer project with one pipeline at
-// <project>/.claude/pipeline/demo/ (steps + scripts), driven with cwd swapped
+// <project>/.pipelines/demo/ (steps + scripts), driven with cwd swapped
 // to the project (invokeNext reads process.cwd() as the project root).
 // ---------------------------------------------------------------------------
 

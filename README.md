@@ -33,7 +33,7 @@ bun src/cli.ts clone <name> [--force] [--dir <path>] [--list] [--json]
 ```
 
 Copies a bundled, ready-made pipeline **template** into
-`./.claude/pipeline/<name>/` (relative to the current directory, or `--dir
+`./.pipelines/<name>/` (relative to the current directory, or `--dir
 <path>`) — the local-first onboarding entry point: install `@baizor/pipeline`,
 then `pipeline clone <name>` drops a working pipeline you can run and adapt.
 
@@ -41,7 +41,7 @@ Templates ship **inside** this package (`apps/pipeline-cli/templates/<name>/`)
 and are resolved relative to the CLI's own source, so `clone` behaves the same
 from a plugin checkout and an npm/bun install. `--list` shows what's available;
 an unknown name errors and lists the choices. The command **refuses to
-overwrite** an existing `./.claude/pipeline/<name>/` unless `--force` is passed
+overwrite** an existing `./.pipelines/<name>/` unless `--force` is passed
 (which replaces the folder entirely — no stale files survive).
 
 Exit codes: `0` cloned (or `--list`) · `1` target exists without `--force`, or
@@ -113,7 +113,7 @@ control flow (no agent spawns), ideal for automation and testing.
 
 ```ts
 import { computePlan } from '@baizor/pipeline/plan';
-const plan = computePlan('/abs/path/to/.claude/pipeline/my-pipeline');
+const plan = computePlan('/abs/path/to/.pipelines/my-pipeline');
 ```
 
 ### `match` — find the best-matching pipeline
@@ -135,7 +135,7 @@ bun src/cli.ts event <type|write-liveness|clear-liveness|register-mirror-binding
 ```
 
 The UI event writer. Appends one event envelope to
-`<project>/.claude/pipeline/.runtime/events.jsonl` (or writes the per-run liveness
+`<project>/.pipelines/.runtime/events.jsonl` (or writes the per-run liveness
 lockfile / mirror binding for the subcommands). `/pipeline:run` (lifecycle + liveness
 + mirror binding) and `pipeline-manager` (per-iteration events) call it. Always exits
 0 (best-effort — never blocks the caller).

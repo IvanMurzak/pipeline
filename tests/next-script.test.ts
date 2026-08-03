@@ -180,7 +180,7 @@ test('sequential: a synthesized off-plan step defaults to type agent', () => {
   const plan = computePlan(scaffoldScriptSeq());
   const d = driver(plan);
   d.call(null);
-  const off = '/somewhere/.claude/pipeline/demo/steps/99-extra.md';
+  const off = '/somewhere/.pipelines/demo/steps/99-extra.md';
   const a = d.call({ kind: 'step', outcome: 'completed', next_iteration: off });
   if (a.action !== 'run-step') throw 0;
   expect(a.steps[0].path).toBe(off);
@@ -320,7 +320,7 @@ test('fallback: halt-shaped record + opts.scriptFallback re-dispatches the SAME 
 
   // The command executed the script in-process; it failed (class crash),
   // policy is 'agent' → it calls back with the halt-shaped record + the opt.
-  const failureRecord = '/proj/.claude/pipeline/demo/.runtime/r1/failures/wait-1.json';
+  const failureRecord = '/proj/.pipelines/demo/.runtime/r1/failures/wait-1.json';
   a = d.call(
     { kind: 'step', outcome: 'halted', halt_reason: 'script step wait failed (crash): boom' },
     { scriptFallback: { failure_record: failureRecord } },
@@ -409,7 +409,7 @@ test('fallback: crash-resume re-emits the PENDING agent fallback (same index + f
   const d = driver(plan);
   d.call(null); // step 1 (index 1)
   d.call({ kind: 'step', outcome: 'completed', next_iteration: plan.steps[1].path }); // script 'wait' (index 2)
-  const failureRecord = '/proj/.claude/pipeline/demo/.runtime/r1/failures/wait-1.json';
+  const failureRecord = '/proj/.pipelines/demo/.runtime/r1/failures/wait-1.json';
   let a = d.call(
     { kind: 'step', outcome: 'halted', halt_reason: 'script step wait failed (crash): boom' },
     { scriptFallback: { failure_record: failureRecord } },

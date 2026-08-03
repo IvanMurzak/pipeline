@@ -145,7 +145,7 @@ function driver(plan: Plan, feedbackCount = 0, baseOpts: Partial<NextOpts> = {})
 const EXT_OPTS: Partial<NextOpts> = {
   runId: 'run123abc456',
   projectRoot: '/proj/root',
-  pipelineRoot: '/proj/root/.claude/pipeline/demo',
+  pipelineRoot: '/proj/root/.pipelines/demo',
 };
 
 /** External driver: `driver` pre-loaded with the EXT_OPTS provision/teardown
@@ -237,7 +237,7 @@ test('sequential: an off-plan next_iteration path still dispatches (synthetic st
   d.call(null);
   // The step points Next at a path not enumerated in the plan (e.g. an unusual
   // nested file). The engine synthesizes a step rather than completing.
-  const off = '/somewhere/.claude/pipeline/demo/steps/99-extra.md';
+  const off = '/somewhere/.pipelines/demo/steps/99-extra.md';
   const a = d.call({ kind: 'step', outcome: 'completed', next_iteration: off });
   expect(a.action).toBe('run-step');
   if (a.action !== 'run-step') throw 0;
@@ -561,7 +561,7 @@ test('external sequential init: first action is provision-worktree (not run-step
   expect(a.name).toBe(EXT_OPTS.runId);
   expect(a.base_branch).toBe('main');
   expect(a.submodules).toEqual(['AppX', 'McpY']);
-  expect(a.hook_dir).toBe('.claude/pipeline/.hooks');
+  expect(a.hook_dir).toBe('.pipelines/.hooks');
   expect(a.project_root).toBe(EXT_OPTS.projectRoot);
   expect(a.pipeline_root).toBe(EXT_OPTS.pipelineRoot);
   // No step has been dispatched yet.
@@ -893,7 +893,7 @@ test('finalize success: completed → finalize-worktree → teardown → done (j
   expect(a.outcome).toBe('completed');
   expect(a.run_id).toBe(EXT_OPTS.runId);
   expect(a.worktree_path).toBe('/proj/root/.claude/worktrees/run123abc456');
-  expect(a.hook_dir).toBe('.claude/pipeline/.hooks');
+  expect(a.hook_dir).toBe('.pipelines/.hooks');
   expect(d.state?.phase).toBe('await-finalize');
   // finalize succeeds → teardown (outcome still completed) → done.
   a = d.call(FINALIZED);
@@ -1264,7 +1264,7 @@ test('pipeline next CLI (--manual-hooks): external run drives provision → step
   expect(r.json.action).toBe('provision-worktree');
   expect(r.json.run_id).toBe(run);
   expect(r.json.name).toBe(run);
-  expect(r.json.hook_dir).toBe('.claude/pipeline/.hooks');
+  expect(r.json.hook_dir).toBe('.pipelines/.hooks');
   expect(existsSync(join(root, '.runtime', run, 'next.json'))).toBe(true);
 
   // record provisioned → run-step carrying the informational worktree fields

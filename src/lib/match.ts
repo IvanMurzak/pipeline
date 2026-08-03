@@ -1,6 +1,6 @@
 // match — deterministic pipeline matcher (faithful port of apps/pipeline-find/match.py).
 //
-// Scores each PIPELINE.md manifest in a consumer project's `.claude/pipeline/`
+// Scores each PIPELINE.md manifest in a consumer project's `.pipelines/`
 // tree against a free-form task description (or a GitHub issue's title+body).
 //
 // Matching algorithm:

@@ -74,7 +74,7 @@ test('resolveSupervisorScript: null when not found', () => {
   expect(resolveSupervisorScript(root, root)).toBeNull();
 });
 
-test('hasPipelineDir: detects .claude/pipeline at cwd or an ancestor', () => {
+test('hasPipelineDir: detects .pipelines at cwd or an ancestor', () => {
   const root = mkdtempSync(join(tmpdir(), 'ui-pipe-'));
   created.push(root);
   mkdirSync(join(root, '.claude', 'pipeline'), { recursive: true });

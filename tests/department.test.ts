@@ -272,7 +272,7 @@ describe('pipeline department new --from-pipeline', () => {
     expect(manifest).not.toBeNull();
     expect(manifest!.description).toContain('prioritized list');
     expect(manifest!.runtime.engine).toBe('pipeline');
-    expect(manifest!.runtime.pipelineRoot).toBe('.claude/pipeline/unity-review');
+    expect(manifest!.runtime.pipelineRoot).toBe('.pipelines/unity-review');
     expect(manifest!.runtime.startIteration).toBe('steps/01-scan.md');
     // A two-field runtime spec (05 §3): pipelineRoot + startIteration only —
     // no command/args/workingDirectory ever invented.
@@ -346,7 +346,7 @@ describe('pipeline department new --from-pipeline', () => {
     expect(manifest!.name).toBe('my-dept');
     expect(manifest!.runtime.engine).toBe('pipeline');
     // pipelineRoot is relative to THIS manifest's own (nested) directory.
-    expect(manifest!.runtime.pipelineRoot).toBe('../.claude/pipeline/unity-review');
+    expect(manifest!.runtime.pipelineRoot).toBe('../.pipelines/unity-review');
   });
 
   test('a conflicting explicit --engine is a usage error (exit 2), nothing written', () => {
@@ -583,7 +583,7 @@ skills:
     description: Does the thing, thoroughly and reliably, every time.
 runtime:
   engine: pipeline
-  pipelineRoot: .claude/pipeline/unity-review
+  pipelineRoot: .pipelines/unity-review
   startIteration: steps/01-scan.md
 communication:
   acceptsMidTaskInput: true
@@ -716,7 +716,7 @@ skills:
     description: Does the thing, thoroughly and reliably, every time.
 runtime:
   engine: pipeline
-  pipelineRoot: .claude/pipeline/does-not-exist
+  pipelineRoot: .pipelines/does-not-exist
 `,
     );
     const { code, stdout } = validateCmd(['--file', file]);
@@ -739,7 +739,7 @@ skills:
     description: Does the thing, thoroughly and reliably, every time.
 runtime:
   engine: pipeline
-  pipelineRoot: .claude/pipeline/unity-review
+  pipelineRoot: .pipelines/unity-review
   startIteration: steps/01-scan.md
 `,
     );
@@ -760,7 +760,7 @@ skills:
     description: Does the thing, thoroughly and reliably, every time.
 runtime:
   engine: pipeline
-  pipelineRoot: .claude/pipeline/unity-review
+  pipelineRoot: .pipelines/unity-review
   startIteration: steps/99-nope.md
 `,
     );
@@ -852,7 +852,7 @@ function pipelineDepartment(omit?: 'pipelineRoot' | 'startIteration'): string {
     '',
     'runtime:',
     '  engine: pipeline',
-    ...(omit === 'pipelineRoot' ? [] : ['  pipelineRoot: .claude/pipeline/review']),
+    ...(omit === 'pipelineRoot' ? [] : ['  pipelineRoot: .pipelines/review']),
     ...(omit === 'startIteration' ? [] : ['  startIteration: steps/01-plan.md']),
     '',
   ];

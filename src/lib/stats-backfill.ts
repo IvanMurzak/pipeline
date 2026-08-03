@@ -218,8 +218,8 @@ function foldHeadlessStyle(runtimeDir: string, homeOverride: string | undefined)
 }
 
 /** Walk up from `start` (an arbitrary cwd, or a pipeline root like
- *  `<project>/.claude/pipeline/<name>`) to the first ancestor containing
- *  `.claude/pipeline` — the projectRoot `backfillProject` expects. The ONE
+ *  `<project>/.pipelines/<name>`) to the first ancestor containing
+ *  `.pipelines` — the projectRoot `backfillProject` expects. The ONE
  *  shared walk every trigger uses to derive its argument (the relay from the
  *  hook payload's cwd, the run-init kick from `--root`). Null when no such
  *  ancestor exists.

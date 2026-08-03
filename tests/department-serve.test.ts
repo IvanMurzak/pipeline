@@ -75,7 +75,7 @@ const PIPELINE_MANIFEST = `# Review\n\n## End State\nA reviewed Unity project.\n
 function departmentYaml(overrides: { engine?: string; extra?: string } = {}): string {
   const engine = overrides.engine ?? 'pipeline';
   const runtimeExtra =
-    engine === 'pipeline' ? '  pipelineRoot: .claude/pipeline/review\n  startIteration: steps/01-plan.md\n' : '';
+    engine === 'pipeline' ? '  pipelineRoot: .pipelines/review\n  startIteration: steps/01-plan.md\n' : '';
   return (
     'apiVersion: department.ai-pipeline.dev/v1\n' +
     'name: unity-review\n' +
@@ -402,7 +402,7 @@ describe('serve — DoD box 1: a fresh clone becomes callable', () => {
     expect(out).toContain('Callable now:  "ask the unity-review department to …"');
 
     // DoD box 5 — nothing written inside the department folder, and in
-    // particular no `.claude/pipeline/cloud.json` (which would pin a clonable
+    // particular no `.pipelines/cloud.json` (which would pin a clonable
     // repo to one org and one server).
     expect(listFilesRel(dir)).toEqual(before);
     expect(existsSync(join(dir, '.claude', 'pipeline', 'cloud.json'))).toBe(false);
@@ -499,7 +499,7 @@ describe('serve — step 6 shells out to `pipeline-runner bind` (never writes de
     };
     // Absolute: the supervisor's working directory is its own, not the
     // department's, so a repo-relative root would resolve elsewhere.
-    expect(spec.pipelineDrive.pipelineRoot).toBe(resolve(dir, '.claude/pipeline/review'));
+    expect(spec.pipelineDrive.pipelineRoot).toBe(resolve(dir, '.pipelines/review'));
     // Root-RELATIVE: `--start` is matched against the plan's own step paths.
     expect(spec.pipelineDrive.startIteration).toBe('steps/01-plan.md');
     expect(bind.args[bind.args.indexOf('--cwd') + 1]).toBe(dir);
@@ -2059,7 +2059,7 @@ describe('department-serve pure helpers', () => {
 
   test('engine: pipeline without startIteration is refused — the store would drop the spec', () => {
     const { manifest } = parseDepartmentManifest(
-      'name: d\ndescription: x\nskills:\n  - id: s\n    name: S\n    description: y\nruntime:\n  engine: pipeline\n  pipelineRoot: .claude/pipeline/review\n',
+      'name: d\ndescription: x\nskills:\n  - id: s\n    name: S\n    description: y\nruntime:\n  engine: pipeline\n  pipelineRoot: .pipelines/review\n',
     );
     const result = runtimeBindingFor(manifest!, { manifestDir: '/dept' });
     expect(result.ok).toBe(false);

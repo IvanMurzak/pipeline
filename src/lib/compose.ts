@@ -98,10 +98,10 @@ export const realComposeFs: ComposeFs = {
   },
 };
 
-/** Nearest ancestor that IS the canonical `<project>/.claude/pipeline` dir
+/** Nearest ancestor that IS the canonical `<project>/.pipelines` dir
  *  (same rule as lib/stats.ts statsLocation) — used as the by-name resolution
  *  base so nested pipelines can reference top-level ones. Null when the
- *  pipeline lives outside a `.claude/pipeline` tree (tests, embedded use). */
+ *  pipeline lives outside a `.pipelines` tree (tests, embedded use). */
 function findPipelinesRoot(fromRoot: string): string | null {
   let dir = fromRoot;
   while (true) {
@@ -125,8 +125,8 @@ export interface ResolvedPipelineRef {
  *   1. the referencing pipeline root itself   — child pipelines (`targets/x`)
  *      and explicit relative refs (`../sibling`);
  *   2. its parent directory                   — sibling pipelines by name
- *      (the common flat `.claude/pipeline/<name>` layout);
- *   3. the enclosing `.claude/pipeline` dir   — top-level pipelines by
+ *      (the common flat `.pipelines/<name>` layout);
+ *   3. the enclosing `.pipelines` dir   — top-level pipelines by
  *      name/path from anywhere in a nested (family-target) tree.
  */
 export function resolvePipelineRef(

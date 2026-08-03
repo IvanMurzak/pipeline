@@ -47,7 +47,7 @@ afterEach(() => {
   delete process.env.PIPELINE_STATS_RUNNER;
 });
 
-/** A canonical consumer layout: <project>/.claude/pipeline/<rel>. */
+/** A canonical consumer layout: <project>/.pipelines/<rel>. */
 function mkPipeline(rel: string): string {
   const root = join(sandbox, '.claude', 'pipeline', ...rel.split('/'));
   mkdirSync(root, { recursive: true });
@@ -67,7 +67,7 @@ describe('statsEnabled', () => {
 });
 
 describe('statsLocation', () => {
-  test('resolves the shared .claude/pipeline/.stats base + rel path', () => {
+  test('resolves the shared .pipelines/.stats base + rel path', () => {
     const root = mkPipeline('workflows/implement-task');
     const loc = statsLocation(root);
     expect(loc.base).toBe(join(sandbox, '.claude', 'pipeline', '.stats'));

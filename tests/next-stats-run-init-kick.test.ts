@@ -27,7 +27,7 @@ afterEach(() => {
   }
 });
 
-/** Canonical layout: `<projectRoot>/.claude/pipeline/demo` is the ACTIVE
+/** Canonical layout: `<projectRoot>/.pipelines/demo` is the ACTIVE
  *  pipeline (`--root` for `pipeline next`); a SEPARATE `other` pipeline under
  *  the same project already has a stale tokens:null manager record with a
  *  matching transcript on disk — exactly what the run-init kick should pick

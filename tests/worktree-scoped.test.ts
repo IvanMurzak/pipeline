@@ -100,7 +100,7 @@ function scaffold(opts: { baseBranch?: string } = {}): Fixture {
   ident(project); // sandbox identity + host-hook isolation (worktrees inherit)
   writeFileSync(
     join(project, '.gitignore'),
-    ['.claude/worktrees/', '.claude/pipeline/.runtime/', '.claude/pipeline/.stats/', ''].join('\n'),
+    ['.claude/worktrees/', '.pipelines/.runtime/', '.pipelines/.stats/', ''].join('\n'),
   );
   const pipelineRoot = join(project, '.claude', 'pipeline', 'demo');
   mkdirSync(join(pipelineRoot, 'steps'), { recursive: true });
@@ -123,7 +123,7 @@ function scaffold(opts: { baseBranch?: string } = {}): Fixture {
   // Branch with an INVALID pipeline definition (no iteration files at all —
   // the plan error the sequential mode lints unconditionally).
   git(project, 'checkout', '-q', '-b', 'broken', 'main');
-  git(project, 'rm', '-q', '-r', '.claude/pipeline/demo/steps');
+  git(project, 'rm', '-q', '-r', '.pipelines/demo/steps');
   git(project, 'commit', '-q', '-m', 'broken pipeline');
   git(project, 'checkout', '-q', 'main');
   return { project, home, pipelineRoot };
@@ -293,7 +293,7 @@ test('F5: branch-divergent pipeline — run executes the BRANCH definition from 
 
     // The worktree was torn down; the run branch carries the finalize commit.
     expect(existsSync(wt)).toBe(false);
-    const finalized = git(root, 'show', `run-${runId}:.claude/pipeline/demo/steps/01-step.md`);
+    const finalized = git(root, 'show', `run-${runId}:.pipelines/demo/steps/01-step.md`);
     expect(finalized).toContain('BRANCH VERSION');
     expect(finalized).toContain('IMPROVED-BY-RUN');
     // The finalize commit contains ONLY the improver edit — run artifacts
@@ -302,7 +302,7 @@ test('F5: branch-divergent pipeline — run executes the BRANCH definition from 
       .trim()
       .split('\n')
       .filter(Boolean);
-    expect(names).toEqual(['.claude/pipeline/demo/steps/01-step.md']);
+    expect(names).toEqual(['.pipelines/demo/steps/01-step.md']);
 
     // Teardown survival: next.json remains under the MAIN root, terminal.
     const st2 = JSON.parse(readFileSync(join(mainRoot, '.runtime', runId, 'next.json'), 'utf8'));

@@ -535,7 +535,7 @@ test('drive: error envelope + no record → synthesized halt names the claude er
 }, 30000);
 
 test('drive: envelope usage enriches the finished run\'s .stats tokens (cost included)', () => {
-  // Scaffold under a real <project>/.claude/pipeline/ ancestor so the stats
+  // Scaffold under a real <project>/.pipelines/ ancestor so the stats
   // tree lands INSIDE the sandbox (statsLocation walks up to that anchor).
   const base = mkdtempSync(join(tmpdir(), 'drive-stats-'));
   created.push(base);
@@ -1440,7 +1440,7 @@ test('drive: a DENIED record-file write is distinguishable from "executor produc
 // --- e7 DEFECT-3: awaiting_input journaling + resumed re-entry tag ---------------
 
 /** Read the drive sandbox's journal (cwd = pipeline root, no enclosing git →
- *  events land at <root>/.claude/pipeline/.runtime/events.jsonl). */
+ *  events land at <root>/.pipelines/.runtime/events.jsonl). */
 function journalEvents(root: string): any[] {
   const p = join(root, '.claude', 'pipeline', '.runtime', 'events.jsonl');
   if (!existsSync(p)) return [];

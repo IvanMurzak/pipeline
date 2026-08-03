@@ -1,7 +1,7 @@
 // Pipeline UI — event writer (TypeScript port of apps/pipeline-ui/writer.py).
 //
 // Appends one JSON event to
-//     <project-root>/.claude/pipeline/.runtime/events.jsonl
+//     <project-root>/.pipelines/.runtime/events.jsonl
 //
 // Also (best-effort, non-blocking) pings the local UI daemon's /api/register
 // endpoint so newly-touched projects show up in the project picker. If the
@@ -774,7 +774,7 @@ function resolveRootForSubcommand(argv: string[]): SubcommandRoot {
 // ---------------------------------------------------------------------------
 
 /** Write a per-run liveness lockfile:
- *  <project>/.claude/pipeline/.runtime/runs/<run_id>.alive = {pid, run_id, started_at}.
+ *  <project>/.pipelines/.runtime/runs/<run_id>.alive = {pid, run_id, started_at}.
  *  Requires run_id + integer pid; skips (returns 0) otherwise. Faithful port of
  *  writer.py:_write_liveness. */
 export function writeLiveness(argv: string[]): number {

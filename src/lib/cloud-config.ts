@@ -2,7 +2,7 @@
 //
 // TWO stores, deliberately separate (the load-bearing security split of T1-16):
 //
-//  1. The project binding — `<cwd>/.claude/pipeline/cloud.json`. Holds ONLY
+//  1. The project binding — `<cwd>/.pipelines/cloud.json`. Holds ONLY
 //     non-secret slugs/URLs (control-plane base URL, org slug, project slug).
 //     Safe to commit to the consumer's repo. NEVER a token/cookie/device_code.
 //
@@ -130,7 +130,7 @@ export interface CredentialStore {
   servers: Record<string, StoredCredential>;
 }
 
-/** Non-secret — safe to commit. Written to `<cwd>/.claude/pipeline/cloud.json`. */
+/** Non-secret — safe to commit. Written to `<cwd>/.pipelines/cloud.json`. */
 export interface CloudBinding {
   /** Control-plane API base URL. */
   server: string;

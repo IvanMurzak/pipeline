@@ -309,7 +309,7 @@ test('external full run: terminal step → destroy hook runs in-process → done
     const createdEv = events.find((e) => e.type === 'worktree.created');
     expect(createdEv.data.ok).toBe(true);
     expect(createdEv.data.worktree_path).toBe(join(root, '.claude', 'worktrees', runId));
-    expect(createdEv.data.hook_dir).toBe('.claude/pipeline/.hooks');
+    expect(createdEv.data.hook_dir).toBe('.pipelines/.hooks');
 
     const started = events.find((e) => e.type === 'iteration.started');
     expect(started.data.index).toBe(1);
@@ -415,7 +415,7 @@ test('--manual-hooks: raw provision-worktree action printed (legacy parity), hoo
     expect(r.json.run_id).toBe(runId);
     expect(r.json.name).toBe(runId);
     expect(r.json.base_branch).toBe('main');
-    expect(r.json.hook_dir).toBe('.claude/pipeline/.hooks');
+    expect(r.json.hook_dir).toBe('.pipelines/.hooks');
     expect(existsSync(join(root, 'create-env-dump.json'))).toBe(false); // hook untouched
     expect(readEvents(root).some((e) => e.type.startsWith('worktree.'))).toBe(false);
 

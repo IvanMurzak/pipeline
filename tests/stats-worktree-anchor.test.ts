@@ -9,7 +9,7 @@
 // `pipeline stats`) resolves a project through the worktree→main mapping and
 // so only ever looked in the main checkout. Verified end to end before the
 // fix: `pipeline next` from inside a worktree wrote
-// `<worktree>/.claude/pipeline/.stats/demo/runs/<id>.jsonl` and the main tree
+// `<worktree>/.pipelines/.stats/demo/runs/<id>.jsonl` and the main tree
 // got nothing.
 //
 // This is the same rule the CLI already applies to runs it orchestrates

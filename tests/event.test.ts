@@ -245,7 +245,7 @@ describe('golden — additive worktree.* event types (no emitter change)', () =>
           'env_file=/abs/wt/abc123def456/.worktree.env',
           'port_base=5100',
           'ok=true',
-          'hook_dir=/abs/.claude/pipeline/.hooks',
+          'hook_dir=/abs/.pipelines/.hooks',
         ]),
       repo,
       controlledEnv(home),
@@ -272,7 +272,7 @@ describe('golden — additive worktree.* event types (no emitter change)', () =>
       env_file: '/abs/wt/abc123def456/.worktree.env',
       port_base: 5100,
       ok: true,
-      hook_dir: '/abs/.claude/pipeline/.hooks',
+      hook_dir: '/abs/.pipelines/.hooks',
     });
   });
 

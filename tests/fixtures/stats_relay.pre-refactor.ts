@@ -48,7 +48,7 @@ function readStdin(): string {
   }
 }
 
-/** Walk up from `start` to the first dir containing `.claude/pipeline`. */
+/** Walk up from `start` to the first dir containing `.pipelines`. */
 function findProjectRoot(start: string): string | null {
   let dir = start;
   for (let i = 0; i < 12; i++) {

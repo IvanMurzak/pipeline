@@ -45,7 +45,7 @@ function mkTmp(prefix: string): string {
 
 // ---------------------------------------------------------------------------
 // World scaffolding (the script-exec-integration harness): a consumer project
-// with one pipeline at <project>/.claude/pipeline/demo/, driven with cwd
+// with one pipeline at <project>/.pipelines/demo/, driven with cwd
 // swapped to the project. The rendered slug is therefore 'demo'.
 // ---------------------------------------------------------------------------
 

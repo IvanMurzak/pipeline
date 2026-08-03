@@ -108,7 +108,7 @@ function driver(plan: ReturnType<typeof computePlan>, baseOpts: Partial<NextOpts
   };
 }
 
-const OFF = '/somewhere/.claude/pipeline/other/steps/99-extra.md';
+const OFF = '/somewhere/.pipelines/other/steps/99-extra.md';
 
 function expectRunStep(a: NextAction): Extract<NextAction, { action: 'run-step' }> {
   expect(a.action).toBe('run-step');

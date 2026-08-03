@@ -54,12 +54,12 @@ process.exit(3);
 
 interface World {
   project: string; // the consumer project root (git repo, cwd during the run)
-  root: string; // the pipeline root, under <project>/.claude/pipeline/demo
+  root: string; // the pipeline root, under <project>/.pipelines/demo
   steps: string;
   scripts: string;
 }
 
-/** A consumer project holding one pipeline at <project>/.claude/pipeline/demo
+/** A consumer project holding one pipeline at <project>/.pipelines/demo
  *  (so statsLocation resolves the .stats tree inside the sandbox). */
 function mkWorld(manifest = '# P\n\n## End State\nx\n'): World {
   const project = mkdtempSync(join(tmpdir(), 'drivescript-'));

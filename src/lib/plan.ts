@@ -139,7 +139,7 @@ export interface Plan {
   /**
    * Directory of conventionally-named worktree hook scripts for
    * `isolation: external` runs. From the optional `worktree_hook_dir`
-   * frontmatter key; defaults to `.claude/pipeline/.hooks`.
+   * frontmatter key; defaults to `.pipelines/.hooks`.
    */
   worktree_hook_dir: string;
   /**
@@ -930,7 +930,7 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
   let manifestModel: string | null = null;
   let manifestEffort: string | null = null;
   let manifestBody = '';
-  let worktreeHookDir = '.claude/pipeline/.hooks';
+  let worktreeHookDir = '.pipelines/.hooks';
   let submodules: string[] = [];
   let baseBranch = 'main';
   let finalize = false;
@@ -1008,7 +1008,7 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
         );
     }
 
-    // Optional `worktree_hook_dir` override (string; default `.claude/pipeline/.hooks`).
+    // Optional `worktree_hook_dir` override (string; default `.pipelines/.hooks`).
     if (typeof fields.worktree_hook_dir === 'string' && fields.worktree_hook_dir.trim())
       worktreeHookDir = fields.worktree_hook_dir.trim();
 
@@ -1231,7 +1231,7 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
 
       // The `pipeline:` reference is REQUIRED; it must resolve to a pipeline
       // root (a dir holding PIPELINE.md) — see compose.ts for the candidate
-      // bases (own root / parent dir / enclosing .claude/pipeline).
+      // bases (own root / parent dir / enclosing .pipelines).
       const ref =
         typeof fields.pipeline === 'string' && fields.pipeline.trim()
           ? fields.pipeline.trim()

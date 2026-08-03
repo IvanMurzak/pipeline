@@ -289,7 +289,7 @@ describe('pipeline init — happy path', () => {
     const out = h.stdout();
     expect(out).toContain('✓ Claude Code found');
     expect(out).toContain('✓ Plugin installed');
-    expect(out).toContain('✓ Starter pipeline cloned   .claude/pipeline/support-answer');
+    expect(out).toContain('✓ Starter pipeline cloned   .pipelines/support-answer');
     expect(out).not.toContain('(already present)');
     expect(out).not.toContain('Dashboard'); // plugin-thin phase 1: no longer part of onboarding
     expect(out).toContain('Run it now? [Y/n] y');
@@ -344,7 +344,7 @@ describe('pipeline init — happy path', () => {
     const out = h2.stdout();
     expect(out).toContain('✓ Claude Code found');
     expect(out).toContain('✓ Plugin installed');
-    expect(out).toContain('✓ Starter pipeline cloned   .claude/pipeline/support-answer (already present)');
+    expect(out).toContain('✓ Starter pipeline cloned   .pipelines/support-answer (already present)');
     expect(out).toContain('▶ support-answer'); // re-offered and ran again
     expect(out).toContain('✓ Complete');
   });
@@ -371,7 +371,7 @@ describe('pipeline init --json', () => {
       cloud: 'connected',
       plugin: 'installed',
       template: 'support-answer',
-      path: '.claude/pipeline/support-answer',
+      path: '.pipelines/support-answer',
       ran: false,
     });
   });
@@ -389,7 +389,7 @@ describe('pipeline init --json', () => {
       cloud: 'connected',
       plugin: 'installed',
       template: 'support-answer',
-      path: '.claude/pipeline/support-answer',
+      path: '.pipelines/support-answer',
       ran: true,
       runOk: true,
     });
@@ -502,7 +502,7 @@ describe('failure modes (03-pipeline-init.md §4)', () => {
     const h = harness();
     const code = await runInit(['--dir', proj, '--no-run'], h.deps);
     expect(code).toBe(0);
-    expect(h.stdout()).toContain('✓ Starter pipeline cloned   .claude/pipeline/support-answer (already present)');
+    expect(h.stdout()).toContain('✓ Starter pipeline cloned   .pipelines/support-answer (already present)');
   });
 
   test('starter run fails: reports the failing step + its output, exit 1', async () => {
@@ -560,7 +560,7 @@ describe('flag composition', () => {
     const code = await runInit(['ship-feature', '--dir', proj, '--no-run'], h.deps);
     expect(code).toBe(0);
     expect(existsSync(join(proj, '.claude', 'pipeline', 'ship-feature', 'PIPELINE.md'))).toBe(true);
-    expect(h.stdout()).toContain('.claude/pipeline/ship-feature');
+    expect(h.stdout()).toContain('.pipelines/ship-feature');
   });
 });
 

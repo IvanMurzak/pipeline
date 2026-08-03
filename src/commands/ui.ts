@@ -110,7 +110,7 @@ export function resolveSupervisorScript(
   return null;
 }
 
-/** True when `.claude/pipeline` exists at `start` or any ancestor — i.e. the cwd
+/** True when `.pipelines` exists at `start` or any ancestor — i.e. the cwd
  *  is inside a project that uses the pipeline plugin. */
 export function hasPipelineDir(start: string): boolean {
   let cur = resolve(start);
@@ -387,7 +387,7 @@ export async function runUi(args: string[]): Promise<number> {
     process.stdout.write(`▶ Pipeline UI${restarted ? ' (restarted)' : ''}:  ${url}\n`);
     if (!inPipelineProject) {
       process.stdout.write(
-        '  (this project has no .claude/pipeline yet — nothing will appear until you run /pipeline:design or /pipeline:run)\n',
+        '  (this project has no .pipelines yet — nothing will appear until you run /pipeline:design or /pipeline:run)\n',
       );
     }
   }

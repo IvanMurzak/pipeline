@@ -60,7 +60,7 @@ function mkTmp(prefix: string): string {
   return d;
 }
 
-/** Write one pipeline (PIPELINE.md + steps/01-*.md) under <root>/.claude/pipeline/. */
+/** Write one pipeline (PIPELINE.md + steps/01-*.md) under <root>/.pipelines/. */
 function writePipeline(root: string, name: string, endState: string, scopeIn: string): string {
   const pipelineRoot = join(root, ".claude", "pipeline", name);
   mkdirSync(join(pipelineRoot, "steps"), { recursive: true });
@@ -256,7 +256,7 @@ describe("buildContextLine", () => {
 });
 
 describe("findPipelineDirUpTo", () => {
-  test("finds .claude/pipeline from a nested cwd", () => {
+  test("finds .pipelines from a nested cwd", () => {
     const { root } = makeConfidentProject();
     const deep = join(root, ".claude", "pipeline", "deploy-service", "steps");
     expect(findPipelineDirUpTo(deep, root)).toBe(join(root, ".claude", "pipeline"));
@@ -308,7 +308,7 @@ describe("prompt_match_relay end-to-end", () => {
     expect(r.stdout).toBe("");
   });
 
-  test("no .claude/pipeline dir → exit 0, no output", () => {
+  test("no .pipelines dir → exit 0, no output", () => {
     const root = mkTmp("pm-nopipe-");
     mkdirSync(join(root, "src"), { recursive: true });
     const r = runHook(root, promptPayload(root, CONFIDENT_PROMPT), { envValue: "1" });

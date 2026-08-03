@@ -48,7 +48,7 @@ const SKIP =
 test.skipIf(SKIP)(
   'drive smoke (REAL claude): a one-step .claude/ pipeline completes and the record lands',
   () => {
-    // A real consumer-project layout: git repo + .claude/pipeline/<name>.
+    // A real consumer-project layout: git repo + .pipelines/<name>.
     const project = mkdtempSync(join(tmpdir(), 'drive-claude-smoke-'));
     created.push(project);
     spawnSync('git', ['init', '-q'], { cwd: project });

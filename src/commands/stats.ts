@@ -2,7 +2,7 @@
 // `pipeline stats backfill [--project <path>] [--json]`
 //
 // View (and regenerate) the per-run measurement files the stats system writes
-// under `<project>/.claude/pipeline/.stats/` (see lib/stats.ts — pure
+// under `<project>/.pipelines/.stats/` (see lib/stats.ts — pure
 // software, PIPELINE_STATS_ENABLED gated, default ON). The base command:
 //   1. regenerates SUMMARY.md from every recorded run (so it is always
 //      current even if a best-effort render was missed), then

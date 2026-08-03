@@ -70,7 +70,7 @@ function departmentYaml(): string {
     '\n' +
     'runtime:\n' +
     '  engine: pipeline\n' +
-    '  pipelineRoot: .claude/pipeline/review\n' +
+    '  pipelineRoot: .pipelines/review\n' +
     '  startIteration: steps/01-plan.md\n'
   );
 }

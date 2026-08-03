@@ -330,7 +330,7 @@ test('worktree_hook_dir parses an override and defaults otherwise', () => {
     scaffold('---\nisolation: external\n---\n', { '01-a.md': '---\n---\n' }),
   );
   expect(overridden.worktree_hook_dir).toBe('custom/.hooks');
-  expect(defaulted.worktree_hook_dir).toBe('.claude/pipeline/.hooks');
+  expect(defaulted.worktree_hook_dir).toBe('.pipelines/.hooks');
 });
 
 test('no iteration files → error', () => {
@@ -726,7 +726,7 @@ test('CRLF parity: string-form command: with ${PP_*} plans identically on LF and
   const manifest =
     '---\n---\n## Variables\n- PP_SERVICE (required) — svc name\n- PP_GREETING (required) — greeting text\n';
   const stepLF =
-    '---\ntype: script\ncommand: python .claude/pipeline/e2e-vars/scripts/echo_vars.py ${PP_SERVICE} ${PP_GREETING}\nstep_id: echo-vars\n---\n' +
+    '---\ntype: script\ncommand: python .pipelines/e2e-vars/scripts/echo_vars.py ${PP_SERVICE} ${PP_GREETING}\nstep_id: echo-vars\n---\n' +
     '# echo-vars\n\n## Next\nPipeline complete.\n';
   const lfPlan = computePlan(scaffold(manifest, { '01-echo.md': stepLF }));
   const crlfPlan = computePlan(

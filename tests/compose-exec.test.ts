@@ -4,7 +4,7 @@
 // output capture feeding downstream `${steps.<id>.output.<f>}` bindings.
 //
 // Style mirrors script-exec-integration.test.ts (the T31 command-layer
-// harness): real temp worlds under <project>/.claude/pipeline/<name>, cwd/HOME
+// harness): real temp worlds under <project>/.pipelines/<name>, cwd/HOME
 // sandboxed per call, and a FakeProcessRunner on invokeNext's scriptRunner
 // seam so no process ever spawns — script "executions" are prescribed results
 // keyed by PIPELINE_STEP_ID, with the resolved params file captured per call.
@@ -40,7 +40,7 @@ function mkTmp(prefix: string): string {
 
 // ---------------------------------------------------------------------------
 // World scaffolding — a consumer project holding SIBLING pipelines under
-// <project>/.claude/pipeline/ (the layout resolvePipelineRef's parent-dir
+// <project>/.pipelines/ (the layout resolvePipelineRef's parent-dir
 // candidate serves), driven with cwd swapped to the project.
 // ---------------------------------------------------------------------------
 
