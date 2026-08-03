@@ -364,7 +364,7 @@ describe('ci-wait environment', () => {
 // which the command's own contract puts at exit 2.
 // ---------------------------------------------------------------------------
 
-const SLUG = 'IvanMurzak/ai-pipeline-plugin';
+const SLUG = 'IvanMurzak/pipeline-claude';
 const tmpRoot = mkdtempSync(join(tmpdir(), 'ci-wait-repo-'));
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
 

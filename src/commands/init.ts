@@ -321,7 +321,7 @@ export type PluginStatus = 'installed' | 'skipped' | 'failed';
  *  "already done" tracking needed. A non-zero exit from either warns with its
  *  stderr and continues (the clone is still useful). */
 function installPlugin(deps: InitDeps): { status: PluginStatus; warning?: string } {
-  const marketplace = deps.claudeCli(['plugin', 'marketplace', 'add', 'IvanMurzak/ai-pipeline-plugin']);
+  const marketplace = deps.claudeCli(['plugin', 'marketplace', 'add', 'IvanMurzak/pipeline-claude-marketplace']);
   const install = deps.claudeCli(['plugin', 'install', 'pipeline@ai-pipeline']);
   if (marketplace.code === 0 && install.code === 0) return { status: 'installed' };
   const detail = install.code !== 0 ? install.stderr || install.stdout : marketplace.stderr || marketplace.stdout;

@@ -6,7 +6,7 @@
   "homepage": "https://ai-pipeline.dev",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/IvanMurzak/ai-pipeline-plugin.git",
+    "url": "git+https://github.com/IvanMurzak/pipeline-claude.git",
     "directory": "apps/pipeline-cli"
   },
   "bin": {
