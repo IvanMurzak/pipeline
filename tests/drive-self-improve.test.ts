@@ -171,7 +171,7 @@ function seedFeedback(root: string, run: string, files: Record<string, string>):
 }
 
 function readEvents(root: string): { type: string; data: Record<string, unknown> }[] {
-  const f = join(root, '.claude', 'pipeline', '.runtime', 'events.jsonl');
+  const f = join(root, '.pipeline', '.runtime', 'events.jsonl');
   if (!existsSync(f)) return [];
   return readFileSync(f, 'utf8')
     .split('\n')
@@ -559,7 +559,7 @@ test('drive self-improve: retrospective partitions all six categories (+script-f
   expect(retroEv?.data.scripts_created).toBe(1);
 
   // NO file content in ANY emitted event (privacy tier, 07).
-  const journal = readFileSync(join(root, '.claude', 'pipeline', '.runtime', 'events.jsonl'), 'utf8');
+  const journal = readFileSync(join(root, '.pipeline', '.runtime', 'events.jsonl'), 'utf8');
   expect(journal).not.toContain(EVIDENCE_MARKER);
 }, 30000);
 
@@ -706,7 +706,7 @@ test('drive self-improve: PIPELINE_DRIVE_SELF_IMPROVE=0 and unset both restore t
 test('drive self-improve: .stats tokens include the improver session usage', () => {
   const base = mkdtempSync(join(tmpdir(), 'drive-si-stats-'));
   created.push(base);
-  const root = join(base, 'proj', '.claude', 'pipeline', 'pipe');
+  const root = join(base, 'proj', '.pipeline', 'pipe');
   mkdirSync(join(root, 'steps'), { recursive: true });
   writeFileSync(join(root, 'PIPELINE.md'), '# P\n\n## End State\nx\n');
   writeFileSync(join(root, 'steps', '01-step.md'), '# step 01\n');
@@ -731,7 +731,7 @@ test('drive self-improve: .stats tokens include the improver session usage', () 
   const r = drive(root, run, ['--start', plan.steps[0].path]);
   expect(r.status).toBe(0);
 
-  const runsFile = join(base, 'proj', '.claude', 'pipeline', '.stats', 'pipe', 'runs.jsonl');
+  const runsFile = join(base, 'proj', '.pipeline', '.stats', 'pipe', 'runs.jsonl');
   expect(existsSync(runsFile)).toBe(true);
   const rec = JSON.parse(readFileSync(runsFile, 'utf8').trim().split('\n')[0]);
   expect(rec.run_id).toBe(run);

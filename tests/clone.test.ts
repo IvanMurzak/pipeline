@@ -56,12 +56,12 @@ function invoke(args: string[]): { code: number; stdout: string; stderr: string 
 // ---------------------------------------------------------------------------
 
 describe('pipeline clone', () => {
-  test('copies the template tree into ./.pipelines/<name>/', () => {
+  test('copies the template tree into ./.pipeline/<name>/', () => {
     const proj = tempProject();
     const { code, stdout } = invoke(['example-minimal', '--dir', proj]);
     expect(code).toBe(0);
 
-    const dest = join(proj, '.claude', 'pipeline', 'example-minimal');
+    const dest = join(proj, '.pipeline', 'example-minimal');
     expect(existsSync(join(dest, 'PIPELINE.md'))).toBe(true);
     expect(existsSync(join(dest, 'steps', '01-prepare.md'))).toBe(true);
     expect(existsSync(join(dest, 'steps', '02-finish.md'))).toBe(true);
@@ -77,7 +77,7 @@ describe('pipeline clone', () => {
     expect(invoke(['example-minimal', '--dir', proj]).code).toBe(0);
 
     // Drop a marker so we can prove the second clone touched nothing.
-    const dest = join(proj, '.claude', 'pipeline', 'example-minimal');
+    const dest = join(proj, '.pipeline', 'example-minimal');
     const marker = join(dest, 'MY-EDIT.md');
     writeFileSync(marker, 'do not clobber me');
 
@@ -92,7 +92,7 @@ describe('pipeline clone', () => {
   test('--force replaces the target cleanly (stale files are gone)', () => {
     const proj = tempProject();
     expect(invoke(['example-minimal', '--dir', proj]).code).toBe(0);
-    const dest = join(proj, '.claude', 'pipeline', 'example-minimal');
+    const dest = join(proj, '.pipeline', 'example-minimal');
     const stale = join(dest, 'steps', 'STALE.md');
     writeFileSync(stale, 'left over from a prior clone');
 
@@ -151,7 +151,7 @@ describe('pipeline clone', () => {
     // not `bun` is on PATH (spawnSync('bun', …) would need it on PATH).
     const res = spawnSync(process.execPath, [CLI, 'clone', 'example-minimal'], { cwd: proj, encoding: 'utf8' });
     expect(res.status).toBe(0);
-    expect(existsSync(join(proj, '.claude', 'pipeline', 'example-minimal', 'PIPELINE.md'))).toBe(true);
+    expect(existsSync(join(proj, '.pipeline', 'example-minimal', 'PIPELINE.md'))).toBe(true);
   });
 });
 

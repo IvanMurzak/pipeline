@@ -100,14 +100,14 @@ function scaffold(opts: { baseBranch?: string } = {}): Fixture {
   ident(project); // sandbox identity + host-hook isolation (worktrees inherit)
   writeFileSync(
     join(project, '.gitignore'),
-    ['.claude/worktrees/', '.pipelines/.runtime/', '.pipelines/.stats/', ''].join('\n'),
+    ['.claude/worktrees/', '.pipeline/.runtime/', '.pipeline/.stats/', ''].join('\n'),
   );
-  const pipelineRoot = join(project, '.claude', 'pipeline', 'demo');
+  const pipelineRoot = join(project, '.pipeline', 'demo');
   mkdirSync(join(pipelineRoot, 'steps'), { recursive: true });
   const base = opts.baseBranch ? `\nbase_branch: ${opts.baseBranch}` : '';
   writeFileSync(join(pipelineRoot, 'PIPELINE.md'), `---\nisolation: external${base}\n---\n# P\n\n## End State\nx\n`);
   writeFileSync(join(pipelineRoot, 'steps', '01-step.md'), '# step 1\n\nMAIN VERSION\n');
-  const hooksDir = join(project, '.claude', 'pipeline', '.hooks');
+  const hooksDir = join(project, '.pipeline', '.hooks');
   mkdirSync(hooksDir, { recursive: true });
   writeFileSync(join(hooksDir, 'worktree-create.js'), CREATE_HOOK);
   writeFileSync(join(hooksDir, 'worktree-finalize.js'), FINALIZE_HOOK);
@@ -123,7 +123,7 @@ function scaffold(opts: { baseBranch?: string } = {}): Fixture {
   // Branch with an INVALID pipeline definition (no iteration files at all —
   // the plan error the sequential mode lints unconditionally).
   git(project, 'checkout', '-q', '-b', 'broken', 'main');
-  git(project, 'rm', '-q', '-r', '.pipelines/demo/steps');
+  git(project, 'rm', '-q', '-r', '.pipeline/demo/steps');
   git(project, 'commit', '-q', '-m', 'broken pipeline');
   git(project, 'checkout', '-q', 'main');
   return { project, home, pipelineRoot };
@@ -181,7 +181,7 @@ function nextCall(pipelineRoot: string, runId: string, extra: string[] = []): { 
 }
 
 function readEvents(projectRoot: string): any[] {
-  const f = join(projectRoot, '.claude', 'pipeline', '.runtime', 'events.jsonl');
+  const f = join(projectRoot, '.pipeline', '.runtime', 'events.jsonl');
   if (!existsSync(f)) return [];
   return readFileSync(f, 'utf8')
     .trim()
@@ -200,9 +200,9 @@ test('F5: branch-divergent pipeline — run executes the BRANCH definition from 
   const f = scaffold({ baseBranch: 'wip' });
   const runId = 'wtscope1run1';
   inProject(f, (root) => {
-    const mainRoot = join(root, '.claude', 'pipeline', 'demo');
+    const mainRoot = join(root, '.pipeline', 'demo');
     const wt = join(root, '.claude', 'worktrees', runId);
-    const wtRoot = join(wt, '.claude', 'pipeline', 'demo');
+    const wtRoot = join(wt, '.pipeline', 'demo');
 
     // ---- init: provision-at-init + worktree plan --------------------------
     const r1 = nextCall(f.pipelineRoot, runId);
@@ -271,7 +271,7 @@ test('F5: branch-divergent pipeline — run executes the BRANCH definition from 
 
     // Snapshot the stats timeline BEFORE the terminal fold: step lines carry
     // MAIN paths and the buffer lives under the MAIN project's .stats tree.
-    const statsBuf = join(root, '.claude', 'pipeline', '.stats', 'demo', 'runs', `${runId}.jsonl`);
+    const statsBuf = join(root, '.pipeline', '.stats', 'demo', 'runs', `${runId}.jsonl`);
     const statsLines = readFileSync(statsBuf, 'utf8')
       .trim()
       .split('\n')
@@ -293,7 +293,7 @@ test('F5: branch-divergent pipeline — run executes the BRANCH definition from 
 
     // The worktree was torn down; the run branch carries the finalize commit.
     expect(existsSync(wt)).toBe(false);
-    const finalized = git(root, 'show', `run-${runId}:.pipelines/demo/steps/01-step.md`);
+    const finalized = git(root, 'show', `run-${runId}:.pipeline/demo/steps/01-step.md`);
     expect(finalized).toContain('BRANCH VERSION');
     expect(finalized).toContain('IMPROVED-BY-RUN');
     // The finalize commit contains ONLY the improver edit — run artifacts
@@ -302,7 +302,7 @@ test('F5: branch-divergent pipeline — run executes the BRANCH definition from 
       .trim()
       .split('\n')
       .filter(Boolean);
-    expect(names).toEqual(['.pipelines/demo/steps/01-step.md']);
+    expect(names).toEqual(['.pipeline/demo/steps/01-step.md']);
 
     // Teardown survival: next.json remains under the MAIN root, terminal.
     const st2 = JSON.parse(readFileSync(join(mainRoot, '.runtime', runId, 'next.json'), 'utf8'));
@@ -326,7 +326,7 @@ test('F5: branch-divergent pipeline — run executes the BRANCH definition from 
       ['improver.completed', join(mainRoot, 'steps', '01-step.md')],
     ]);
     // Terminal stats folded into the MAIN .stats tree.
-    expect(existsSync(join(root, '.claude', 'pipeline', '.stats', 'demo', 'runs.jsonl'))).toBe(true);
+    expect(existsSync(join(root, '.pipeline', '.stats', 'demo', 'runs.jsonl'))).toBe(true);
   });
 }, 120000);
 
@@ -338,7 +338,7 @@ test('flag frozen per-run: a mid-run PIPELINE_WORKTREE_SCOPED=0 flip cannot swit
   const f = scaffold({ baseBranch: 'wip' });
   const runId = 'wtscope2run1';
   inProject(f, (root) => {
-    const wtRoot = join(root, '.claude', 'worktrees', runId, '.claude', 'pipeline', 'demo');
+    const wtRoot = join(root, '.claude', 'worktrees', runId, '.pipeline', 'demo');
     const r1 = nextCall(f.pipelineRoot, runId);
     expect(r1.json.steps[0].path).toBe(join(wtRoot, 'steps', '01-step.md'));
     // Mid-run flip OFF — the frozen value wins.
@@ -358,7 +358,7 @@ test('flag-off run is legacy main-scoped and frozen: a mid-run flip ON cannot sw
   const f = scaffold({ baseBranch: 'wip' });
   const runId = 'wtscope3run1';
   inProject(f, (root) => {
-    const mainRoot = join(root, '.claude', 'pipeline', 'demo');
+    const mainRoot = join(root, '.pipeline', 'demo');
     process.env.PIPELINE_WORKTREE_SCOPED = '0';
     const r1 = nextCall(f.pipelineRoot, runId);
     expect(r1.json.action).toBe('run-step');
@@ -390,8 +390,8 @@ test('--start with a MAIN author path (the supervisor resume round trip) dispatc
   const f = scaffold({ baseBranch: 'wip' });
   const runId = 'wtscope6run1';
   inProject(f, (root) => {
-    const mainRoot = join(root, '.claude', 'pipeline', 'demo');
-    const wtRoot = join(root, '.claude', 'worktrees', runId, '.claude', 'pipeline', 'demo');
+    const mainRoot = join(root, '.pipeline', 'demo');
+    const wtRoot = join(root, '.claude', 'worktrees', runId, '.pipeline', 'demo');
     // 02-extra exists ONLY on the branch: the supervisor's --start names it in
     // MAIN coordinates (source_path from a prior event) — the engine must
     // dispatch the WORKTREE copy.
@@ -432,7 +432,7 @@ test('plan-error-after-provision: destroy hook runs with outcome=halted, no work
     expect(destroyed.data.outcome).toBe('halted');
     // State parked terminal with the halt reason (crash-safe, resumable-not).
     const st = JSON.parse(
-      readFileSync(join(root, '.claude', 'pipeline', 'demo', '.runtime', runId, 'next.json'), 'utf8'),
+      readFileSync(join(root, '.pipeline', 'demo', '.runtime', runId, 'next.json'), 'utf8'),
     );
     expect(st.phase).toBe('terminal');
     expect(st.status).toBe('halted');

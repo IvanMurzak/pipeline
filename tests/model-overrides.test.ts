@@ -108,7 +108,7 @@ function driver(plan: ReturnType<typeof computePlan>, baseOpts: Partial<NextOpts
   };
 }
 
-const OFF = '/somewhere/.pipelines/other/steps/99-extra.md';
+const OFF = '/somewhere/.pipeline/other/steps/99-extra.md';
 
 function expectRunStep(a: NextAction): Extract<NextAction, { action: 'run-step' }> {
   expect(a.action).toBe('run-step');
@@ -175,12 +175,12 @@ interface Project {
 function scaffoldProject(): Project {
   const project = mkdtempSync(join(tmpdir(), 'modelovr-proj-'));
   created.push(project);
-  const pipelineRoot = join(project, '.claude', 'pipeline', 'demo');
+  const pipelineRoot = join(project, '.pipeline', 'demo');
   mkdirSync(join(pipelineRoot, 'steps'), { recursive: true });
   writeFileSync(join(pipelineRoot, 'PIPELINE.md'), '---\nmodel: opus\n---\n# P\n\n## End State\nx\n');
   writeFileSync(join(pipelineRoot, 'steps', '01-step.md'), '# step 1\n');
   writeFileSync(join(pipelineRoot, 'steps', '02-step.md'), '---\nmodel: sonnet\n---\n# step 2\n');
-  const otherRoot = join(project, '.claude', 'pipeline', 'other');
+  const otherRoot = join(project, '.pipeline', 'other');
   mkdirSync(join(otherRoot, 'steps'), { recursive: true });
   writeFileSync(join(otherRoot, 'PIPELINE.md'), '---\nmodel: haiku\n---\n# O\n\n## End State\nx\n');
   writeFileSync(join(otherRoot, 'steps', '07-pinned.md'), '---\nmodel: sonnet\n---\n# pinned\n');

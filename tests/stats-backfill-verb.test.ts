@@ -90,7 +90,7 @@ describe('pipeline stats backfill', () => {
     // after this record, so ended_at must stay close to "now".
     const startedAt = new Date(now - 30_000).toISOString();
     const endedAt = new Date(now).toISOString();
-    const statsDir = join(projectRoot, '.claude', 'pipeline', '.stats', 'demo');
+    const statsDir = join(projectRoot, '.pipeline', '.stats', 'demo');
     mkdirSync(join(statsDir, 'runs'), { recursive: true });
     const runId = 'verb-run-1';
     const rec = {

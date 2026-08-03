@@ -535,11 +535,11 @@ test('drive: error envelope + no record → synthesized halt names the claude er
 }, 30000);
 
 test('drive: envelope usage enriches the finished run\'s .stats tokens (cost included)', () => {
-  // Scaffold under a real <project>/.pipelines/ ancestor so the stats
+  // Scaffold under a real <project>/.pipeline/ ancestor so the stats
   // tree lands INSIDE the sandbox (statsLocation walks up to that anchor).
   const base = mkdtempSync(join(tmpdir(), 'drive-stats-'));
   created.push(base);
-  const root = join(base, 'proj', '.claude', 'pipeline', 'pipe');
+  const root = join(base, 'proj', '.pipeline', 'pipe');
   mkdirSync(join(root, 'steps'), { recursive: true });
   writeFileSync(join(root, 'PIPELINE.md'), '# P\n\n## End State\nx\n');
   writeFileSync(join(root, 'steps', '01-step.md'), '# step 01\n');
@@ -551,14 +551,14 @@ test('drive: envelope usage enriches the finished run\'s .stats tokens (cost inc
   const r = drive(root, run, ['--start', plan.steps[0].path], { template });
   expect(r.status).toBe(0);
 
-  const runsFile = join(base, 'proj', '.claude', 'pipeline', '.stats', 'pipe', 'runs.jsonl');
+  const runsFile = join(base, 'proj', '.pipeline', '.stats', 'pipe', 'runs.jsonl');
   expect(existsSync(runsFile)).toBe(true);
   const rec = JSON.parse(readFileSync(runsFile, 'utf8').trim().split('\n')[0]);
   expect(rec.run_id).toBe(run);
   expect(rec.runner).toBe('headless');
   expect(rec.tokens).toEqual({ input: 10, output: 20, cache_read: 30, cache_creation: 40, cost_usd: 0.05 });
   // The per-run log got the cost line.
-  const log = readFileSync(join(base, 'proj', '.claude', 'pipeline', '.stats', 'pipe', 'runs', `${run}.log`), 'utf8');
+  const log = readFileSync(join(base, 'proj', '.pipeline', '.stats', 'pipe', 'runs', `${run}.log`), 'utf8');
   expect(log).toContain('cost=$0.0500');
 }, 30000);
 
@@ -1440,9 +1440,9 @@ test('drive: a DENIED record-file write is distinguishable from "executor produc
 // --- e7 DEFECT-3: awaiting_input journaling + resumed re-entry tag ---------------
 
 /** Read the drive sandbox's journal (cwd = pipeline root, no enclosing git →
- *  events land at <root>/.pipelines/.runtime/events.jsonl). */
+ *  events land at <root>/.pipeline/.runtime/events.jsonl). */
 function journalEvents(root: string): any[] {
-  const p = join(root, '.claude', 'pipeline', '.runtime', 'events.jsonl');
+  const p = join(root, '.pipeline', '.runtime', 'events.jsonl');
   if (!existsSync(p)) return [];
   return readFileSync(p, 'utf8')
     .trim()

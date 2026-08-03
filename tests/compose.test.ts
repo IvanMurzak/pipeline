@@ -35,7 +35,7 @@ function memFs(files: Record<string, string>): ComposeFs {
   };
 }
 
-const P = resolve('/proj/.pipelines');
+const P = resolve('/proj/.pipeline');
 const pipe = (name: string) => join(P, ...name.split('/'));
 const manifest = (name: string) => join(pipe(name), 'PIPELINE.md');
 const stepRef = (child: string) => `---\ntype: pipeline\npipeline: ${child}\n---\n# Step\n`;
@@ -74,7 +74,7 @@ test('a plain name falls through to the sibling base (the common flat layout)', 
   expect(r.tried).toEqual([join(pipe('main'), 'y'), pipe('y')]);
 });
 
-test('a nested pipeline resolves top-level names via the enclosing .pipelines dir', () => {
+test('a nested pipeline resolves top-level names via the enclosing .pipeline dir', () => {
   const fs = memFs({ [manifest('top')]: '---\n---\n' });
   const r = resolvePipelineRef('top', pipe('fam/targets/t'), fs);
   expect(r.root).toBe(pipe('top'));
@@ -84,7 +84,7 @@ test('an unresolvable reference reports every distinct candidate probed', () => 
   const fs = memFs({});
   const r = resolvePipelineRef('z', pipe('main'), fs);
   expect(r.root).toBeNull();
-  // Candidate 2 (sibling) and candidate 3 (.pipelines) coincide here —
+  // Candidate 2 (sibling) and candidate 3 (.pipeline) coincide here —
   // deduped, so exactly two probes.
   expect(r.tried).toEqual([join(pipe('main'), 'z'), pipe('z')]);
 });

@@ -48,11 +48,11 @@ function readStdin(): string {
   }
 }
 
-/** Walk up from `start` to the first dir containing `.pipelines`. */
+/** Walk up from `start` to the first dir containing `.pipeline`. */
 function findProjectRoot(start: string): string | null {
   let dir = start;
   for (let i = 0; i < 12; i++) {
-    if (existsSync(join(dir, '.claude', 'pipeline'))) return dir;
+    if (existsSync(join(dir, '.pipeline'))) return dir;
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -72,7 +72,7 @@ function main(): void {
   if (!transcript || !existsSync(transcript)) return;
   const projectRoot = findProjectRoot(payload.cwd || process.cwd());
   if (!projectRoot) return;
-  const base = join(projectRoot, '.claude', 'pipeline', '.stats');
+  const base = join(projectRoot, '.pipeline', '.stats');
   if (!existsSync(base)) return;
 
   const now = Date.now();

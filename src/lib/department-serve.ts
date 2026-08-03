@@ -46,7 +46,7 @@
 // which digest? is this machine's install claimed?) and the local
 // `pipeline-runner` (does this machine have an identity? a service? a
 // binding?). `serve` therefore writes NOTHING into the department folder: no
-// state file, no `.pipelines/cloud.json` (which would pin a clonable
+// state file, no `.pipeline/cloud.json` (which would pin a clonable
 // repo to one org and one server — a9's scope note), nothing but what the user
 // authored. Re-running after an interruption converges because each step asks
 // "is this already true?" rather than "did I do this?".

@@ -150,7 +150,7 @@ function scaffold(
 ): Scaffold {
   const project = mkGitRepo();
   const home = mkTmp('hookshome-');
-  const pipelineRoot = join(project, '.claude', 'pipeline', 'demo');
+  const pipelineRoot = join(project, '.pipeline', 'demo');
   mkdirSync(join(pipelineRoot, 'steps'), { recursive: true });
   const subs = opts.submodules ? `\nsubmodules: [${opts.submodules}]` : '';
   const fin = opts.finalize ? `\nfinalize: true` : '';
@@ -161,7 +161,7 @@ function scaffold(
   for (let i = 1; i <= n; i++) {
     writeFileSync(join(pipelineRoot, 'steps', `${String(i).padStart(2, '0')}-step.md`), `# step ${i}\n`);
   }
-  const hooksDir = join(project, '.claude', 'pipeline', '.hooks');
+  const hooksDir = join(project, '.pipeline', '.hooks');
   mkdirSync(hooksDir, { recursive: true });
   if (opts.createHook !== null) writeFileSync(join(hooksDir, 'worktree-create.js'), opts.createHook ?? CREATE_OK_HOOK);
   if (opts.destroyHook !== null) writeFileSync(join(hooksDir, 'worktree-destroy.js'), opts.destroyHook ?? DESTROY_OK_HOOK);
@@ -219,7 +219,7 @@ function nextCall(pipelineRoot: string, runId: string, extra: string[] = []): { 
 }
 
 function readEvents(projectRoot: string): any[] {
-  const f = join(projectRoot, '.claude', 'pipeline', '.runtime', 'events.jsonl');
+  const f = join(projectRoot, '.pipeline', '.runtime', 'events.jsonl');
   if (!existsSync(f)) return [];
   return readFileSync(f, 'utf8')
     .trim()
@@ -309,7 +309,7 @@ test('external full run: terminal step → destroy hook runs in-process → done
     const createdEv = events.find((e) => e.type === 'worktree.created');
     expect(createdEv.data.ok).toBe(true);
     expect(createdEv.data.worktree_path).toBe(join(root, '.claude', 'worktrees', runId));
-    expect(createdEv.data.hook_dir).toBe('.pipelines/.hooks');
+    expect(createdEv.data.hook_dir).toBe('.pipeline/.hooks');
 
     const started = events.find((e) => e.type === 'iteration.started');
     expect(started.data.index).toBe(1);
@@ -415,7 +415,7 @@ test('--manual-hooks: raw provision-worktree action printed (legacy parity), hoo
     expect(r.json.run_id).toBe(runId);
     expect(r.json.name).toBe(runId);
     expect(r.json.base_branch).toBe('main');
-    expect(r.json.hook_dir).toBe('.pipelines/.hooks');
+    expect(r.json.hook_dir).toBe('.pipeline/.hooks');
     expect(existsSync(join(root, 'create-env-dump.json'))).toBe(false); // hook untouched
     expect(readEvents(root).some((e) => e.type.startsWith('worktree.'))).toBe(false);
 
@@ -488,7 +488,7 @@ test('external auto-resume (no record): create hook re-runs idempotently and the
 test('sequential (non-external) run: iteration/improver/script_creator events auto-emitted from records', () => {
   const project = mkGitRepo();
   const home = mkTmp('hookshome-');
-  const pipelineRoot = join(project, '.claude', 'pipeline', 'plain');
+  const pipelineRoot = join(project, '.pipeline', 'plain');
   mkdirSync(join(pipelineRoot, 'steps'), { recursive: true });
   writeFileSync(join(pipelineRoot, 'PIPELINE.md'), '# P\n\n## End State\nx\n');
   writeFileSync(join(pipelineRoot, 'steps', '01-step.md'), '# s1\n');

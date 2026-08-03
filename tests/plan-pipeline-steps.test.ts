@@ -170,7 +170,7 @@ test('an unresolvable pipeline reference is a plan ERROR naming the probed locat
   expect(plan.errors[0]).toContain(join(base, 'ghost'));
 });
 
-test('reference resolution bases: child under own root, explicit relative, and .pipelines by name', () => {
+test('reference resolution bases: child under own root, explicit relative, and .pipeline by name', () => {
   // Child under the referencing pipeline's own root (family-target style).
   const child = scaffoldProject({
     main: {
@@ -193,10 +193,10 @@ test('reference resolution bases: child under own root, explicit relative, and .
   expect(relPlan.errors).toEqual([]);
   expect(relPlan.steps[0].pipeline_spec?.resolved_root).toBe(join(rel, 'sibling'));
 
-  // By name from a NESTED pipeline via the enclosing `.pipelines` dir.
+  // By name from a NESTED pipeline via the enclosing `.pipeline` dir.
   const base = mkdtempSync(join(tmpdir(), 'plan-compose-'));
   created.push(base);
-  const pipelines = join(base, '.claude', 'pipeline');
+  const pipelines = join(base, '.pipeline');
   const nested = join(pipelines, 'family', 'targets', 't');
   mkdirSync(join(nested, 'steps'), { recursive: true });
   writeFileSync(join(nested, 'PIPELINE.md'), '---\n---\n');

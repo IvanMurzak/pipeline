@@ -263,8 +263,8 @@ function mkWorld(autoClean = true): World {
   // A real .git pins resolveProjectRoot to THIS project so the event journal
   // never lands in an enclosing repo (the hooks.test.ts harness rule).
   spawnSync('git', ['init', '-q'], { cwd: project });
-  const root = join(project, '.claude', 'pipeline', 'support-answer');
-  mkdirSync(join(project, '.claude', 'pipeline'), { recursive: true });
+  const root = join(project, '.pipeline', 'support-answer');
+  mkdirSync(join(project, '.pipeline'), { recursive: true });
   cpSync(TEMPLATE, root, { recursive: true });
   return { project, root };
 }

@@ -43,7 +43,7 @@ function mkTmp(prefix: string): string {
 
 // ---------------------------------------------------------------------------
 // World scaffolding — a consumer project with one pipeline at
-// <project>/.pipelines/demo/ (steps + scripts), driven with cwd swapped
+// <project>/.pipeline/demo/ (steps + scripts), driven with cwd swapped
 // to the project (invokeNext reads process.cwd() as the project root).
 // ---------------------------------------------------------------------------
 
@@ -62,7 +62,7 @@ function mkWorld(manifest = '# P\n\n## End State\nx\n'): World {
   // the event journal lands here, never in an enclosing repo (hooks.test.ts
   // does the same).
   spawnSync('git', ['init', '-q'], { cwd: project });
-  const root = join(project, '.claude', 'pipeline', 'demo');
+  const root = join(project, '.pipeline', 'demo');
   const steps = join(root, 'steps');
   const scripts = join(root, 'scripts');
   mkdirSync(steps, { recursive: true });
@@ -142,7 +142,7 @@ const readJson = (p: string): any => JSON.parse(readFileSync(p, 'utf8'));
 const stateOf = (w: World, runId: string): NextState => readJson(join(w.root, '.runtime', runId, 'next.json'));
 
 function readEvents(w: World): any[] {
-  const f = join(w.project, '.claude', 'pipeline', '.runtime', 'events.jsonl');
+  const f = join(w.project, '.pipeline', '.runtime', 'events.jsonl');
   if (!existsSync(f)) return [];
   return readFileSync(f, 'utf8')
     .trim()
@@ -941,7 +941,7 @@ test('ledger reuse is silent: no duplicate events or stats lines for a replayed 
     expect(s1Events.filter((e) => e.type === 'iteration.completed').length).toBe(0);
 
     // Stats timeline: same shape — one step.started for s1, no step.completed.
-    const buf = join(w.project, '.claude', 'pipeline', '.stats', 'demo', 'runs', 'r11c.jsonl');
+    const buf = join(w.project, '.pipeline', '.stats', 'demo', 'runs', 'r11c.jsonl');
     const lines = readFileSync(buf, 'utf8')
       .trim()
       .split('\n')

@@ -320,7 +320,7 @@ function newHelpText(): string {
     `  --engine <id>       Runtime engine (default: ${DEFAULT_ENGINE}). Supported:\n` +
     `                      ${SUPPORTED_ENGINES.join(', ')}.\n` +
     '  --from-pipeline <n> Prefill description + one skill from an EXISTING\n' +
-    '                      ./.pipelines/<n>/PIPELINE.md (its End State and\n' +
+    '                      ./.pipeline/<n>/PIPELINE.md (its End State and\n' +
     '                      Scope.In) and write engine: pipeline pointing at it.\n' +
     '  --force, -f         Overwrite an existing department.yml (or write into an\n' +
     '                      already-occupied <name> folder) anyway.\n' +
@@ -349,7 +349,7 @@ function posixRelative(fromDir: string, toPath: string): string {
 
 /**
  * Resolve `--from-pipeline <name>` against an EXISTING pipeline already
- * living at `<projectRoot>/.pipelines/<name>/` — the plugin's own
+ * living at `<projectRoot>/.pipeline/<name>/` — the plugin's own
  * "pipelines live in the consumer project" invariant (this repo's
  * `CLAUDE.md`), not the bundled `templates/` a fresh `pipeline clone` copies
  * from. A department wraps a pipeline the user already authored or cloned;
@@ -364,13 +364,13 @@ function resolveFromPipeline(
   manifestPath: string,
   pipelineName: string,
 ): FromPipelineInfo | { error: string } {
-  const pipelineRootAbs = join(projectRoot, '.claude', 'pipeline', pipelineName);
+  const pipelineRootAbs = join(projectRoot, '.pipeline', pipelineName);
   const pipelineMdPath = join(pipelineRootAbs, 'PIPELINE.md');
   if (!existsSync(pipelineMdPath)) {
     return {
       error:
         `no pipeline named '${pipelineName}' — expected ${pipelineMdPath}\n` +
-        `  (pipelines live under ./.pipelines/<name>/ in this project; ` +
+        `  (pipelines live under ./.pipeline/<name>/ in this project; ` +
         `'pipeline clone ${pipelineName}' fetches a bundled template of that name, if one exists)`,
     };
   }
@@ -1117,7 +1117,7 @@ export interface ServeCommandDeps {
    * It is the SAME ladder `cloud connect` runs — one browser flow, one device
    * flow, one machine-credential exchange, one set of 04 §9 failure messages
    * (D12) — minus the project binding: `serve` must never write
-   * `.pipelines/cloud.json` into a department folder, because that would
+   * `.pipeline/cloud.json` into a department folder, because that would
    * pin a clonable repo to one org and one server.
    */
   authenticate: (opts: ApiAuthOptions) => Promise<ApiAuth>;

@@ -261,7 +261,7 @@ describe('pipeline department new --force', () => {
 describe('pipeline department new --from-pipeline', () => {
   test('prefills description from End State, writes engine: pipeline + pipelineRoot + startIteration, and validates with ZERO errors', () => {
     const proj = tempProject();
-    const pipelineRoot = join(proj, '.claude', 'pipeline', 'unity-review');
+    const pipelineRoot = join(proj, '.pipeline', 'unity-review');
     writeScopedPipeline(pipelineRoot);
 
     const { code } = newCmd(['--from-pipeline', 'unity-review', '--dir', proj]);
@@ -272,7 +272,7 @@ describe('pipeline department new --from-pipeline', () => {
     expect(manifest).not.toBeNull();
     expect(manifest!.description).toContain('prioritized list');
     expect(manifest!.runtime.engine).toBe('pipeline');
-    expect(manifest!.runtime.pipelineRoot).toBe('.pipelines/unity-review');
+    expect(manifest!.runtime.pipelineRoot).toBe('.pipeline/unity-review');
     expect(manifest!.runtime.startIteration).toBe('steps/01-scan.md');
     // A two-field runtime spec (05 §3): pipelineRoot + startIteration only —
     // no command/args/workingDirectory ever invented.
@@ -291,7 +291,7 @@ describe('pipeline department new --from-pipeline', () => {
 
   test('a bundled template (bare In:/Out: markers) drives the skill description from Scope.In, not End State (x9)', () => {
     const proj = tempProject();
-    copyTemplateTree('support-answer', join(proj, '.claude', 'pipeline', 'support-answer'));
+    copyTemplateTree('support-answer', join(proj, '.pipeline', 'support-answer'));
 
     const { code } = newCmd(['--from-pipeline', 'support-answer', '--dir', proj]);
     expect(code).toBe(0);
@@ -307,7 +307,7 @@ describe('pipeline department new --from-pipeline', () => {
 
   test('gracefully falls back to End State for the skill description when a pipeline has no Scope section at all', () => {
     const proj = tempProject();
-    const pipelineRoot = join(proj, '.claude', 'pipeline', 'no-scope');
+    const pipelineRoot = join(proj, '.pipeline', 'no-scope');
     mkdirSync(join(pipelineRoot, 'steps'), { recursive: true });
     writeFileSync(
       join(pipelineRoot, 'PIPELINE.md'),
@@ -338,7 +338,7 @@ describe('pipeline department new --from-pipeline', () => {
 
   test('a positional <name> still controls the FOLDER + yaml name; --from-pipeline only supplies content', () => {
     const proj = tempProject();
-    writeScopedPipeline(join(proj, '.claude', 'pipeline', 'unity-review'));
+    writeScopedPipeline(join(proj, '.pipeline', 'unity-review'));
     const { code } = newCmd(['my-dept', '--from-pipeline', 'unity-review', '--dir', proj]);
     expect(code).toBe(0);
     const manifestPath = join(proj, 'my-dept', DEPARTMENT_MANIFEST_FILENAME);
@@ -346,12 +346,12 @@ describe('pipeline department new --from-pipeline', () => {
     expect(manifest!.name).toBe('my-dept');
     expect(manifest!.runtime.engine).toBe('pipeline');
     // pipelineRoot is relative to THIS manifest's own (nested) directory.
-    expect(manifest!.runtime.pipelineRoot).toBe('../.pipelines/unity-review');
+    expect(manifest!.runtime.pipelineRoot).toBe('../.pipeline/unity-review');
   });
 
   test('a conflicting explicit --engine is a usage error (exit 2), nothing written', () => {
     const proj = tempProject();
-    writeScopedPipeline(join(proj, '.claude', 'pipeline', 'unity-review'));
+    writeScopedPipeline(join(proj, '.pipeline', 'unity-review'));
     const { code, stderr } = newCmd(['--from-pipeline', 'unity-review', '--engine', 'process', '--dir', proj]);
     expect(code).toBe(2);
     expect(stderr).toContain('--from-pipeline');
@@ -360,7 +360,7 @@ describe('pipeline department new --from-pipeline', () => {
 
   test('--engine pipeline (redundant, non-conflicting) is accepted', () => {
     const proj = tempProject();
-    writeScopedPipeline(join(proj, '.claude', 'pipeline', 'unity-review'));
+    writeScopedPipeline(join(proj, '.pipeline', 'unity-review'));
     const { code } = newCmd(['--from-pipeline', 'unity-review', '--engine', 'pipeline', '--dir', proj]);
     expect(code).toBe(0);
   });
@@ -571,7 +571,7 @@ describe('pipeline department validate — exit 2 class', () => {
 describe('pipeline department validate — coherence', () => {
   test('acceptsMidTaskInput: true with engine: pipeline is an error (pipeline-drive has no stdin)', () => {
     const proj = tempProject();
-    writeScopedPipeline(join(proj, '.claude', 'pipeline', 'unity-review'));
+    writeScopedPipeline(join(proj, '.pipeline', 'unity-review'));
     const file = join(proj, DEPARTMENT_MANIFEST_FILENAME);
     writeFileSync(
       file,
@@ -583,7 +583,7 @@ skills:
     description: Does the thing, thoroughly and reliably, every time.
 runtime:
   engine: pipeline
-  pipelineRoot: .pipelines/unity-review
+  pipelineRoot: .pipeline/unity-review
   startIteration: steps/01-scan.md
 communication:
   acceptsMidTaskInput: true
@@ -716,7 +716,7 @@ skills:
     description: Does the thing, thoroughly and reliably, every time.
 runtime:
   engine: pipeline
-  pipelineRoot: .pipelines/does-not-exist
+  pipelineRoot: .pipeline/does-not-exist
 `,
     );
     const { code, stdout } = validateCmd(['--file', file]);
@@ -727,7 +727,7 @@ runtime:
 
   test('engine: pipeline pointing at a REAL pipeline is clean', () => {
     const proj = tempProject();
-    writeScopedPipeline(join(proj, '.claude', 'pipeline', 'unity-review'));
+    writeScopedPipeline(join(proj, '.pipeline', 'unity-review'));
     const file = join(proj, DEPARTMENT_MANIFEST_FILENAME);
     writeFileSync(
       file,
@@ -739,7 +739,7 @@ skills:
     description: Does the thing, thoroughly and reliably, every time.
 runtime:
   engine: pipeline
-  pipelineRoot: .pipelines/unity-review
+  pipelineRoot: .pipeline/unity-review
   startIteration: steps/01-scan.md
 `,
     );
@@ -748,7 +748,7 @@ runtime:
 
   test('a startIteration that does not exist inside a real pipelineRoot is an error', () => {
     const proj = tempProject();
-    writeScopedPipeline(join(proj, '.claude', 'pipeline', 'unity-review'));
+    writeScopedPipeline(join(proj, '.pipeline', 'unity-review'));
     const file = join(proj, DEPARTMENT_MANIFEST_FILENAME);
     writeFileSync(
       file,
@@ -760,7 +760,7 @@ skills:
     description: Does the thing, thoroughly and reliably, every time.
 runtime:
   engine: pipeline
-  pipelineRoot: .pipelines/unity-review
+  pipelineRoot: .pipeline/unity-review
   startIteration: steps/99-nope.md
 `,
     );
@@ -833,7 +833,7 @@ runtime:
  *  `runtime:` key from the file. */
 function pipelineDepartment(omit?: 'pipelineRoot' | 'startIteration'): string {
   const proj = tempProject();
-  const root = join(proj, '.claude', 'pipeline', 'review');
+  const root = join(proj, '.pipeline', 'review');
   mkdirSync(join(root, 'steps'), { recursive: true });
   writeFileSync(join(root, 'PIPELINE.md'), '# Review\n\n## End State\nReviewed.\n');
   writeFileSync(join(root, 'steps', '01-plan.md'), '# Plan\n');
@@ -852,7 +852,7 @@ function pipelineDepartment(omit?: 'pipelineRoot' | 'startIteration'): string {
     '',
     'runtime:',
     '  engine: pipeline',
-    ...(omit === 'pipelineRoot' ? [] : ['  pipelineRoot: .pipelines/review']),
+    ...(omit === 'pipelineRoot' ? [] : ['  pipelineRoot: .pipeline/review']),
     ...(omit === 'startIteration' ? [] : ['  startIteration: steps/01-plan.md']),
     '',
   ];

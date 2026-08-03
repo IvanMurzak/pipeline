@@ -1,7 +1,7 @@
 // `pipeline clone <name> [--force] [--dir <path>] [--list] [--json]`
 //
 // Copies a bundled, ready-made pipeline TEMPLATE (see src/lib/templates.ts) into
-// the consumer project's `./.pipelines/<name>/` (relative to the CURRENT
+// the consumer project's `./.pipeline/<name>/` (relative to the CURRENT
 // working directory by default, or `--dir <path>`). This is the local-first
 // onboarding entry point: a user installs @baizor/pipeline, then
 // `pipeline clone <name>` drops a working pipeline they can run and adapt.
@@ -15,7 +15,7 @@
 //
 // Exit codes:
 //   0  cloned (or `--list` / `--help`)
-//   1  refused — `./.pipelines/<name>/` already exists (pass --force), or
+//   1  refused — `./.pipeline/<name>/` already exists (pass --force), or
 //      the copy failed
 //   2  usage — no name, unknown template (lists available), or a bad flag
 
@@ -77,10 +77,10 @@ function listFilesRel(root: string): string[] {
 function helpText(): string {
   return (
     `${USAGE}\n\n` +
-    'Copy a bundled ready-made pipeline template into ./.pipelines/<name>/\n' +
+    'Copy a bundled ready-made pipeline template into ./.pipeline/<name>/\n' +
     '(relative to the current directory, or --dir <path>).\n\n' +
     'Options:\n' +
-    '  --force, -f   Overwrite an existing ./.pipelines/<name>/ target.\n' +
+    '  --force, -f   Overwrite an existing ./.pipeline/<name>/ target.\n' +
     '  --dir <path>  Project root to clone into (default: current directory).\n' +
     '  --list, -l    List the available templates and exit.\n' +
     '  --json        Print the result (or template list) as JSON.\n' +
@@ -124,7 +124,7 @@ export function runClone(args: string[]): number {
   }
 
   const projectRoot = resolve(a.dir ?? process.cwd());
-  const dest = join(projectRoot, '.claude', 'pipeline', entry.name);
+  const dest = join(projectRoot, '.pipeline', entry.name);
 
   if (existsSync(dest)) {
     if (!a.force) {

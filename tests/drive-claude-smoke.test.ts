@@ -48,11 +48,11 @@ const SKIP =
 test.skipIf(SKIP)(
   'drive smoke (REAL claude): a one-step .claude/ pipeline completes and the record lands',
   () => {
-    // A real consumer-project layout: git repo + .pipelines/<name>.
+    // A real consumer-project layout: git repo + .pipeline/<name>.
     const project = mkdtempSync(join(tmpdir(), 'drive-claude-smoke-'));
     created.push(project);
     spawnSync('git', ['init', '-q'], { cwd: project });
-    const root = join(project, '.claude', 'pipeline', 'smoke');
+    const root = join(project, '.pipeline', 'smoke');
     mkdirSync(join(root, 'steps'), { recursive: true });
     writeFileSync(join(root, 'PIPELINE.md'), '# Smoke\n\n## End State\nsmoke-artifact.txt exists.\n');
     writeFileSync(

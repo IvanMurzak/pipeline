@@ -9,7 +9,7 @@
 // `pipeline stats`) resolves a project through the worktree→main mapping and
 // so only ever looked in the main checkout. Verified end to end before the
 // fix: `pipeline next` from inside a worktree wrote
-// `<worktree>/.pipelines/.stats/demo/runs/<id>.jsonl` and the main tree
+// `<worktree>/.pipeline/.stats/demo/runs/<id>.jsonl` and the main tree
 // got nothing.
 //
 // This is the same rule the CLI already applies to runs it orchestrates
@@ -69,7 +69,7 @@ function scaffold(): { project: string; worktree: string; mainPipelineRoot: stri
   const project = mkTmp('stats-wt-');
   git(project, 'init', '-q', '-b', 'main');
   ident(project);
-  const mainPipelineRoot = join(project, '.claude', 'pipeline', 'demo');
+  const mainPipelineRoot = join(project, '.pipeline', 'demo');
   mkdirSync(join(mainPipelineRoot, 'steps'), { recursive: true });
   writeFileSync(join(mainPipelineRoot, 'PIPELINE.md'), '---\n---\n# P\n\n## End State\nx\n');
   writeFileSync(join(mainPipelineRoot, 'steps', '01-step.md'), '# step 1\n\nwork\n');
@@ -82,7 +82,7 @@ function scaffold(): { project: string; worktree: string; mainPipelineRoot: stri
     project,
     worktree,
     mainPipelineRoot,
-    wtPipelineRoot: join(worktree, '.claude', 'pipeline', 'demo'),
+    wtPipelineRoot: join(worktree, '.pipeline', 'demo'),
   };
 }
 
@@ -111,7 +111,7 @@ test('statsLocation anchors a worktree run to the main .stats tree', () => {
   // regardless of which checkout it executed from.
   expect(canon(fromWorktree.base)).toBe(canon(fromMain.base));
   expect(fromWorktree.rel).toBe(fromMain.rel);
-  expect(canon(fromWorktree.base)).toBe(canon(join(project, '.claude', 'pipeline', '.stats')));
+  expect(canon(fromWorktree.base)).toBe(canon(join(project, '.pipeline', '.stats')));
   expect(fromWorktree.rel).toBe('demo');
   // And crucially NOT inside the ephemeral tree.
   expect(canon(fromWorktree.base).startsWith(canon(worktree))).toBe(false);
@@ -131,10 +131,10 @@ test('the readers resolve the same project root as the writer', () => {
 
 test('a project with no git at all still resolves to itself', () => {
   const plain = mkTmp('stats-nogit-');
-  const pipelineRoot = join(plain, '.claude', 'pipeline', 'demo');
+  const pipelineRoot = join(plain, '.pipeline', 'demo');
   mkdirSync(pipelineRoot, { recursive: true });
 
   expect(canon(mainCheckoutPipelineRoot(pipelineRoot))).toBe(canon(pipelineRoot));
   expect(canon(findStatsProjectRoot(pipelineRoot)!)).toBe(canon(plain));
-  expect(canon(statsLocation(pipelineRoot).base)).toBe(canon(join(plain, '.claude', 'pipeline', '.stats')));
+  expect(canon(statsLocation(pipelineRoot).base)).toBe(canon(join(plain, '.pipeline', '.stats')));
 });

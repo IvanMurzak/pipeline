@@ -33,7 +33,7 @@ afterEach(() => {
 function mkRoot(): string {
   const project = mkdtempSync(join(tmpdir(), 'rsm-proj-'));
   created.push(project);
-  const root = join(project, '.claude', 'pipeline', 'demo');
+  const root = join(project, '.pipeline', 'demo');
   mkdirSync(join(root, 'steps'), { recursive: true });
   writeFileSync(
     join(root, 'PIPELINE.md'),

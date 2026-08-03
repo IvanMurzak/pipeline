@@ -289,7 +289,7 @@ describe('pipeline init — happy path', () => {
     const out = h.stdout();
     expect(out).toContain('✓ Claude Code found');
     expect(out).toContain('✓ Plugin installed');
-    expect(out).toContain('✓ Starter pipeline cloned   .pipelines/support-answer');
+    expect(out).toContain('✓ Starter pipeline cloned   .pipeline/support-answer');
     expect(out).not.toContain('(already present)');
     expect(out).not.toContain('Dashboard'); // plugin-thin phase 1: no longer part of onboarding
     expect(out).toContain('Run it now? [Y/n] y');
@@ -300,7 +300,7 @@ describe('pipeline init — happy path', () => {
     expect(out).toContain('03-answer');
     expect(out).toContain('✓ Complete');
     expect(out).toContain('Next: open Claude Code here and type  /pipeline:design <your goal>');
-    expect(existsSync(join(proj, '.claude', 'pipeline', 'support-answer', 'PIPELINE.md'))).toBe(true);
+    expect(existsSync(join(proj, '.pipeline', 'support-answer', 'PIPELINE.md'))).toBe(true);
   });
 
   test('per-step lines show the resolved elapsed time from the injected clock', async () => {
@@ -344,7 +344,7 @@ describe('pipeline init — happy path', () => {
     const out = h2.stdout();
     expect(out).toContain('✓ Claude Code found');
     expect(out).toContain('✓ Plugin installed');
-    expect(out).toContain('✓ Starter pipeline cloned   .pipelines/support-answer (already present)');
+    expect(out).toContain('✓ Starter pipeline cloned   .pipeline/support-answer (already present)');
     expect(out).toContain('▶ support-answer'); // re-offered and ran again
     expect(out).toContain('✓ Complete');
   });
@@ -371,7 +371,7 @@ describe('pipeline init --json', () => {
       cloud: 'connected',
       plugin: 'installed',
       template: 'support-answer',
-      path: '.pipelines/support-answer',
+      path: '.pipeline/support-answer',
       ran: false,
     });
   });
@@ -389,7 +389,7 @@ describe('pipeline init --json', () => {
       cloud: 'connected',
       plugin: 'installed',
       template: 'support-answer',
-      path: '.pipelines/support-answer',
+      path: '.pipeline/support-answer',
       ran: true,
       runOk: true,
     });
@@ -443,7 +443,7 @@ describe('failure modes (03-pipeline-init.md §4)', () => {
     expect(out).toContain('Claude Code not found on PATH');
     expect(out).toContain('Install Claude Code, then re-run: pipeline init');
     // The clone still ran.
-    expect(existsSync(join(proj, '.claude', 'pipeline', 'support-answer', 'PIPELINE.md'))).toBe(true);
+    expect(existsSync(join(proj, '.pipeline', 'support-answer', 'PIPELINE.md'))).toBe(true);
   });
 
   test('claude missing, --json: exits 0, ran:false, plugin:"skipped", warns in the warnings array', async () => {
@@ -491,18 +491,18 @@ describe('failure modes (03-pipeline-init.md §4)', () => {
     expect(out).toContain('network unreachable');
     expect(out).toContain('continuing');
     // The clone and the run still happened.
-    expect(existsSync(join(proj, '.claude', 'pipeline', 'support-answer', 'PIPELINE.md'))).toBe(true);
+    expect(existsSync(join(proj, '.pipeline', 'support-answer', 'PIPELINE.md'))).toBe(true);
     expect(out).toContain('✓ Complete');
   });
 
   test('template already cloned: ✓ (already present), not an error', async () => {
     const proj = tempProject();
     // Pre-clone it (simulate a prior run / manual clone).
-    mkdirSync(join(proj, '.claude', 'pipeline', 'support-answer'), { recursive: true });
+    mkdirSync(join(proj, '.pipeline', 'support-answer'), { recursive: true });
     const h = harness();
     const code = await runInit(['--dir', proj, '--no-run'], h.deps);
     expect(code).toBe(0);
-    expect(h.stdout()).toContain('✓ Starter pipeline cloned   .pipelines/support-answer (already present)');
+    expect(h.stdout()).toContain('✓ Starter pipeline cloned   .pipeline/support-answer (already present)');
   });
 
   test('starter run fails: reports the failing step + its output, exit 1', async () => {
@@ -559,8 +559,8 @@ describe('flag composition', () => {
     const h = harness();
     const code = await runInit(['ship-feature', '--dir', proj, '--no-run'], h.deps);
     expect(code).toBe(0);
-    expect(existsSync(join(proj, '.claude', 'pipeline', 'ship-feature', 'PIPELINE.md'))).toBe(true);
-    expect(h.stdout()).toContain('.pipelines/ship-feature');
+    expect(existsSync(join(proj, '.pipeline', 'ship-feature', 'PIPELINE.md'))).toBe(true);
+    expect(h.stdout()).toContain('.pipeline/ship-feature');
   });
 });
 
@@ -622,7 +622,7 @@ describe('the cloud step (cloud-first default)', () => {
     expect(h.stdout()).toContain('Not connected');
     expect(h.stdout()).toContain('pipeline cloud connect');
     // The local half still happened.
-    expect(existsSync(join(proj, '.claude', 'pipeline', 'support-answer'))).toBe(true);
+    expect(existsSync(join(proj, '.pipeline', 'support-answer'))).toBe(true);
     expect(h.driveCalls).toHaveLength(1);
   });
 

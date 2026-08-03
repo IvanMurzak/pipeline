@@ -136,7 +136,7 @@ test('permission_denials: parsed from the envelope (2.1.214 sensitive-path deny 
         {
           tool_name: 'Write',
           tool_use_id: 'toolu_01U79v6gsqfghVcpE4PgrwVN',
-          tool_input: { file_path: 'C:\proj\.pipelines\p\.runtime\r\records\s.json', content: '{}' },
+          tool_input: { file_path: 'C:\proj\.pipeline\p\.runtime\r\records\s.json', content: '{}' },
         },
         // Malformed entries contribute nothing but never break the parse.
         'garbage',
@@ -145,7 +145,7 @@ test('permission_denials: parsed from the envelope (2.1.214 sensitive-path deny 
     }),
   )!;
   expect(env.permission_denials).toEqual([
-    { tool_name: 'Write', file_path: 'C:\proj\.pipelines\p\.runtime\r\records\s.json' },
+    { tool_name: 'Write', file_path: 'C:\proj\.pipeline\p\.runtime\r\records\s.json' },
     { tool_name: null, file_path: null },
   ]);
 });

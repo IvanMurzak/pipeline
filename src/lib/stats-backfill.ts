@@ -218,8 +218,8 @@ function foldHeadlessStyle(runtimeDir: string, homeOverride: string | undefined)
 }
 
 /** Walk up from `start` (an arbitrary cwd, or a pipeline root like
- *  `<project>/.pipelines/<name>`) to the first ancestor containing
- *  `.pipelines` — the projectRoot `backfillProject` expects. The ONE
+ *  `<project>/.pipeline/<name>`) to the first ancestor containing
+ *  `.pipeline` — the projectRoot `backfillProject` expects. The ONE
  *  shared walk every trigger uses to derive its argument (the relay from the
  *  hook payload's cwd, the run-init kick from `--root`). Null when no such
  *  ancestor exists.
@@ -232,7 +232,7 @@ function foldHeadlessStyle(runtimeDir: string, homeOverride: string | undefined)
 export function findStatsProjectRoot(start: string): string | null {
   let dir = resolve(start);
   for (let i = 0; i < 16; i++) {
-    if (existsSync(join(dir, '.claude', 'pipeline'))) return mainCheckoutOf(dir);
+    if (existsSync(join(dir, '.pipeline'))) return mainCheckoutOf(dir);
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -310,7 +310,7 @@ export function backfillProject(projectRoot: string, opts: BackfillOptions = {})
     errors: [],
   };
   const root = resolve(projectRoot);
-  const base = join(root, '.claude', 'pipeline', '.stats');
+  const base = join(root, '.pipeline', '.stats');
   if (!existsSync(base)) return report;
 
   const windowMs = opts.windowMs ?? DEFAULT_BACKFILL_WINDOW_MS;
@@ -369,7 +369,7 @@ export function backfillProject(projectRoot: string, opts: BackfillOptions = {})
           // hint is a main-session file).
           result = foldManagerStyle(opts.transcriptHint as string, rec);
         } else if (rec.runner === 'headless') {
-          const runtimeDir = join(root, '.claude', 'pipeline', rec.pipeline, '.runtime', rec.run_id);
+          const runtimeDir = join(root, '.pipeline', rec.pipeline, '.runtime', rec.run_id);
           result = foldHeadlessStyle(runtimeDir, opts.homeOverride);
         } else {
           // 'manager' or unset/legacy — same default as statsFinalizeRun.

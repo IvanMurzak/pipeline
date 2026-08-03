@@ -47,9 +47,9 @@ afterEach(() => {
   delete process.env.PIPELINE_STATS_RUNNER;
 });
 
-/** A canonical consumer layout: <project>/.pipelines/<rel>. */
+/** A canonical consumer layout: <project>/.pipeline/<rel>. */
 function mkPipeline(rel: string): string {
-  const root = join(sandbox, '.claude', 'pipeline', ...rel.split('/'));
+  const root = join(sandbox, '.pipeline', ...rel.split('/'));
   mkdirSync(root, { recursive: true });
   return root;
 }
@@ -67,17 +67,17 @@ describe('statsEnabled', () => {
 });
 
 describe('statsLocation', () => {
-  test('resolves the shared .pipelines/.stats base + rel path', () => {
+  test('resolves the shared .pipeline/.stats base + rel path', () => {
     const root = mkPipeline('workflows/implement-task');
     const loc = statsLocation(root);
-    expect(loc.base).toBe(join(sandbox, '.claude', 'pipeline', '.stats'));
+    expect(loc.base).toBe(join(sandbox, '.pipeline', '.stats'));
     expect(loc.rel).toBe('workflows/implement-task');
   });
 
   test('nested family target shares the same base', () => {
     const root = mkPipeline('workflows/release/targets/godot-ai-csg');
     const loc = statsLocation(root);
-    expect(loc.base).toBe(join(sandbox, '.claude', 'pipeline', '.stats'));
+    expect(loc.base).toBe(join(sandbox, '.pipeline', '.stats'));
     expect(loc.rel).toBe('workflows/release/targets/godot-ai-csg');
   });
 
@@ -243,7 +243,7 @@ describe('file lifecycle: append → finalize → enrich', () => {
     statsAppend(root, 'run-a', { k: 'run.started', mode: 'sequential', model: null });
     statsAppend(root, 'run-a', { k: 'step.started', path: join(root, 'steps', '01-x.md'), model: 'opus' });
     statsAppend(root, 'run-a', { k: 'step.completed', path: join(root, 'steps', '01-x.md'), outcome: 'completed' });
-    const base = join(sandbox, '.claude', 'pipeline', '.stats');
+    const base = join(sandbox, '.pipeline', '.stats');
     const bufferFile = join(base, 'workflows/implement-task', 'runs', 'run-a.jsonl');
     expect(existsSync(bufferFile)).toBe(true);
 
@@ -271,7 +271,7 @@ describe('file lifecycle: append → finalize → enrich', () => {
     statsAppend(root, 'run-b', { k: 'run.started' });
     statsFinalizeRun(root, 'run-b', 'completed', null);
     statsFinalizeRun(root, 'run-b', 'completed', null); // terminal `next` repeats
-    const base = join(sandbox, '.claude', 'pipeline', '.stats');
+    const base = join(sandbox, '.pipeline', '.stats');
     const records = parseRunRecords(readFileSync(join(base, 'p1', 'runs.jsonl'), 'utf8'));
     expect(records.length).toBe(1);
   });
@@ -281,7 +281,7 @@ describe('file lifecycle: append → finalize → enrich', () => {
     const root = mkPipeline('p2');
     statsAppend(root, 'run-c', { k: 'run.started' });
     statsFinalizeRun(root, 'run-c', 'completed', null);
-    expect(existsSync(join(sandbox, '.claude', 'pipeline', '.stats'))).toBe(false);
+    expect(existsSync(join(sandbox, '.pipeline', '.stats'))).toBe(false);
   });
 
   test('runner tag from PIPELINE_STATS_RUNNER (headless drive)', () => {
@@ -289,7 +289,7 @@ describe('file lifecycle: append → finalize → enrich', () => {
     const root = mkPipeline('p3');
     statsAppend(root, 'run-d', { k: 'run.started' });
     statsFinalizeRun(root, 'run-d', 'completed', null);
-    const base = join(sandbox, '.claude', 'pipeline', '.stats');
+    const base = join(sandbox, '.pipeline', '.stats');
     const [rec] = parseRunRecords(readFileSync(join(base, 'p3', 'runs.jsonl'), 'utf8'));
     expect(rec.runner).toBe('headless');
   });
@@ -303,7 +303,7 @@ describe('file lifecycle: append → finalize → enrich', () => {
     statsAppend(root, 'run-e', { k: 'step.started', path: join(root, 'steps', '01-x.md'), model: 'opus' });
     statsAppend(root, 'run-e', { k: 'step.completed', path: join(root, 'steps', '01-x.md'), outcome: 'completed' });
     statsFinalizeRun(root, 'run-e', 'completed', null);
-    const base = join(sandbox, '.claude', 'pipeline', '.stats');
+    const base = join(sandbox, '.pipeline', '.stats');
     const runsFile = join(base, 'p4', 'runs.jsonl');
 
     const ok = statsEnrichTokens(base, runsFile, 'run-e', {
@@ -332,7 +332,7 @@ describe('file lifecycle: append → finalize → enrich', () => {
     statsAppend(root, 'run-f', { k: 'step.started', path: join(root, 'steps', '01-x.md'), model: 'opus' });
     statsAppend(root, 'run-f', { k: 'step.completed', path: join(root, 'steps', '01-x.md'), outcome: 'completed' });
     statsFinalizeRun(root, 'run-f', 'completed', null);
-    const base = join(sandbox, '.claude', 'pipeline', '.stats');
+    const base = join(sandbox, '.pipeline', '.stats');
     const runsFile = join(base, 'p6', 'runs.jsonl');
 
     const ok = statsEnrichTokens(
@@ -379,7 +379,7 @@ describe('file lifecycle: append → finalize → enrich', () => {
     });
     statsFinalizeRun(root, 'run-z', 'completed', null);
 
-    const base = join(sandbox, '.claude', 'pipeline', '.stats');
+    const base = join(sandbox, '.pipeline', '.stats');
     const runsFile = join(base, 'scripts-only', 'runs.jsonl');
     const [rec] = parseRunRecords(readFileSync(runsFile, 'utf8'));
     expect(rec.llm_steps).toBe(0);
@@ -406,7 +406,7 @@ describe('file lifecycle: append → finalize → enrich', () => {
     statsAppend(root, 'run-hz', { k: 'run.started', mode: 'sequential', model: 'sonnet' });
     statsFinalizeRun(root, 'run-hz', 'halted', 'worktree provision hook failed');
 
-    const base = join(sandbox, '.claude', 'pipeline', '.stats');
+    const base = join(sandbox, '.pipeline', '.stats');
     const runsFile = join(base, 'halt-zero', 'runs.jsonl');
     const [rec] = parseRunRecords(readFileSync(runsFile, 'utf8'));
     expect(rec.llm_steps).toBe(0);
@@ -440,7 +440,7 @@ describe('file lifecycle: append → finalize → enrich', () => {
       failure_class: 'crash',
     });
     statsFinalizeRun(root, 'run-sf', 'halted', 'script step 01-push failed (crash)');
-    const base = join(sandbox, '.claude', 'pipeline', '.stats');
+    const base = join(sandbox, '.pipeline', '.stats');
     const log = readFileSync(join(base, 'script-fail', 'runs', 'run-sf.log'), 'utf8');
     expect(log).toContain('01-push');
     expect(log).toContain('failed: crash');
@@ -635,7 +635,7 @@ describe('parse helpers tolerate corruption', () => {
     const root = mkPipeline('p5');
     statsAppend(root, 'r', { k: 'run.started' });
     statsFinalizeRun(root, 'r', 'completed', null);
-    const base = join(sandbox, '.claude', 'pipeline', '.stats');
+    const base = join(sandbox, '.pipeline', '.stats');
     // plant a decoy runs.jsonl inside the per-run dir — must NOT be picked up
     writeFileSync(join(base, 'p5', 'runs', 'runs.jsonl'), '{"run_id":"decoy"}\n', 'utf8');
     const files = findRunsFiles(base);

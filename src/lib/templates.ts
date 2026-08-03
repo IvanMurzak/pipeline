@@ -1,7 +1,7 @@
 // Template library for `pipeline clone`.
 //
 // `pipeline clone <name>` copies a bundled, ready-made pipeline TEMPLATE into a
-// consumer project's `./.pipelines/<name>/`. The templates SHIP INSIDE
+// consumer project's `./.pipeline/<name>/`. The templates SHIP INSIDE
 // this package (apps/pipeline-cli/templates/<name>/…) so they are present both
 // when the CLI runs from a plugin checkout AND from an installed npm tarball:
 // the published `bin` points at `src/cli.ts` verbatim (no bundle step ships —

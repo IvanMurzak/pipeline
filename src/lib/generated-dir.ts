@@ -4,8 +4,8 @@
  * on every consumer project remembering to add one.
  *
  * Why a nested `.gitignore` and not documentation: a pipeline writes its
- * runtime state INTO the user's repository (`.pipelines/.runtime/`,
- * `<pipeline>/.feedback/`, `.pipelines/.stats/`). Without a rule, the
+ * runtime state INTO the user's repository (`.pipeline/.runtime/`,
+ * `<pipeline>/.feedback/`, `.pipeline/.stats/`). Without a rule, the
  * first `git add -A` after a run sweeps session ids, per-run journals and
  * rendered shadow copies into a commit. A self-contained stub at the ROOT of
  * each generated tree works out of the box in any repo, including one whose

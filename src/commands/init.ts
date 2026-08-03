@@ -396,7 +396,7 @@ export type CloneStatus = 'cloned' | 'already-present' | 'failed';
  *  it must read as ✓ (already present), never a failure (03 §4). Reuses the
  *  SAME copy-tree primitive clone.ts itself calls (lib/templates.ts). */
 function cloneStarter(dir: string, template: string): { status: CloneStatus; dest: string; detail?: string } {
-  const dest = join(dir, '.claude', 'pipeline', template);
+  const dest = join(dir, '.pipeline', template);
   if (existsSync(dest)) return { status: 'already-present', dest };
   try {
     copyTemplateTree(template, dest);
@@ -409,7 +409,7 @@ function cloneStarter(dir: string, template: string): { status: CloneStatus; des
 /** POSIX-relative display path, independent of the host path separator, so
  *  human output and --json's `path` field are stable across platforms. */
 function relPosixPath(template: string): string {
-  return ['.claude', 'pipeline', template].join('/');
+  return ['.pipeline', template].join('/');
 }
 
 interface RunOutcome {

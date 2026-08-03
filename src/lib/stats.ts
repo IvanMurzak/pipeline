@@ -4,7 +4,7 @@
 // via the stats relay hook — tokens folded from the raw transcripts) into
 // simple text files the user reviews directly:
 //
-//   <project>/.pipelines/.stats/
+//   <project>/.pipeline/.stats/
 //     SUMMARY.md                     # rollup: per pipeline — runs, success, avg duration/tokens
 //     <pipeline-rel>/runs.jsonl      # one machine-readable line per finished run
 //     <pipeline-rel>/runs/<id>.log   # human per-run timeline (step-by-step timings)
@@ -101,7 +101,7 @@ export function mainCheckoutPipelineRoot(pipelineRoot: string): string {
 }
 
 /** Resolve where stats live for a pipeline root. Walks up looking for the
- *  canonical `<project>/.pipelines` ancestor so every pipeline in a
+ *  canonical `<project>/.pipeline` ancestor so every pipeline in a
  *  project (including nested targets) shares ONE `.stats/` tree. A pipeline
  *  root inside a git worktree resolves to the MAIN checkout's tree, so the
  *  measurements outlive the worktree. */

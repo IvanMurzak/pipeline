@@ -2,7 +2,7 @@
 //
 // TWO stores, deliberately separate (the load-bearing security split of T1-16):
 //
-//  1. The project binding — `<cwd>/.pipelines/cloud.json`. Holds ONLY
+//  1. The project binding — `<cwd>/.pipeline/cloud.json`. Holds ONLY
 //     non-secret slugs/URLs (control-plane base URL, org slug, project slug).
 //     Safe to commit to the consumer's repo. NEVER a token/cookie/device_code.
 //
@@ -130,7 +130,7 @@ export interface CredentialStore {
   servers: Record<string, StoredCredential>;
 }
 
-/** Non-secret — safe to commit. Written to `<cwd>/.pipelines/cloud.json`. */
+/** Non-secret — safe to commit. Written to `<cwd>/.pipeline/cloud.json`. */
 export interface CloudBinding {
   /** Control-plane API base URL. */
   server: string;
@@ -208,7 +208,7 @@ export function credentialLockPath(ctx: HomeContext): string {
 
 /** The project binding path — resolved against the consumer project's cwd. */
 export function cloudJsonPath(cwd: string): string {
-  return join(cwd, '.claude', 'pipeline', 'cloud.json');
+  return join(cwd, '.pipeline', 'cloud.json');
 }
 
 /** Default project slug when --project is omitted: the cwd's directory name. */

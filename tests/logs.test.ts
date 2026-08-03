@@ -86,7 +86,7 @@ test('formatEvent: iteration.started shows index, basename, model, step_id', () 
       run_id: 'r',
       data: {
         index: 2,
-        iteration_path: '/a/b/.pipelines/x/steps/02-foo.md',
+        iteration_path: '/a/b/.pipeline/x/steps/02-foo.md',
         resolved_model: 'sonnet',
         step_id: 'build',
       },
@@ -102,7 +102,7 @@ test('formatEvent: iteration.started tags a script step (§12)', () => {
       ts: '2026-05-21T10:11:12.000Z',
       type: 'iteration.started',
       run_id: 'r',
-      data: { index: 3, iteration_path: '/a/b/.pipelines/x/steps/03-wait-ci.md', step_type: 'script' },
+      data: { index: 3, iteration_path: '/a/b/.pipeline/x/steps/03-wait-ci.md', step_type: 'script' },
     },
     false,
   );
@@ -176,14 +176,14 @@ test('formatEvent: color=true wraps in ANSI escapes', () => {
   expect(colored).toContain('\x1b[');
 });
 
-test('journalPathFor: resolves to <project>/.pipelines/.runtime/events.jsonl', () => {
+test('journalPathFor: resolves to <project>/.pipeline/.runtime/events.jsonl', () => {
   const root = mkdtempSync(join(tmpdir(), 'logs-root-'));
   created.push(root);
   // A `.git` directory makes resolveProjectRoot stop here (the main repo).
   mkdirSync(join(root, '.git'), { recursive: true });
   const deep = join(root, 'a', 'b');
   mkdirSync(deep, { recursive: true });
-  const expected = join(root, '.claude', 'pipeline', '.runtime', 'events.jsonl');
+  const expected = join(root, '.pipeline', '.runtime', 'events.jsonl');
   expect(journalPathFor(root)).toBe(expected);
   expect(journalPathFor(deep)).toBe(expected);
 });

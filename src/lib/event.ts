@@ -1,7 +1,7 @@
 // Pipeline UI — event writer (TypeScript port of apps/pipeline-ui/writer.py).
 //
 // Appends one JSON event to
-//     <project-root>/.pipelines/.runtime/events.jsonl
+//     <project-root>/.pipeline/.runtime/events.jsonl
 //
 // Also (best-effort, non-blocking) pings the local UI daemon's /api/register
 // endpoint so newly-touched projects show up in the project picker. If the
@@ -248,7 +248,7 @@ export function resolveProjectRoot(start: string): ResolvedRoot {
 // ---------------------------------------------------------------------------
 
 function ensureRuntimeDir(projectRoot: string): string {
-  const runtime = join(projectRoot, '.claude', 'pipeline', '.runtime');
+  const runtime = join(projectRoot, '.pipeline', '.runtime');
   // The whole .runtime tree is machine-generated — journals, liveness
   // lockfiles, per-run session ids, rendered shadow copies. Mark it ignored at
   // the root so a `git add -A` after a run cannot sweep it into a commit.
@@ -257,7 +257,7 @@ function ensureRuntimeDir(projectRoot: string): string {
 }
 
 function runsLivenessDir(projectRoot: string): string {
-  return join(projectRoot, '.claude', 'pipeline', '.runtime', 'runs');
+  return join(projectRoot, '.pipeline', '.runtime', 'runs');
 }
 
 // ---------------------------------------------------------------------------
@@ -774,7 +774,7 @@ function resolveRootForSubcommand(argv: string[]): SubcommandRoot {
 // ---------------------------------------------------------------------------
 
 /** Write a per-run liveness lockfile:
- *  <project>/.pipelines/.runtime/runs/<run_id>.alive = {pid, run_id, started_at}.
+ *  <project>/.pipeline/.runtime/runs/<run_id>.alive = {pid, run_id, started_at}.
  *  Requires run_id + integer pid; skips (returns 0) otherwise. Faithful port of
  *  writer.py:_write_liveness. */
 export function writeLiveness(argv: string[]): number {

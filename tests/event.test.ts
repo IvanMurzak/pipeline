@@ -75,7 +75,7 @@ afterEach(() => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const EVENTS_REL = join('.claude', 'pipeline', '.runtime', 'events.jsonl');
+const EVENTS_REL = join('.pipeline', '.runtime', 'events.jsonl');
 
 /** A controlled env: clears the writer's envelope env vars + debug, points HOME
  *  at `home`, and keeps PATH so git/bun resolve. */
@@ -245,7 +245,7 @@ describe('golden — additive worktree.* event types (no emitter change)', () =>
           'env_file=/abs/wt/abc123def456/.worktree.env',
           'port_base=5100',
           'ok=true',
-          'hook_dir=/abs/.pipelines/.hooks',
+          'hook_dir=/abs/.pipeline/.hooks',
         ]),
       repo,
       controlledEnv(home),
@@ -272,7 +272,7 @@ describe('golden — additive worktree.* event types (no emitter change)', () =>
       env_file: '/abs/wt/abc123def456/.worktree.env',
       port_base: 5100,
       ok: true,
-      hook_dir: '/abs/.pipelines/.hooks',
+      hook_dir: '/abs/.pipeline/.hooks',
     });
   });
 

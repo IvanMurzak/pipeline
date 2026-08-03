@@ -4,7 +4,7 @@
 // output capture feeding downstream `${steps.<id>.output.<f>}` bindings.
 //
 // Style mirrors script-exec-integration.test.ts (the T31 command-layer
-// harness): real temp worlds under <project>/.pipelines/<name>, cwd/HOME
+// harness): real temp worlds under <project>/.pipeline/<name>, cwd/HOME
 // sandboxed per call, and a FakeProcessRunner on invokeNext's scriptRunner
 // seam so no process ever spawns — script "executions" are prescribed results
 // keyed by PIPELINE_STEP_ID, with the resolved params file captured per call.
@@ -40,7 +40,7 @@ function mkTmp(prefix: string): string {
 
 // ---------------------------------------------------------------------------
 // World scaffolding — a consumer project holding SIBLING pipelines under
-// <project>/.pipelines/ (the layout resolvePipelineRef's parent-dir
+// <project>/.pipeline/ (the layout resolvePipelineRef's parent-dir
 // candidate serves), driven with cwd swapped to the project.
 // ---------------------------------------------------------------------------
 
@@ -63,7 +63,7 @@ function mkComposeWorld(pipelines: Record<string, PipelineFixture>): ComposeWorl
   // A real .git dir pins resolveProjectRoot (lib/event.ts) to THIS project so
   // the event journal lands here (the script-exec-integration harness).
   spawnSync('git', ['init', '-q'], { cwd: project });
-  const base = join(project, '.claude', 'pipeline');
+  const base = join(project, '.pipeline');
   const w: ComposeWorld = { project, home, base, roots: {} };
   for (const name of Object.keys(pipelines)) w.roots[name] = join(base, ...name.split('/'));
   for (const [name, p] of Object.entries(pipelines)) {

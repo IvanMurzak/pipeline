@@ -155,7 +155,7 @@ test('drive park journals awaiting_input in the exact cloud-consumed shape', () 
   const finalJson = JSON.parse(r.stdout);
   expect(finalJson.status).toBe('awaiting-input');
 
-  const journalPath = join(root, '.claude', 'pipeline', '.runtime', 'events.jsonl');
+  const journalPath = join(root, '.pipeline', '.runtime', 'events.jsonl');
   expect(existsSync(journalPath)).toBe(true);
   const parks = readFileSync(journalPath, 'utf8')
     .trim()

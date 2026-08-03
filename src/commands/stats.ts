@@ -2,7 +2,7 @@
 // `pipeline stats backfill [--project <path>] [--json]`
 //
 // View (and regenerate) the per-run measurement files the stats system writes
-// under `<project>/.pipelines/.stats/` (see lib/stats.ts — pure
+// under `<project>/.pipeline/.stats/` (see lib/stats.ts — pure
 // software, PIPELINE_STATS_ENABLED gated, default ON). The base command:
 //   1. regenerates SUMMARY.md from every recorded run (so it is always
 //      current even if a best-effort render was missed), then
@@ -81,7 +81,7 @@ export function runStats(args: string[]): number {
   const { project, json } = parsed;
 
   const root = resolve(project ?? process.cwd());
-  const base = join(root, '.claude', 'pipeline', '.stats');
+  const base = join(root, '.pipeline', '.stats');
   if (!existsSync(base)) {
     process.stdout.write(
       `no measurements yet: ${base} does not exist` +

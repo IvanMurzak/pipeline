@@ -45,7 +45,7 @@ function mkTmp(prefix: string): string {
 
 // ---------------------------------------------------------------------------
 // World scaffolding (the script-exec-integration harness): a consumer project
-// with one pipeline at <project>/.pipelines/demo/, driven with cwd
+// with one pipeline at <project>/.pipeline/demo/, driven with cwd
 // swapped to the project. The rendered slug is therefore 'demo'.
 // ---------------------------------------------------------------------------
 
@@ -63,7 +63,7 @@ function mkWorld(manifest: string): World {
   // A real .git dir pins resolveProjectRoot (lib/event.ts) to THIS project so
   // the event journal lands here, never in an enclosing repo.
   spawnSync('git', ['init', '-q'], { cwd: project });
-  const root = join(project, '.claude', 'pipeline', 'demo');
+  const root = join(project, '.pipeline', 'demo');
   const steps = join(root, 'steps');
   const scripts = join(root, 'scripts');
   mkdirSync(steps, { recursive: true });
@@ -113,7 +113,7 @@ const stateOf = (w: World, runId: string): NextState => readJson(join(w.root, '.
 const renderedRoot = (w: World, runId: string): string => join(w.root, '.runtime', runId, 'rendered', 'demo');
 
 function readEvents(w: World): any[] {
-  const f = join(w.project, '.claude', 'pipeline', '.runtime', 'events.jsonl');
+  const f = join(w.project, '.pipeline', '.runtime', 'events.jsonl');
   if (!existsSync(f)) return [];
   return readFileSync(f, 'utf8')
     .trim()

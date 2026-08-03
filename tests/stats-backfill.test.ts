@@ -36,7 +36,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 function statsDir(rel = 'demo'): string {
-  return join(projectRoot, '.claude', 'pipeline', '.stats', rel);
+  return join(projectRoot, '.pipeline', '.stats', rel);
 }
 
 function runsJsonlPath(rel = 'demo'): string {
@@ -203,7 +203,7 @@ describe('backfillProject', () => {
     const rec = baseRecord({ run_id: 'hl-1', runner: 'headless', pipeline: 'demo' });
     writeRuns([rec]);
 
-    const pipelineRoot = join(projectRoot, '.claude', 'pipeline', 'demo');
+    const pipelineRoot = join(projectRoot, '.pipeline', 'demo');
     const sessionsDir = join(pipelineRoot, '.runtime', 'hl-1', 'sessions');
     mkdirSync(sessionsDir, { recursive: true });
     const spawnCwd = pipelineRoot;
@@ -236,7 +236,7 @@ describe('backfillProject', () => {
     const rec = baseRecord({ run_id: 'hl-usage', runner: 'headless', pipeline: 'demo' });
     writeRuns([rec]);
 
-    const pipelineRoot = join(projectRoot, '.claude', 'pipeline', 'demo');
+    const pipelineRoot = join(projectRoot, '.pipeline', 'demo');
     const runtimeDir = join(pipelineRoot, '.runtime', 'hl-usage');
     const sessionsDir = join(runtimeDir, 'sessions');
     mkdirSync(sessionsDir, { recursive: true });
@@ -450,7 +450,7 @@ describe('backfillProject', () => {
 
     const runsFile = runsJsonlPath();
     const logFile = join(statsDir(), 'runs', 'idem-1.log');
-    const summaryFile = join(projectRoot, '.claude', 'pipeline', '.stats', 'SUMMARY.md');
+    const summaryFile = join(projectRoot, '.pipeline', '.stats', 'SUMMARY.md');
     expect(existsSync(summaryFile)).toBe(true);
     const mtimesBefore = { runs: mtimeMs(runsFile), log: mtimeMs(logFile), summary: mtimeMs(summaryFile) };
 

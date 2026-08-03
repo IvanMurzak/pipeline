@@ -11,7 +11,7 @@
 // with no X forwarding, the browser opener exits non-zero, or `--device` was
 // passed explicitly. Either way the obtained token lands in the SECURE
 // per-user credential store, then a NON-SECRET project↔cloud binding is
-// recorded in `<cwd>/.pipelines/cloud.json`.
+// recorded in `<cwd>/.pipeline/cloud.json`.
 //
 // Server contract (read-only source of truth):
 //   Device flow — apps/api/src/modules/mesh-oauth/routes.ts (task a3 — the
@@ -475,7 +475,7 @@ const USAGE =
   '  agents): it suppresses every prompt and browser attempt — no TTY needed.\n' +
   '  --machine-token works the same way but keeps the secret out of argv by\n' +
   `  preferring ${MACHINE_TOKEN_ENV}. Combining either with --device is a usage error.\n` +
-  '  Writes non-secret slugs to .pipelines/cloud.json; the credential is\n' +
+  '  Writes non-secret slugs to .pipeline/cloud.json; the credential is\n' +
   '  stored separately in a secure per-user location (never in the project).\n' +
   '\n' +
   '  After connecting, asks "Also run cloud pipelines on this machine?" and,\n' +
@@ -1453,7 +1453,7 @@ export interface ApiAuth {
 /**
  * Run 04§4's selection ladder and return a live credential + the org it acts
  * in. This is the WHOLE of `cloud connect`'s authentication and NONE of its
- * project binding: no `.pipelines/cloud.json` is read or written here.
+ * project binding: no `.pipeline/cloud.json` is read or written here.
  *
  * Extracted for `pipeline department serve` (task a9), which 05 §5 step 2
  * requires to authenticate "via the [04] ladder, `PIPELINE_MACHINE_TOKEN`

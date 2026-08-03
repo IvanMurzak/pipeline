@@ -54,18 +54,18 @@ process.exit(3);
 
 interface World {
   project: string; // the consumer project root (git repo, cwd during the run)
-  root: string; // the pipeline root, under <project>/.pipelines/demo
+  root: string; // the pipeline root, under <project>/.pipeline/demo
   steps: string;
   scripts: string;
 }
 
-/** A consumer project holding one pipeline at <project>/.pipelines/demo
+/** A consumer project holding one pipeline at <project>/.pipeline/demo
  *  (so statsLocation resolves the .stats tree inside the sandbox). */
 function mkWorld(manifest = '# P\n\n## End State\nx\n'): World {
   const project = mkdtempSync(join(tmpdir(), 'drivescript-'));
   created.push(project);
   spawnSync('git', ['init', '-q'], { cwd: project });
-  const root = join(project, '.claude', 'pipeline', 'demo');
+  const root = join(project, '.pipeline', 'demo');
   const steps = join(root, 'steps');
   const scripts = join(root, 'scripts');
   mkdirSync(steps, { recursive: true });
@@ -190,7 +190,7 @@ test('drive: mixed agent+script run — script executes in-process (no executor 
 
   // Stats: the run record + per-run log carry the script step (llm_steps counts
   // only the two agent dispatches).
-  const runsFile = join(w.project, '.claude', 'pipeline', '.stats', 'demo', 'runs.jsonl');
+  const runsFile = join(w.project, '.pipeline', '.stats', 'demo', 'runs.jsonl');
   expect(existsSync(runsFile)).toBe(true);
   const rec = JSON.parse(readFileSync(runsFile, 'utf8').trim().split('\n')[0]);
   expect(rec.run_id).toBe(run);
@@ -201,7 +201,7 @@ test('drive: mixed agent+script run — script executes in-process (no executor 
   // Exactly one recorded step is tagged step_type:script (the in-process step).
   const scriptStats = rec.steps.filter((s: any) => s.step_type === 'script');
   expect(scriptStats.length).toBe(1);
-  const log = readFileSync(join(w.project, '.claude', 'pipeline', '.stats', 'demo', 'runs', `${run}.log`), 'utf8');
+  const log = readFileSync(join(w.project, '.pipeline', '.stats', 'demo', 'runs', `${run}.log`), 'utf8');
   expect(log).toContain('(script)');
 }, 30000);
 

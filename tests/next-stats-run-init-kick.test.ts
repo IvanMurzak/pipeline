@@ -27,7 +27,7 @@ afterEach(() => {
   }
 });
 
-/** Canonical layout: `<projectRoot>/.pipelines/demo` is the ACTIVE
+/** Canonical layout: `<projectRoot>/.pipeline/demo` is the ACTIVE
  *  pipeline (`--root` for `pipeline next`); a SEPARATE `other` pipeline under
  *  the same project already has a stale tokens:null manager record with a
  *  matching transcript on disk — exactly what the run-init kick should pick
@@ -35,7 +35,7 @@ afterEach(() => {
 function scaffold(): { projectRoot: string; pipelineRoot: string; staleRunId: string } {
   const projectRoot = mkdtempSync(join(tmpdir(), 'next-kick-'));
   created.push(projectRoot);
-  const pipelineRoot = join(projectRoot, '.claude', 'pipeline', 'demo');
+  const pipelineRoot = join(projectRoot, '.pipeline', 'demo');
   mkdirSync(join(pipelineRoot, 'steps'), { recursive: true });
   writeFileSync(join(pipelineRoot, 'PIPELINE.md'), '# P\n\n## End State\nx\n');
   writeFileSync(join(pipelineRoot, 'steps', '01-step.md'), '# step 1\n');
@@ -49,7 +49,7 @@ function scaffold(): { projectRoot: string; pipelineRoot: string; staleRunId: st
   // ended_at must stay close to "now".
   const startedAt = new Date(now - 30_000).toISOString();
   const endedAt = new Date(now).toISOString();
-  const otherStatsDir = join(projectRoot, '.claude', 'pipeline', '.stats', 'other');
+  const otherStatsDir = join(projectRoot, '.pipeline', '.stats', 'other');
   mkdirSync(join(otherStatsDir, 'runs'), { recursive: true });
   const rec = {
     schema: 1,
@@ -113,7 +113,7 @@ function nextInit(pipelineRoot: string, runId: string, envOverrides: NodeJS.Proc
 }
 
 function readStaleRecord(projectRoot: string, staleRunId: string): { tokens: unknown } {
-  const text = readFileSync(join(projectRoot, '.claude', 'pipeline', '.stats', 'other', 'runs.jsonl'), 'utf8');
+  const text = readFileSync(join(projectRoot, '.pipeline', '.stats', 'other', 'runs.jsonl'), 'utf8');
   return JSON.parse(text.trim().split('\n').find((l) => l.includes(staleRunId)) as string);
 }
 

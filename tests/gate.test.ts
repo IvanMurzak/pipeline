@@ -50,7 +50,7 @@ afterEach(() => {
 
 interface World {
   project: string; // consumer project root (git repo, cwd during the run)
-  root: string; // pipeline root at <project>/.pipelines/demo
+  root: string; // pipeline root at <project>/.pipeline/demo
   steps: string;
 }
 
@@ -58,7 +58,7 @@ function mkWorld(manifest = '# P\n\n## End State\nx\n'): World {
   const project = mkdtempSync(join(tmpdir(), 'gate-'));
   created.push(project);
   spawnSync('git', ['init', '-q'], { cwd: project });
-  const root = join(project, '.claude', 'pipeline', 'demo');
+  const root = join(project, '.pipeline', 'demo');
   const steps = join(root, 'steps');
   mkdirSync(steps, { recursive: true });
   writeFileSync(join(root, 'PIPELINE.md'), manifest);
@@ -464,7 +464,7 @@ test('drive: a gate parks the run (exit 4) with the approval question — NO exe
   expect(again.calls).toEqual([]);
   // … and the park is JOURNALLED as awaiting_input (the cloud-ingest-consumed
   // shape — see awaiting-input-contract.test.ts), approval marker included.
-  const journal = readFileSync(join(w.project, '.claude', 'pipeline', '.runtime', 'events.jsonl'), 'utf8')
+  const journal = readFileSync(join(w.project, '.pipeline', '.runtime', 'events.jsonl'), 'utf8')
     .trim()
     .split('\n')
     .filter(Boolean)

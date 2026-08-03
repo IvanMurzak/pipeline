@@ -70,7 +70,7 @@ function departmentYaml(): string {
     '\n' +
     'runtime:\n' +
     '  engine: pipeline\n' +
-    '  pipelineRoot: .pipelines/review\n' +
+    '  pipelineRoot: .pipeline/review\n' +
     '  startIteration: steps/01-plan.md\n'
   );
 }
@@ -79,7 +79,7 @@ function departmentYaml(): string {
 function departmentProject(): string {
   const dir = mkdtempSync(join(tmpdir(), 'dept-status-'));
   created.push(dir);
-  const pipelineRoot = join(dir, '.claude', 'pipeline', 'review');
+  const pipelineRoot = join(dir, '.pipeline', 'review');
   mkdirSync(join(pipelineRoot, 'steps'), { recursive: true });
   writeFileSync(join(pipelineRoot, 'PIPELINE.md'), PIPELINE_MANIFEST);
   writeFileSync(join(pipelineRoot, 'steps', '01-plan.md'), '# Plan\n');

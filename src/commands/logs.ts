@@ -65,11 +65,11 @@ export function parseLogsArgs(args: string[]): LogsArgs {
   return out;
 }
 
-/** Resolve `<project-root>/.pipelines/.runtime/events.jsonl` for a start
+/** Resolve `<project-root>/.pipeline/.runtime/events.jsonl` for a start
  *  dir. A git worktree resolves to its MAIN repo (where events are journaled). */
 export function journalPathFor(startDir: string): string {
   const { project_root } = resolveProjectRoot(resolve(startDir));
-  return join(project_root, '.claude', 'pipeline', '.runtime', 'events.jsonl');
+  return join(project_root, '.pipeline', '.runtime', 'events.jsonl');
 }
 
 // ---------------------------------------------------------------------------

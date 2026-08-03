@@ -60,9 +60,9 @@ function mkTmp(prefix: string): string {
   return d;
 }
 
-/** Write one pipeline (PIPELINE.md + steps/01-*.md) under <root>/.pipelines/. */
+/** Write one pipeline (PIPELINE.md + steps/01-*.md) under <root>/.pipeline/. */
 function writePipeline(root: string, name: string, endState: string, scopeIn: string): string {
-  const pipelineRoot = join(root, ".claude", "pipeline", name);
+  const pipelineRoot = join(root, ".pipeline", name);
   mkdirSync(join(pipelineRoot, "steps"), { recursive: true });
   writeFileSync(
     join(pipelineRoot, "PIPELINE.md"),
@@ -205,8 +205,8 @@ describe("shouldSkipPrompt", () => {
 function cand(name: string, score: number): Candidate {
   return {
     name,
-    manifest: join("proj", ".claude", "pipeline", name, "PIPELINE.md"),
-    first_iteration: join("proj", ".claude", "pipeline", name, "steps", "01-start.md"),
+    manifest: join("proj", ".pipeline", name, "PIPELINE.md"),
+    first_iteration: join("proj", ".pipeline", name, "steps", "01-start.md"),
     end_state: "done",
     score,
     matched_terms: [],
@@ -242,7 +242,7 @@ describe("buildContextLine", () => {
     const c = cand("deploy-service", 1.0);
     const line = buildContextLine(c);
     expect(line).toContain("'deploy-service'");
-    expect(line).toContain(join("proj", ".claude", "pipeline", "deploy-service"));
+    expect(line).toContain(join("proj", ".pipeline", "deploy-service"));
     expect(line).toContain(`/pipeline:run ${c.first_iteration}`);
     expect(line).toContain("/pipeline:dispatch");
   });
@@ -256,10 +256,10 @@ describe("buildContextLine", () => {
 });
 
 describe("findPipelineDirUpTo", () => {
-  test("finds .pipelines from a nested cwd", () => {
+  test("finds .pipeline from a nested cwd", () => {
     const { root } = makeConfidentProject();
-    const deep = join(root, ".claude", "pipeline", "deploy-service", "steps");
-    expect(findPipelineDirUpTo(deep, root)).toBe(join(root, ".claude", "pipeline"));
+    const deep = join(root, ".pipeline", "deploy-service", "steps");
+    expect(findPipelineDirUpTo(deep, root)).toBe(join(root, ".pipeline"));
   });
 
   test("returns null when no pipeline dir exists up to the root", () => {
@@ -308,7 +308,7 @@ describe("prompt_match_relay end-to-end", () => {
     expect(r.stdout).toBe("");
   });
 
-  test("no .pipelines dir → exit 0, no output", () => {
+  test("no .pipeline dir → exit 0, no output", () => {
     const root = mkTmp("pm-nopipe-");
     mkdirSync(join(root, "src"), { recursive: true });
     const r = runHook(root, promptPayload(root, CONFIDENT_PROMPT), { envValue: "1" });
