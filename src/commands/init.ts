@@ -1,12 +1,22 @@
-// `pipeline init [<template>] [--no-plugin] [--no-ui] [--no-run] [--run]
+// `pipeline init [<template>] [--no-plugin] [--no-run] [--run]
 //               [--yes|-y] [--dir <path>] [--json]`
 //
 // The single local-first entry point (simplified-onboarding design, task a1):
-// replaces four documented actions across three surfaces — install the
-// plugin, clone a starter pipeline, start the dashboard, offer to run it —
-// with one command. See .claude/design/simplified-onboarding/03-pipeline-init.md
-// (the contract) and 02-target-experience.md §1 (the transcript — it wins on
-// any conflict with prose).
+// replaces the documented actions of setting up a project — install the
+// plugin, clone a starter pipeline, offer to run it — with one command. See
+// .claude/design/simplified-onboarding/03-pipeline-init.md (the contract,
+// left as originally shipped — see the note below) and
+// 02-target-experience.md §1 (the transcript — it wins on any conflict with
+// prose).
+//
+// plugin-thin 01-remove-local-ui.md phase 1 (2026-08-02): the local dashboard
+// used to be a fourth composed step here, started unconditionally as part of
+// onboarding. It is being phased out in favor of the cloud dashboard, and
+// phase 1 is "stop advertising it, keep it working" — so this command no
+// longer starts it or mentions it; `pipeline ui` itself is untouched and
+// still works when invoked directly. The immutable design doc above still
+// describes the original four-step shape; this comment is the accurate
+// record of what ships now.
 //
 // COMPOSITION, NOT REIMPLEMENTATION. Every side effect below delegates to an
 // existing primitive:
@@ -15,11 +25,6 @@
 //                  rule — refuse to overwrite without --force — is checked
 //                  here BEFORE calling it, because "already cloned" must read
 //                  as a ✓, not clone's own exit-1 "already exists" error).
-//   - dashboard  → src/commands/ui.ts's runUi(['--json']), captured (ui.ts has
-//                  no injectable deps of its own, so its stdout is captured
-//                  and parsed rather than left to print its own format,
-//                  matching the ONE consolidated checklist line the target
-//                  transcript specifies).
 //   - plugin     → a `claude plugin marketplace add` / `claude plugin
 //                  install` shell-out (spawnSync, mirrors lib/git.ts's
 //                  realGit/gitAvailable pattern).
@@ -40,7 +45,6 @@ import { findTemplate, copyTemplateTree, formatTemplateList, TEMPLATES } from '.
 import { DEFAULT_SERVER, SERVER_ENV } from '../lib/cloud-config';
 import { computePlan } from '../lib/plan';
 import { runDrive, type DriveDeps } from './drive';
-import { runUi } from './ui';
 
 // ---------------------------------------------------------------------------
 // Args
@@ -49,7 +53,6 @@ import { runUi } from './ui';
 export interface InitOptions {
   template: string;
   noPlugin: boolean;
-  noUi: boolean;
   noRun: boolean;
   run: boolean;
   yes: boolean;
@@ -70,14 +73,13 @@ const DEFAULT_TEMPLATE = 'support-answer'; // O4 (10-decisions.md)
 
 const USAGE =
   'Usage: pipeline init [<template>] [--local] [--server <url>] [--org <slug>]\n' +
-  '                     [--project <slug>] [--no-runner] [--no-plugin] [--no-ui]\n' +
+  '                     [--project <slug>] [--no-runner] [--no-plugin]\n' +
   '                     [--no-run] [--run] [--yes|-y] [--dir <path>] [--json]\n';
 
 export function parseInitArgs(args: string[]): InitOptions | { error: string } {
   const out: InitOptions = {
     template: DEFAULT_TEMPLATE,
     noPlugin: false,
-    noUi: false,
     noRun: false,
     run: false,
     yes: false,
@@ -99,7 +101,6 @@ export function parseInitArgs(args: string[]): InitOptions | { error: string } {
       return v;
     };
     if (a === '--no-plugin') out.noPlugin = true;
-    else if (a === '--no-ui') out.noUi = true;
     else if (a === '--no-run') out.noRun = true;
     else if (a === '--run') out.run = true;
     else if (a === '--yes' || a === '-y') out.yes = true;
@@ -147,7 +148,7 @@ function helpText(): string {
     'One command from a bare project to a completed run you can watch on your\n' +
     'account: authorizes in the browser, connects this project, installs the\n' +
     'Claude Code plugin, clones a starter pipeline, enrols this machine as a\n' +
-    'runner, starts the local dashboard, and offers to run it.\n\n' +
+    'runner, and offers to run it.\n\n' +
     'It connects to the cloud BY DEFAULT. `--local` does everything except\n' +
     'that, and sends nothing anywhere.\n\n' +
     'Options:\n' +
@@ -161,7 +162,6 @@ function helpText(): string {
     '  --project <slug> Project slug for the binding. Default: this folder.\n' +
     '  --no-runner      Connect, but do not enrol this machine as a runner.\n' +
     '  --no-plugin      Skip the Claude Code plugin install.\n' +
-    '  --no-ui          Do not start the local dashboard.\n' +
     '  --no-run         Do not offer to run the starter pipeline.\n' +
     '  --run            Run the starter pipeline without asking (pairs with --json).\n' +
     '  --yes, -y        Assume yes to every prompt.\n' +
@@ -187,17 +187,6 @@ export interface ShellResult {
 /** Runs `claude <args>`. Mirrors lib/git.ts's GitRunner shape. */
 export type ClaudeCliRunner = (args: string[]) => ShellResult;
 
-export interface UiStartResult {
-  ok: boolean;
-  /** Resolved dashboard URL — the RESOLVED port from the daemon lock, never a
-   *  literal (03-pipeline-init.md §2 step 4). */
-  url?: string;
-  /** Set when the UI system is explicitly opted out (PIPELINE_UI_ENABLED). */
-  disabled?: boolean;
-  /** Failure detail for the "UI port unavailable" warning row. */
-  detail?: string;
-}
-
 /** What the cloud step reports back to the checklist. */
 export interface CloudConnectResult {
   status: 'connected' | 'skipped' | 'failed';
@@ -214,12 +203,11 @@ export interface InitDeps {
   bunAvailable: () => boolean;
   claudeAvailable: () => boolean;
   claudeCli: ClaudeCliRunner;
-  startUi: () => Promise<UiStartResult>;
   /** Runs `pipeline cloud connect <args>` in-process. Defaults to the real
    *  `runCloud` — init COMPOSES the connect command rather than reproducing
-   *  the auth ladder, exactly as it composes `runUi` and `runDrive`. There is
-   *  one browser flow, one device flow and one machine-credential exchange in
-   *  this package, and this is not a second set. */
+   *  the auth ladder, exactly as it composes `runDrive`. There is one browser
+   *  flow, one device flow and one machine-credential exchange in this
+   *  package, and this is not a second set. */
   cloudConnect: (args: string[]) => Promise<number>;
   /** In-process pipeline drive engine — defaults to the real runDrive(). */
   runDrive: (args: string[], deps: DriveDeps) => Promise<number>;
@@ -254,81 +242,6 @@ function realBunAvailable(): boolean {
   if (typeof (process as { versions?: { bun?: string } }).versions?.bun === 'string') return true;
   const r = spawnSync('bun', ['--version'], { encoding: 'utf8', windowsHide: true });
   return !r.error && (r.status ?? 1) === 0;
-}
-
-/** Capture whatever `fn` writes to process.stdout while it runs. ui.ts (like
- *  clone.ts) has no output seam of its own, so this is the only way to reuse
- *  its daemon detect/spawn/register logic without reprinting its own text —
- *  the target transcript specifies ONE consolidated dashboard line, not
- *  ui.ts's own format. Restores the real stdout.write in a finally so a throw
- *  can never leave stdout captured. */
-async function captureStdout<T>(fn: () => Promise<T>): Promise<{ result: T; stdout: string }> {
-  const real = process.stdout.write.bind(process.stdout);
-  let buf = '';
-  process.stdout.write = ((chunk: unknown, ...rest: unknown[]) => {
-    buf += typeof chunk === 'string' ? chunk : String(chunk);
-    const cb = rest.find((r): r is () => void => typeof r === 'function');
-    if (cb) cb();
-    return true;
-  }) as typeof process.stdout.write;
-  try {
-    const result = await fn();
-    return { result, stdout: buf };
-  } finally {
-    process.stdout.write = real;
-  }
-}
-
-interface UiJsonShape {
-  enabled?: boolean;
-  url?: string;
-}
-
-/** Find and parse the JSON object `pipeline ui --json` printed to its
- *  captured stdout. `runUi` prints either a single-line object (the
- *  disabled-UI case, `JSON.stringify({enabled:false})`) or a pretty-printed
- *  MULTI-LINE object (`JSON.stringify({...}, null, 2)` on the success path —
- *  see src/commands/ui.ts's final `process.stdout.write`), so the JSON is not
- *  reliably on one line, let alone the last one. This tries a whole-string
- *  parse first (covers the single-line shape and the common case where the
- *  JSON is the only thing printed), then falls back to slicing from the
- *  first `{` to the last `}` in the buffer (covers the pretty-printed shape
- *  and tolerates stray non-JSON lines before or after it). Uses JSON.parse
- *  for the actual parsing either way — this only locates the substring to
- *  hand it. Returns null when no valid JSON object could be found. */
-export function extractUiJson(stdout: string): UiJsonShape | null {
-  const trimmed = stdout.trim();
-  if (!trimmed) return null;
-  try {
-    return JSON.parse(trimmed) as UiJsonShape;
-  } catch {
-    // Not a single well-formed JSON value — fall through to the bracket scan
-    // below, which handles pretty-printed output and/or surrounding noise.
-  }
-  const first = trimmed.indexOf('{');
-  const last = trimmed.lastIndexOf('}');
-  if (first === -1 || last === -1 || last < first) return null;
-  try {
-    return JSON.parse(trimmed.slice(first, last + 1)) as UiJsonShape;
-  } catch {
-    return null;
-  }
-}
-
-/** Turn `pipeline ui --json`'s captured (exit code, stdout) into a
- *  UiStartResult. Split out from defaultStartUi so tests can exercise the
- *  parsing against real captured output shapes without spawning a daemon. */
-export function parseUiStartOutput(code: number, stdout: string): UiStartResult {
-  const parsed = extractUiJson(stdout);
-  if (parsed?.enabled === false) return { ok: true, disabled: true };
-  if (code === 0 && typeof parsed?.url === 'string') return { ok: true, url: parsed.url };
-  if (code !== 0) return { ok: false, detail: `pipeline ui exited ${code}` };
-  return { ok: false, detail: 'pipeline ui exited 0 but printed no readable dashboard URL' };
-}
-
-async function defaultStartUi(): Promise<UiStartResult> {
-  const { result: code, stdout } = await captureStdout(() => runUi(['--json']));
-  return parseUiStartOutput(code, stdout);
 }
 
 async function defaultPromptYesNo(promptText: string): Promise<boolean> {
@@ -366,7 +279,6 @@ export const realInitDeps: InitDeps = {
   bunAvailable: realBunAvailable,
   claudeAvailable: realClaudeAvailable,
   claudeCli: realClaudeCli,
-  startUi: defaultStartUi,
   // Lazy import, mirroring `cli.ts`'s own reason for lazily importing `cloud`:
   // it pulls in the HTTP device-flow + loopback-server machinery, which a
   // `--local` init must never load.
@@ -396,7 +308,7 @@ export type PluginStatus = 'installed' | 'skipped' | 'failed';
  *  Both are documented as idempotent no-ops when already satisfied, so
  *  re-running init re-invokes them and still reports ✓ — no local
  *  "already done" tracking needed. A non-zero exit from either warns with its
- *  stderr and continues (the clone + dashboard are still useful). */
+ *  stderr and continues (the clone is still useful). */
 function installPlugin(deps: InitDeps): { status: PluginStatus; warning?: string } {
   const marketplace = deps.claudeCli(['plugin', 'marketplace', 'add', 'IvanMurzak/ai-pipeline-plugin']);
   const install = deps.claudeCli(['plugin', 'install', 'pipeline@ai-pipeline']);
@@ -438,7 +350,7 @@ export function cloudStepDecision(
   env: Record<string, string | undefined>,
 ): { run: true } | { run: false; reason: string | null } {
   // `--local` is an explicit opt-out; it gets no explanation line, exactly
-  // like --no-ui and --no-run.
+  // like --no-run.
   if (opts.local) return { run: false, reason: null };
   const machineToken = env[MACHINE_TOKEN_ENV]?.trim();
   if (opts.json && !machineToken) {
@@ -494,7 +406,7 @@ interface RunOutcome {
   detail?: string;
 }
 
-/** Step 5: drive the cloned starter pipeline to completion, printing a
+/** Step 4: drive the cloned starter pipeline to completion, printing a
  *  compact per-step line as it goes. Delegates the ENTIRE run engine to
  *  commands/drive.ts's runDrive() (in-process) — this function only
  *  reformats the step.started/step.completed/step.failed progress stream
@@ -578,7 +490,6 @@ interface JsonResult {
   plugin?: PluginStatus;
   template?: string;
   path?: string;
-  ui?: string | null;
   ran?: boolean;
   runOk?: boolean;
   warnings?: string[];
@@ -670,7 +581,7 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
   } else {
     if (!parsed.json) line(deps, '✓ Claude Code found');
     if (parsed.noPlugin) {
-      // skipped by explicit flag — no additional checklist line, matches --no-ui/--no-run
+      // skipped by explicit flag — no additional checklist line, matches --no-run
     } else {
       const res = installPlugin(deps);
       pluginStatus = res.status;
@@ -678,7 +589,7 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
         if (!parsed.json) line(deps, '✓ Plugin installed          pipeline@ai-pipeline');
       } else if (res.warning) {
         warnings.push(res.warning);
-        if (!parsed.json) line(deps, `⚠ ${res.warning} — continuing (the clone and dashboard are still useful).`);
+        if (!parsed.json) line(deps, `⚠ ${res.warning} — continuing (the clone is still useful).`);
       }
     }
   }
@@ -701,23 +612,7 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
     line(deps, `✓ Starter pipeline cloned   ${relPath}${suffix}`);
   }
 
-  // --- Step 4: the dashboard.
-  let uiUrl: string | null = null;
-  if (!parsed.noUi) {
-    const ui = await deps.startUi();
-    if (ui.disabled) {
-      // explicit opt-out — nothing to report, matches --no-ui's silence
-    } else if (ui.ok && ui.url) {
-      uiUrl = ui.url;
-      if (!parsed.json) line(deps, `✓ Dashboard running         ${ui.url}`);
-    } else {
-      const detail = ui.detail ?? 'the dashboard did not start';
-      warnings.push(`dashboard: ${detail}`);
-      if (!parsed.json) line(deps, `⚠ Dashboard did not start — ${detail}. Continuing (the pipeline still runs).`);
-    }
-  }
-
-  // --- Step 5: offer to run. `--json` implies non-interactive and DECLINES
+  // --- Step 4: offer to run. `--json` implies non-interactive and DECLINES
   // the optional run unless --run is also given (D27) — the opposite of the
   // naive reading. A missing `claude` skips this step outright (D19).
   //
@@ -769,7 +664,7 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
     }
   }
 
-  // --- Step 6: exactly one next-action line (03 §2 step 6) — printed only
+  // --- Step 5: exactly one next-action line (03 §2 step 6) — printed only
   // when nothing failed (a failed run already reported itself, exit 1).
   if (!runFailed) {
     if (!parsed.json) {
@@ -797,7 +692,6 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
       plugin: pluginStatus,
       template: entry.name,
       path: relPath,
-      ui: uiUrl,
       ran,
     };
     if (ran) result.runOk = runOk;

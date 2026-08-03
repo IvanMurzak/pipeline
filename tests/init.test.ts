@@ -1,12 +1,17 @@
 // Tests for `pipeline init` (src/commands/init.ts) — the one-command
 // local-first entry point (simplified-onboarding design, task a1).
 //
-// Every side effect (claude on PATH, the plugin shell-out, the dashboard, the
-// headless run engine, the yes/no prompt) is injected via InitDeps, so these
-// tests drive the FULL composition with zero real subprocess/network/stdin.
-// The clone step itself is exercised for REAL (a fast local fs copy of the
-// bundled support-answer template into a temp dir) so computePlan() sees a
-// genuine pipeline root — only claude/ui/drive/prompt are faked.
+// Every side effect (claude on PATH, the plugin shell-out, the headless run
+// engine, the yes/no prompt) is injected via InitDeps, so these tests drive
+// the FULL composition with zero real subprocess/network/stdin. The clone
+// step itself is exercised for REAL (a fast local fs copy of the bundled
+// support-answer template into a temp dir) so computePlan() sees a genuine
+// pipeline root — only claude/drive/prompt are faked.
+//
+// plugin-thin 01-remove-local-ui.md phase 1: init no longer starts the local
+// dashboard (see src/commands/init.ts's header comment) — the dashboard
+// coverage that used to live here (startUi injection, "✓ Dashboard running",
+// parseUiStartOutput) is gone with the step it tested.
 //
 // Coverage:
 //   - parseInitArgs: defaults, every flag, --dir, usage errors.
@@ -14,7 +19,7 @@
 //   - Idempotent re-run: every step prints ✓, including "(already present)".
 //   - Every row of 03-pipeline-init.md §4's failure table.
 //   - --json's documented shape, verbatim, for both examples in §5.
-//   - --no-plugin / --no-ui / --no-run / --yes / --run composition.
+//   - --no-plugin / --no-run / --yes / --run composition.
 //   - The "session already open" next-action line.
 
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -25,11 +30,9 @@ import {
   cloudConnectArgs,
   cloudStepDecision,
   parseInitArgs,
-  parseUiStartOutput,
   runInit,
   type InitDeps,
   type ShellResult,
-  type UiStartResult,
   type ClaudeCliRunner,
 } from '../src/commands/init';
 import type { DriveDeps } from '../src/commands/drive';
@@ -54,7 +57,6 @@ interface Harness {
   stdout: () => string;
   stderr: () => string;
   claudeCliCalls: string[][];
-  uiCalls: number;
   driveCalls: Array<{ args: string[] }>;
   promptCalls: string[];
   /** Every `cloud connect` argv init composed — empty when it never tried. */
@@ -65,7 +67,6 @@ interface HarnessOpts {
   claudeAvailable?: boolean;
   bunAvailable?: boolean;
   claudeCli?: (args: string[]) => ShellResult;
-  startUi?: () => Promise<UiStartResult>;
   /** Fake headless run engine. Default: 3 support-answer steps, all succeed,
    *  0.1s apart on the fake clock. */
   runDrive?: (args: string[], driveDeps: DriveDeps) => Promise<number>;
@@ -108,7 +109,6 @@ function fakeSuccessfulDrive(opts: {
 function harness(opts: HarnessOpts = {}): Harness {
   let stdout = '';
   let stderr = '';
-  let uiCalls = 0;
   const claudeCliCalls: string[][] = [];
   const driveCalls: Array<{ args: string[] }> = [];
   const promptCalls: string[] = [];
@@ -118,9 +118,6 @@ function harness(opts: HarnessOpts = {}): Harness {
   const claudeCliImpl: ClaudeCliRunner =
     opts.claudeCli ??
     (() => ({ code: 0, stdout: 'ok\n', stderr: '' }));
-
-  const startUiImpl: () => Promise<UiStartResult> =
-    opts.startUi ?? (async () => ({ ok: true, url: 'http://127.0.0.1:51734/' }));
 
   const runDriveImpl = opts.runDrive ?? fakeSuccessfulDrive({ clock });
 
@@ -140,10 +137,6 @@ function harness(opts: HarnessOpts = {}): Harness {
       claudeCliCalls.push(args);
       return claudeCliImpl(args);
     },
-    startUi: async () => {
-      uiCalls++;
-      return startUiImpl();
-    },
     cloudConnect: async (args) => {
       cloudCalls.push(args);
       return opts.cloudConnect ? opts.cloudConnect(args) : 0;
@@ -162,9 +155,6 @@ function harness(opts: HarnessOpts = {}): Harness {
     stdout: () => stdout,
     stderr: () => stderr,
     claudeCliCalls,
-    get uiCalls() {
-      return uiCalls;
-    },
     driveCalls,
     promptCalls,
     cloudCalls,
@@ -181,7 +171,6 @@ describe('parseInitArgs', () => {
     expect(r).toEqual({
       template: 'support-answer',
       noPlugin: false,
-      noUi: false,
       noRun: false,
       run: false,
       yes: false,
@@ -201,13 +190,12 @@ describe('parseInitArgs', () => {
 
   test('every flag parses, including -y and --dir', () => {
     const r = parseInitArgs([
-      '--no-plugin', '--no-ui', '--run', '-y', '--dir', '/tmp/x', '--json',
+      '--no-plugin', '--run', '-y', '--dir', '/tmp/x', '--json',
       '--server', 'http://127.0.0.1:39500', '--org', 'acme', '--project', 'proj', '--no-runner',
     ]);
     expect(r).toEqual({
       template: 'support-answer',
       noPlugin: true,
-      noUi: true,
       noRun: false,
       run: true,
       yes: true,
@@ -226,10 +214,14 @@ describe('parseInitArgs', () => {
     const r = parseInitArgs(['--server=http://x', '--org=acme', '--project=p']);
     expect(r).toEqual({
       template: 'support-answer',
-      noPlugin: false, noUi: false, noRun: false, run: false, yes: false, json: false, help: false,
+      noPlugin: false, noRun: false, run: false, yes: false, json: false, help: false,
       local: false, noRunner: false,
       server: 'http://x', org: 'acme', project: 'p',
     });
+  });
+
+  test('--no-ui is no longer a recognized flag (dashboard removed from onboarding, plugin-thin phase 1)', () => {
+    expect(parseInitArgs(['--no-ui'])).toEqual({ error: "unknown flag '--no-ui'" });
   });
 
   test('a cloud flag with no value is a usage error, not a silent skip', () => {
@@ -291,7 +283,7 @@ describe('pipeline init — happy path', () => {
     expect(out).toContain('✓ Plugin installed');
     expect(out).toContain('✓ Starter pipeline cloned   .claude/pipeline/support-answer');
     expect(out).not.toContain('(already present)');
-    expect(out).toContain('✓ Dashboard running         http://127.0.0.1:51734/');
+    expect(out).not.toContain('Dashboard'); // plugin-thin phase 1: no longer part of onboarding
     expect(out).toContain('Run it now? [Y/n] y');
     expect(out).toContain('▶ support-answer');
     // Per-step lines with timing, in order.
@@ -345,7 +337,6 @@ describe('pipeline init — happy path', () => {
     expect(out).toContain('✓ Claude Code found');
     expect(out).toContain('✓ Plugin installed');
     expect(out).toContain('✓ Starter pipeline cloned   .claude/pipeline/support-answer (already present)');
-    expect(out).toContain('✓ Dashboard running');
     expect(out).toContain('▶ support-answer'); // re-offered and ran again
     expect(out).toContain('✓ Complete');
   });
@@ -373,7 +364,6 @@ describe('pipeline init --json', () => {
       plugin: 'installed',
       template: 'support-answer',
       path: '.claude/pipeline/support-answer',
-      ui: 'http://127.0.0.1:51734/',
       ran: false,
     });
   });
@@ -392,7 +382,6 @@ describe('pipeline init --json', () => {
       plugin: 'installed',
       template: 'support-answer',
       path: '.claude/pipeline/support-answer',
-      ui: 'http://127.0.0.1:51734/',
       ran: true,
       runOk: true,
     });
@@ -445,9 +434,8 @@ describe('failure modes (03-pipeline-init.md §4)', () => {
     const out = h.stdout();
     expect(out).toContain('Claude Code not found on PATH');
     expect(out).toContain('Install Claude Code, then re-run: pipeline init');
-    // Clone + dashboard still ran.
+    // The clone still ran.
     expect(existsSync(join(proj, '.claude', 'pipeline', 'support-answer', 'PIPELINE.md'))).toBe(true);
-    expect(out).toContain('✓ Dashboard running');
   });
 
   test('claude missing, --json: exits 0, ran:false, plugin:"skipped", warns in the warnings array', async () => {
@@ -476,7 +464,7 @@ describe('failure modes (03-pipeline-init.md §4)', () => {
     expect(h.stderr()).toContain('claude /login'); // the claude login command (03 §4)
   });
 
-  test('`claude plugin install` non-zero: warns with stderr, continues (clone + ui + run still happen)', async () => {
+  test('`claude plugin install` non-zero: warns with stderr, continues (clone + run still happen)', async () => {
     const proj = tempProject();
     let call = 0;
     const h = harness({
@@ -509,18 +497,6 @@ describe('failure modes (03-pipeline-init.md §4)', () => {
     expect(h.stdout()).toContain('✓ Starter pipeline cloned   .claude/pipeline/support-answer (already present)');
   });
 
-  test('UI port unavailable: warns, continues — the pipeline still runs, only the dashboard is missing', async () => {
-    const proj = tempProject();
-    const h = harness({ startUi: async () => ({ ok: false, detail: 'no free port found' }) });
-    const code = await runInit(['--dir', proj, '--run'], h.deps);
-    expect(code).toBe(0);
-    const out = h.stdout();
-    expect(out).not.toContain('✓ Dashboard running');
-    expect(out).toContain('Dashboard did not start');
-    expect(out).toContain('no free port found');
-    expect(out).toContain('✓ Complete'); // the run still happened
-  });
-
   test('starter run fails: reports the failing step + its output, exit 1', async () => {
     const proj = tempProject();
     const clock = { t: 0 };
@@ -549,14 +525,6 @@ describe('flag composition', () => {
     expect(h.claudeCliCalls.length).toBe(0);
     expect(h.stdout()).not.toContain('Plugin installed');
     expect(h.driveCalls.length).toBe(1);
-  });
-
-  test('--no-ui never calls startUi', async () => {
-    const proj = tempProject();
-    let calls = 0;
-    const h = harness({ startUi: async () => ((calls++), { ok: true, url: 'http://127.0.0.1:1/' }) });
-    await runInit(['--dir', proj, '--no-ui', '--no-run'], h.deps);
-    expect(calls).toBe(0);
   });
 
   test('--no-run: no prompt, no run, "Next: pipeline run <template>"', async () => {
@@ -751,108 +719,3 @@ describe('the next-action line', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// parseUiStartOutput — the `pipeline ui --json` stdout parsing this bug is
-// about. Every test above injects a fake `startUi` via the harness, so none
-// of them ever exercise the real captured-stdout parsing that
-// `defaultStartUi` (the real InitDeps.startUi) does. `pipeline ui --json`
-// actually pretty-prints (`JSON.stringify(obj, null, 2)` — see
-// src/commands/ui.ts's final `process.stdout.write`), NOT single-line, so a
-// naive "parse the last line" (the original bug) always fails on real output.
-// These tests feed parseUiStartOutput real captured (code, stdout) shapes
-// directly, with no daemon spawned.
-// ---------------------------------------------------------------------------
-
-describe('parseUiStartOutput (pipeline ui --json stdout parsing)', () => {
-  test('real pretty-printed multi-line JSON (JSON.stringify(obj, null, 2), as ui.ts actually prints) → url and port come out', () => {
-    // Captured verbatim from a real `pipeline ui --json` run.
-    const stdout =
-      '{\n' +
-      '  "url": "http://127.0.0.1:56981/",\n' +
-      '  "host": "127.0.0.1",\n' +
-      '  "port": 56981,\n' +
-      '  "pid": 100588,\n' +
-      '  "started": false,\n' +
-      '  "restarted": false,\n' +
-      '  "registered": true\n' +
-      '}\n';
-    const result = parseUiStartOutput(0, stdout);
-    expect(result.ok).toBe(true);
-    expect(result.url).toBe('http://127.0.0.1:56981/');
-    expect(result.url).toContain('56981'); // the resolved port, not a literal
-  });
-
-  test('single-line JSON shape too, so the fix is not accidentally shape-specific', () => {
-    const stdout =
-      JSON.stringify({
-        url: 'http://127.0.0.1:51734/',
-        host: '127.0.0.1',
-        port: 51734,
-        pid: 4242,
-        started: true,
-        restarted: false,
-        registered: false,
-      }) + '\n';
-    const result = parseUiStartOutput(0, stdout);
-    expect(result.ok).toBe(true);
-    expect(result.url).toBe('http://127.0.0.1:51734/');
-  });
-
-  test('leading non-JSON noise lines ahead of the pretty-printed object are tolerated', () => {
-    const stdout =
-      'Warning: something printed a stray line first\n' +
-      'another stray line\n' +
-      '{\n' +
-      '  "url": "http://127.0.0.1:60000/",\n' +
-      '  "host": "127.0.0.1",\n' +
-      '  "port": 60000,\n' +
-      '  "pid": 1,\n' +
-      '  "started": true,\n' +
-      '  "restarted": false,\n' +
-      '  "registered": false\n' +
-      '}\n';
-    const result = parseUiStartOutput(0, stdout);
-    expect(result.ok).toBe(true);
-    expect(result.url).toBe('http://127.0.0.1:60000/');
-  });
-
-  test('UI explicitly disabled (single-line {"enabled":false}) → ok, disabled, no url — unchanged behavior', () => {
-    const result = parseUiStartOutput(0, '{"enabled":false}\n');
-    expect(result).toEqual({ ok: true, disabled: true });
-  });
-
-  test('unparseable output on exit 0 → ok:false, with an HONEST detail (not "did not start — exited 0")', () => {
-    const result = parseUiStartOutput(0, 'not json at all\n');
-    expect(result.ok).toBe(false);
-    expect(result.url).toBeUndefined();
-    // This is the exact self-contradiction the bug report called out: a
-    // detail that reads as failure while also saying "exited 0" (which is
-    // success) is dishonest. The new detail must still be distinguishable
-    // from a genuine non-zero exit (see next test) rather than reusing the
-    // old "pipeline ui exited ${code}" wording for this case.
-    expect(result.detail).not.toBe('pipeline ui exited 0');
-    expect(result.detail).toMatch(/no readable|no url|could not/i);
-  });
-
-  test('malformed JSON (unbalanced/invalid braces) → ok:false, never throws', () => {
-    const result = parseUiStartOutput(0, '{ this is not valid json }\n');
-    expect(result.ok).toBe(false);
-    expect(result.url).toBeUndefined();
-  });
-
-  test('genuine non-zero exit → ok:false with a message distinguishable from the exit-0-no-url case', () => {
-    const zeroExitResult = parseUiStartOutput(0, 'garbage\n');
-    const nonZeroResult = parseUiStartOutput(1, 'garbage\n');
-    expect(nonZeroResult.ok).toBe(false);
-    expect(nonZeroResult.detail).toContain('1');
-    expect(nonZeroResult.detail).not.toBe(zeroExitResult.detail);
-  });
-
-  test('non-zero exit still reports failure even when well-formed JSON with a url is present', () => {
-    const stdout = JSON.stringify({ url: 'http://127.0.0.1:9/', host: '127.0.0.1', port: 9 }) + '\n';
-    const result = parseUiStartOutput(1, stdout);
-    expect(result.ok).toBe(false);
-    expect(result.url).toBeUndefined();
-    expect(result.detail).toContain('1');
-  });
-});
