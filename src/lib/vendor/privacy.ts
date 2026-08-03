@@ -1,4 +1,4 @@
-// VENDORED, VERBATIM, from public/pipeline-runner/src/shipper/privacy.ts —
+// VENDORED, VERBATIM, from public/package/pipeline-runner/src/shipper/privacy.ts —
 // everything below this header (starting at the next `/**` block) is a
 // byte-identical copy of that file's body. Do not edit the body here without
 // also editing the source, and vice versa (see LOCKSTEP below).
@@ -36,7 +36,7 @@
 // LOCKSTEP: this file must stay BYTE-IDENTICAL (below this header) to its
 // source until one of the two copies is retired. The check that catches
 // drift lives in the PARENT monorepo (`C:\Projects\AI\ai-pipeline`, where
-// both `public/pipeline-runner` and `public/ai-pipeline-plugin` are present
+// both `public/package/pipeline-runner` and `public/ai-pipeline-plugin` are present
 // as submodules) — `scripts/check-privacy-filter-drift.mjs`, documented in
 // that script's own header. A comparison test inside either OSS repo alone
 // would be vacuous: the other copy is not on disk there, which is a trap

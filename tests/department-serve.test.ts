@@ -1563,7 +1563,7 @@ describe('serve — x32: a claude-code department comes online', () => {
 //
 // x44 — WHAT THIS CHECK IS AND IS NOT WORTH, stated rather than implied.
 //
-// On this repo's CI `public/pipeline-runner` is not on disk, so
+// On this repo's CI `public/package/pipeline-runner` is not on disk, so
 // `readRunnerEngineRegistry()` returns null and the assertion below is
 // VACUOUS — it passes without comparing anything. That was true the day it
 // was written and x32's own worker said so. It is equally vacuous for every
@@ -1586,7 +1586,7 @@ const RUNNER_ENGINE_SOURCE_ENV = 'PIPELINE_RUNNER_ENGINE_TS';
 function readRunnerEngineRegistry(): Record<string, string> | null {
   const candidates = [
     process.env[RUNNER_ENGINE_SOURCE_ENV],
-    // superrepo layout: public/ai-pipeline-plugin/apps/pipeline-cli/tests → public/pipeline-runner
+    // superrepo layout: public/ai-pipeline-plugin/apps/pipeline-cli/tests → public/package/pipeline-runner
     resolve(import.meta.dir, '../../../../pipeline-runner/src/department/engine.ts'),
   ].filter((p): p is string => typeof p === 'string' && p.length > 0);
 

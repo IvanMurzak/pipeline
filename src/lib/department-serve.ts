@@ -769,7 +769,7 @@ export type BindOutcome =
 // and filed the structure as x14. The only guard added at the time was a
 // side-by-side source comparison in `tests/department-serve.test.ts`, and x32's
 // own worker said plainly what it is worth: it is VACUOUS on this repo's CI,
-// where `public/pipeline-runner` is not on disk, so it silently passes. It is
+// where `public/package/pipeline-runner` is not on disk, so it silently passes. It is
 // also vacuous for every user, who has no runner source tree at all — only an
 // INSTALLED runner, which is the only build whose registry can actually hurt
 // them. A checked-out `main` agreeing with a checked-out `main` says nothing
