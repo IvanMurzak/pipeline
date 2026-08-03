@@ -109,7 +109,7 @@ export function statsLocation(pipelineRoot: string): StatsLocation {
   const root = mainCheckoutPipelineRoot(pipelineRoot);
   let dir = dirname(root);
   while (true) {
-    if (basename(dir) === 'pipeline' && basename(dirname(dir)) === '.claude') {
+    if (basename(dir) === '.pipeline') {
       return { base: join(dir, '.stats'), rel: relative(dir, root).split(sep).join('/') };
     }
     const parent = dirname(dir);

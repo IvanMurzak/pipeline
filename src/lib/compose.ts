@@ -105,7 +105,7 @@ export const realComposeFs: ComposeFs = {
 function findPipelinesRoot(fromRoot: string): string | null {
   let dir = fromRoot;
   while (true) {
-    if (basename(dir) === 'pipeline' && basename(dirname(dir)) === '.claude') return dir;
+    if (basename(dir) === '.pipeline') return dir;
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
