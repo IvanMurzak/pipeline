@@ -1,7 +1,7 @@
 // @serial — REAL end-to-end smoke against the INSTALLED claude binary: spawns
 // a genuine `pipeline:step-executor` (haiku) through `pipeline drive`'s
 // DEFAULT template and proves a step record lands under the fixed contract
-// (e7 DEFECT-1) with the pipeline living under `.claude/` — the layout whose
+// (e7 DEFECT-1) with the pipeline living under `.pipeline/` — the layout whose
 // canonical records path is sensitive-gated on Claude Code >= 2.1.21x.
 //
 // Held out of the parallel pool (@serial: one real claude session; timing and
@@ -46,7 +46,7 @@ const SKIP =
   !claudeAvailable();
 
 test.skipIf(SKIP)(
-  'drive smoke (REAL claude): a one-step .claude/ pipeline completes and the record lands',
+  'drive smoke (REAL claude): a one-step .pipeline/ pipeline completes and the record lands',
   () => {
     // A real consumer-project layout: git repo + .pipeline/<name>.
     const project = mkdtempSync(join(tmpdir(), 'drive-claude-smoke-'));

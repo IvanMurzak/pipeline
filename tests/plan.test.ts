@@ -184,7 +184,7 @@ test('parallel + external degrades to manual with a warning', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 08.5 — parallel needs-input lint (C2), companion to the pipeline-designer
+// 08.5 — parallel needs-input lint (C2), companion to /pipeline:design.
 // "parallel steps must be self-contained" authoring rule (Principle 12).
 // ---------------------------------------------------------------------------
 

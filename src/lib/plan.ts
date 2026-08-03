@@ -1478,7 +1478,7 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
     layers = result.layers;
     errors.push(...result.errors);
 
-    // 08.5 parallel needs-input lint (C2), companion to the pipeline-designer
+    // 08.5 parallel needs-input lint (C2), companion to /pipeline:design.
     // "parallel steps must be self-contained" authoring rule: EVERY layer
     // dispatch — even a singleton layer — goes out with `concurrent: true`
     // (dispatchLayer, lib/next.ts) and lands on the headless executor with
@@ -1494,7 +1494,7 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
         const entry = stepBodyById.get(id);
         if (entry && /needs-input/i.test(entry.body)) {
           warnings.push(
-            `steps/${entry.rel}: parallel-layer member mentions 'needs-input' — a step placed in a parallel layer must be self-contained (pipeline-designer Authoring Principle 12); the runtime halts an unattended run on a needs-input question raised from inside a parallel layer`,
+            `steps/${entry.rel}: parallel-layer member mentions 'needs-input' — a step placed in a parallel layer must be self-contained (/pipeline:design Authoring Principle 12); the runtime halts an unattended run on a needs-input question raised from inside a parallel layer`,
           );
         }
       }
