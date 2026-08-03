@@ -1,0 +1,474 @@
+// VENDORED, VERBATIM, from public/pipeline-runner/src/shipper/privacy.ts —
+// everything below this header (starting at the next `/**` block) is a
+// byte-identical copy of that file's body. Do not edit the body here without
+// also editing the source, and vice versa (see LOCKSTEP below).
+//
+// SOURCE OF TRUTH TODAY: pipeline-runner's copy — the file this was lifted
+// from, still the one place `pipeline-runner`'s shipper imports it from.
+//
+// INTENDED SOURCE OF TRUTH: `@baizor/pipeline-protocol`, the published,
+// dependency-pinned package this monorepo already treats as canonical for
+// the wire contract (schemas/types). The `ux-v2` design
+// (`local-pipeline-cloud-telemetry.md`, "Dependency resolution" +
+// delivery-order step 3, "Protocol: publish the privacy filter…") calls for
+// lifting this filter into the protocol package as an additive release; that
+// publish has not happened yet. When it does, this vendored copy — and
+// eventually pipeline-runner's own — are meant to be deleted in favor of
+// importing the published package. See `plugin-thin/02-extract-cli.md`
+// phase 6: "Add real dependencies to the CLI. Delete
+// src/lib/vendor/privacy.ts (`ux-v2` interim) … in favour of real imports."
+//
+// WHY VENDORED HERE INSTEAD OF IMPORTED: `apps/pipeline-cli` ships inside
+// the plugin with ZERO dependencies and no bundling — its `bin` points at
+// raw `src/cli.ts` — and the plugin's skills invoke it straight out of the
+// plugin's cached git checkout, a tree with NO root `package.json` and NO
+// install step. Any import of `@baizor/pipeline-protocol` (or any other
+// external package) reachable from `cli.ts` would throw at import time for
+// every plugin user on that invocation path — the exact constraint that
+// already forced `lib/vendor/transcript-walk.ts` to exist (see that file's
+// own header). The filter itself is pure and dependency-free apart from
+// `node:crypto`, so — exactly like `transcript-walk.ts` — it travels as a
+// deliberate, commented copy instead of a package dependency. This is the
+// `ux-v2` design's stated interim measure: "one pure, dependency-free file…
+// When phase 6 lands, that copy is deleted. Total discarded work … is one
+// file."
+//
+// LOCKSTEP: this file must stay BYTE-IDENTICAL (below this header) to its
+// source until one of the two copies is retired. The check that catches
+// drift lives in the PARENT monorepo (`C:\Projects\AI\ai-pipeline`, where
+// both `public/pipeline-runner` and `public/ai-pipeline-plugin` are present
+// as submodules) — `scripts/check-privacy-filter-drift.mjs`, documented in
+// that script's own header. A comparison test inside either OSS repo alone
+// would be vacuous: the other copy is not on disk there, which is a trap
+// this repository has fallen into before (see that design's "Interim drift
+// control for the vendored filter" section).
+//
+// NOT WIRED IN YET: nothing in this package imports this file. It exists so
+// the telemetry work can reach it without a second round of "how do we even
+// get this filter into the CLI" design work; wiring it into a caller is
+// separate, later work.
+
+/**
+ * Privacy-tier filter — THE trust boundary of the shipper.
+ *
+ * Enforced AGENT-SIDE, BEFORE anything is persisted to the spool or uploaded:
+ * the cloud must never receive above-tier data. Tiers (ARCHITECTURE §1,
+ * "Privacy tiers — data never leaves the box above its tier"):
+ *
+ *   - `metadata` (DEFAULT): step statuses, timings, token/cost counts,
+ *     tool-call counts, model/effort ids, outcome taxonomy, FAIL summaries.
+ *     Implemented as a POSITIVE ALLOWLIST per event type — an unknown event
+ *     type ships with its `data` fully stripped, and an unknown field inside a
+ *     known type is DROPPED by default. New fields never leak.
+ *   - `events`: the full event stream and stats detail, verbatim — EXCEPT
+ *     `RunFailureDetail.error` excerpts in stats records, which the stats
+ *     ship path strips at EVERY tier (design D16 / G-sec-2, see
+ *     `stripStatsFailureExcerpts`).
+ *   - `full`: + step transcripts and logs. Transcript/log shipping is NOT yet
+ *     implemented (scope-flagged in T1-12); `full` currently ships exactly
+ *     what `events` ships.
+ *
+ * Field rules at the `metadata` tier:
+ *   - keep         — copied verbatim (ids, counts, flags, taxonomy, names).
+ *   - fingerprint  — ABSOLUTE MACHINE PATHS (`project_root`, `worktree`,
+ *     `pipeline_root`, worktree hook paths) are replaced with a deterministic
+ *     `fp:<sha256-16>` so the value still correlates across events/restarts
+ *     without revealing the path (usernames, client names). Deterministic ⇒
+ *     dictionary-attackable for guessable paths; set `fingerprintSalt`
+ *     (config/env) to harden. Null passes through as null.
+ *   - summary      — the FAIL-summary text fields ARCHITECTURE grants the
+ *     metadata tier (`halt_reason`): kept but TRUNCATED to a bounded length.
+ *   - question     — `awaiting_input.question`: the question text/context/
+ *     options are CONTENT and are replaced with a schema-valid placeholder
+ *     (`{ text: QUESTION_PLACEHOLDER, question_id? }`) so the server's strict
+ *     parse — and its awaiting-input derivation — still works while zero
+ *     authored content leaves the machine.
+ *
+ * Pipeline-RELATIVE step identity (`iteration_path`, `step_id`, `script_path`,
+ * pipeline/branch names, tool names) is metadata: it is pipeline STRUCTURE the
+ * product's metadata-tier dashboards are built on ("failing step index", per-
+ * step statuses) and the ingest derivation correlates open/close on it.
+ *
+ * Unknown journal lines that are not JSON objects cannot be classified and are
+ * never shipped at any tier (the G2 run_id rule already excludes them).
+ */
+
+import { createHash } from 'node:crypto';
+
+export const PRIVACY_TIERS = ['metadata', 'events', 'full'] as const;
+export type PrivacyTier = (typeof PRIVACY_TIERS)[number];
+
+/** The fail-closed default: the most private tier. */
+export const DEFAULT_PRIVACY_TIER: PrivacyTier = 'metadata';
+
+/** Env var the tier may be configured through (config option wins). */
+export const PRIVACY_TIER_ENV = 'PIPELINE_PRIVACY_TIER';
+/** Env var for the optional fingerprint salt. */
+export const PRIVACY_SALT_ENV = 'PIPELINE_PRIVACY_SALT';
+
+/** Replaces `awaiting_input.question.text` at the metadata tier. */
+export const QUESTION_PLACEHOLDER = '[question content stripped: privacy tier metadata]';
+
+/** Replaces `department.message.parts` at the metadata tier (department-mesh,
+ *  task d1) — mirrors `QUESTION_PLACEHOLDER`'s stance: a department's message
+ *  content is authored task content, not metadata, so it is redacted by
+ *  default exactly like a pipeline question's text. */
+export const MESSAGE_PARTS_PLACEHOLDER = '[message content stripped: privacy tier metadata]';
+
+/** `summary` fields are truncated to this many characters at metadata tier. */
+export const SUMMARY_MAX_CHARS = 256;
+
+/**
+ * Resolve the effective tier FAIL-CLOSED: an explicit valid tier wins, else a
+ * valid env value, else `metadata`. Anything unrecognized degrades to
+ * `metadata` (never to a more permissive tier) and reports itself via the
+ * returned `warning`.
+ */
+export function resolvePrivacyTier(
+  explicit: string | undefined,
+  env: Record<string, string | undefined> = process.env
+): { tier: PrivacyTier; warning: string | null } {
+  for (const [value, source] of [
+    [explicit, 'config'],
+    [env[PRIVACY_TIER_ENV], `env ${PRIVACY_TIER_ENV}`],
+  ] as const) {
+    if (value === undefined || value === '') continue;
+    if ((PRIVACY_TIERS as readonly string[]).includes(value)) {
+      return { tier: value as PrivacyTier, warning: null };
+    }
+    return {
+      tier: DEFAULT_PRIVACY_TIER,
+      warning: `unrecognized privacy tier '${value}' (${source}) — failing closed to '${DEFAULT_PRIVACY_TIER}'`,
+    };
+  }
+  return { tier: DEFAULT_PRIVACY_TIER, warning: null };
+}
+
+/** Deterministic `fp:<sha256-16>` fingerprint (optionally salted). */
+export function fingerprintString(value: string, salt = ''): string {
+  return `fp:${createHash('sha256').update(`${salt}${value}`).digest('hex').slice(0, 16)}`;
+}
+
+// ── The metadata-tier allowlists ─────────────────────────────────────────────
+
+type FieldRule = 'keep' | 'fingerprint' | 'summary' | 'question' | 'message_parts';
+
+/** Envelope fields kept at the metadata tier. Anything else on the envelope
+ *  (a newer peer's passthrough addition) is dropped. */
+const ENVELOPE_ALLOWLIST: Record<string, FieldRule> = {
+  schema: 'keep',
+  ts: 'keep',
+  type: 'keep',
+  run_id: 'keep',
+  parent_run_id: 'keep',
+  session_id: 'keep',
+  project_root: 'fingerprint',
+  worktree: 'fingerprint',
+  // department-mesh (task d1): a department event's `run_id` above IS its
+  // execution id (see `../department/events.ts`'s module doc); these two are
+  // its task/context identity, structural like `session_id`, not content.
+  task_id: 'keep',
+  context_id: 'keep',
+  // simplified-onboarding b4 (journal schema 2): the department a task ran in
+  // and the engine that ran it are structure and taxonomy — the same kind of
+  // thing as `pipeline_name` and `resolved_model`. `sender` is NOT: it is a
+  // person's identity (`ivan@acme`), so it is FINGERPRINTED rather than kept,
+  // which still correlates one sender's tasks across events without the
+  // identity itself leaving the machine at this tier.
+  department_id: 'keep',
+  engine: 'keep',
+  sender: 'fingerprint',
+};
+
+/**
+ * Per-event-type `data` allowlists at the metadata tier — mirrors the v4+v5
+ * event `data` schemas in ai-pipeline `packages/protocol/src/events/types.ts`
+ * field-for-field. A type absent from this table ships `data: {}`.
+ */
+const DATA_ALLOWLISTS: Record<string, Record<string, FieldRule>> = {
+  'session.opened': { claude_pid: 'keep' },
+  'pipeline.started': {
+    pipeline_name: 'keep',
+    first_iteration_path: 'keep',
+    pipeline_root: 'fingerprint',
+    default_model: 'keep',
+  },
+  'iteration.started': {
+    iteration_path: 'keep',
+    index: 'keep',
+    resolved_model: 'keep',
+    resolved_effort: 'keep',
+    step_id: 'keep',
+    step_type: 'keep',
+    resumed: 'keep',
+    emission: 'keep',
+  },
+  'iteration.resumed': {
+    iteration_path: 'keep',
+    index: 'keep',
+    resolved_model: 'keep',
+    resolved_effort: 'keep',
+    step_id: 'keep',
+    resumed: 'keep',
+    emission: 'keep',
+  },
+  'iteration.completed': {
+    iteration_path: 'keep',
+    outcome: 'keep',
+    next_iteration_path: 'keep',
+    has_improvement_brief: 'keep',
+    has_blocker_delegation: 'keep',
+    halt_reason: 'summary',
+    terminal: 'keep',
+    step_id: 'keep',
+    step_type: 'keep',
+    failure_class: 'keep',
+  },
+  'improver.started': { iteration_path: 'keep' },
+  'improver.completed': { iteration_path: 'keep', applied: 'keep', has_script_brief: 'keep' },
+  'script_creator.started': { iteration_path: 'keep' },
+  'script_creator.completed': { iteration_path: 'keep', script_path: 'keep', outcome: 'keep' },
+  'blocker.delegated': {
+    parent_iteration_path: 'keep',
+    blocker_issue_url: 'keep',
+    child_run_id: 'keep',
+    blocker_target_repo: 'keep',
+  },
+  'blocker.polling': { blocker_issue_url: 'keep', pr_state: 'keep' },
+  'blocker.resolved': { blocker_issue_url: 'keep', merged_pr_url: 'keep' },
+  'pipeline.completed': { pipeline_name: 'keep' },
+  'pipeline.halted': { pipeline_name: 'keep', iteration_path: 'keep', halt_reason: 'summary' },
+  'manager.stopped': { run_id: 'keep', agent_id: 'keep' },
+  'worktree.created': {
+    worktree_path: 'fingerprint',
+    branch: 'keep',
+    env_file: 'fingerprint',
+    port_base: 'keep',
+    ok: 'keep',
+    hook_dir: 'fingerprint',
+    // `detail` (free-text hook stderr) is deliberately ABSENT: dropped.
+  },
+  'worktree.finalized': { worktree_path: 'fingerprint', ok: 'keep', outcome: 'keep' },
+  'worktree.destroyed': { worktree_path: 'fingerprint', ok: 'keep', outcome: 'keep' },
+  'tool.called': { tool_name: 'keep', success: 'keep', agent_spawn: 'keep', tool_use_id: 'keep' },
+  'turn.usage': {
+    assistant_turns: 'keep',
+    input_tokens: 'keep',
+    output_tokens: 'keep',
+    cache_read_tokens: 'keep',
+    cache_creation_tokens: 'keep',
+  },
+  'run.started': {
+    pipeline_name: 'keep',
+    pipeline_root: 'fingerprint',
+    first_iteration_path: 'keep',
+    orchestrator: 'keep',
+    default_model: 'keep',
+  },
+  'run.completed': { pipeline_name: 'keep', outcome: 'keep' },
+  'run.halted': { pipeline_name: 'keep', iteration_path: 'keep', halt_reason: 'summary' },
+  awaiting_input: { run_id: 'keep', iteration: 'keep', question_id: 'keep', question: 'question' },
+  // Synthetic stats record (shipper-emitted, see ./stats.ts) — its own nested
+  // filter runs first; the entry here lets the envelope-level walk pass the
+  // already-filtered record through.
+  'stats.run_record': {},
+
+  // ── department-mesh (task d1, 07-runtime-contract.md §8) ──────────────────
+  // One entry per `RuntimeEvent` variant (`../department/events.ts`'s
+  // `DEPARTMENT_JOURNAL_EVENT_TYPES` pins the exhaustive list; a coverage
+  // test in `tests/shipper-privacy-department.test.ts` fails if either side
+  // drifts). `department.message`/`department.artifact` carry the department's
+  // actual task content (not telemetry) — redacted/dropped by default at the
+  // metadata tier exactly like `awaiting_input.question`, never silently
+  // leaked just because a new event type showed up.
+  'department.status': { state: 'keep', message: 'summary' },
+  'department.progress': { note: 'summary' },
+  'department.input_required': { question_id: 'keep', question: 'question' },
+  'department.message': { parts: 'message_parts' },
+  'department.artifact': { name: 'keep', media_type: 'keep' }, // path/bytes_base64 are content — dropped
+  'department.completed': { summary: 'summary' },
+  'department.failed': { reason: 'summary', retry_safe: 'keep' },
+};
+
+/** The nested allowlists for the synthetic `.stats` run record (mirrors the
+ *  OSS `apps/pipeline-cli/src/lib/stats.ts` RunRecord/StepStat/TokenStats). */
+const STATS_RECORD_ALLOWLIST: Record<string, FieldRule> = {
+  schema: 'keep',
+  run_id: 'keep',
+  pipeline: 'keep',
+  started_at: 'keep',
+  ended_at: 'keep',
+  duration_s: 'keep',
+  outcome: 'keep',
+  halt_reason: 'summary',
+  runner: 'keep',
+  mode: 'keep',
+  steps_run: 'keep',
+  improver_runs: 'keep',
+  improver_applied: 'keep',
+  scripts_created: 'keep',
+  merges: 'keep',
+  merge_conflicts: 'keep',
+  llm_steps: 'keep',
+  // Sync-mechanics stamps (protocol 0.2.0): the shipper's own revision/origin
+  // (design D13/D18) — counters/taxonomy, never content.
+  revision: 'keep',
+  origin: 'keep',
+};
+
+/** `RunFailureDetail` entries inside a stats record (design D16): timestamp,
+ *  tool name and step id are metadata; the `error` excerpt text is CONTENT
+ *  and is deliberately ABSENT from this allowlist (stripped). */
+const STATS_FAILURE_ALLOWLIST: Record<string, FieldRule> = {
+  ts: 'keep',
+  tool: 'keep',
+  step: 'keep',
+};
+
+const STATS_STEP_ALLOWLIST: Record<string, FieldRule> = {
+  id: 'keep',
+  started_at: 'keep',
+  seconds: 'keep',
+  outcome: 'keep',
+  model: 'keep',
+  effort: 'keep',
+  step_type: 'keep',
+  failure_class: 'keep',
+};
+
+const STATS_TOKENS_ALLOWLIST: Record<string, FieldRule> = {
+  input: 'keep',
+  output: 'keep',
+  cache_read: 'keep',
+  cache_creation: 'keep',
+  tools_called: 'keep',
+  tools_failed: 'keep',
+  failed_tools: 'keep', // tool-name → count map: names + counts are metadata
+  agents_spawned: 'keep',
+  cost_usd: 'keep',
+};
+
+// ── Filtering ────────────────────────────────────────────────────────────────
+
+export interface PrivacyFilterOptions {
+  /** Optional salt hardening the deterministic path fingerprints. */
+  fingerprintSalt?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function applyRule(rule: FieldRule, value: unknown, salt: string): unknown {
+  switch (rule) {
+    case 'keep':
+      return value;
+    case 'fingerprint':
+      return typeof value === 'string' && value.length > 0 ? fingerprintString(value, salt) : value === null ? null : undefined;
+    case 'summary':
+      if (typeof value === 'string') {
+        return value.length > SUMMARY_MAX_CHARS ? `${value.slice(0, SUMMARY_MAX_CHARS)}…` : value;
+      }
+      return value === null ? null : undefined;
+    case 'question': {
+      if (!isRecord(value)) return undefined;
+      const placeholder: Record<string, unknown> = { text: QUESTION_PLACEHOLDER };
+      if (typeof value.question_id === 'string' && value.question_id.length > 0) {
+        placeholder.question_id = value.question_id;
+      }
+      return placeholder;
+    }
+    case 'message_parts': {
+      if (!Array.isArray(value)) return undefined;
+      // A schema-valid single placeholder part, same spirit as `question`'s
+      // placeholder object: downstream consumers expecting `parts: Part[]`
+      // still get a well-formed array, just with zero authored content.
+      return [{ text: MESSAGE_PARTS_PLACEHOLDER, media_type: 'text/plain' }];
+    }
+  }
+}
+
+function filterByAllowlist(
+  source: Record<string, unknown>,
+  allowlist: Record<string, FieldRule>,
+  salt: string
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [field, rule] of Object.entries(allowlist)) {
+    if (!(field in source)) continue;
+    const filtered = applyRule(rule, source[field], salt);
+    if (filtered !== undefined) out[field] = filtered;
+  }
+  return out;
+}
+
+/** Filter the synthetic `.stats` run record (nested allowlists). */
+export function filterStatsRecordMetadata(
+  record: Record<string, unknown>,
+  options: PrivacyFilterOptions = {}
+): Record<string, unknown> {
+  const salt = options.fingerprintSalt ?? '';
+  const out = filterByAllowlist(record, STATS_RECORD_ALLOWLIST, salt);
+  if (Array.isArray(record.steps)) {
+    out.steps = record.steps.map((step) => (isRecord(step) ? filterByAllowlist(step, STATS_STEP_ALLOWLIST, salt) : {}));
+  }
+  if (isRecord(record.tokens)) out.tokens = filterByAllowlist(record.tokens, STATS_TOKENS_ALLOWLIST, salt);
+  else if (record.tokens === null) out.tokens = null;
+  if (Array.isArray(record.failures)) {
+    out.failures = record.failures
+      .filter(isRecord)
+      .map((failure) => filterByAllowlist(failure, STATS_FAILURE_ALLOWLIST, salt));
+  }
+  return out;
+}
+
+/**
+ * D16 (G-sec-2): strip `RunFailureDetail.error` excerpt text from a stats
+ * run record — applied by the shipper on the stats path at EVERY tier,
+ * BEFORE the tier filter and BEFORE anything is spooled. Failure excerpts
+ * routinely contain code, paths and command lines; the design strips them
+ * by default (tool name + step + count survive — the count both as the
+ * array length and as `tokens.failed_tools`). Entries that are not objects
+ * carry no classifiable metadata and are dropped entirely.
+ */
+export function stripStatsFailureExcerpts(record: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(record.failures)) return record;
+  const failures = record.failures.filter(isRecord).map((failure) => {
+    const { error: _stripped, ...rest } = failure;
+    return rest;
+  });
+  return { ...record, failures };
+}
+
+/**
+ * Filter ONE journal event for the given tier. `event` must already be a JSON
+ * object (non-object lines are unshippable upstream).
+ *
+ *   - `events` / `full`: the event passes VERBATIM.
+ *   - `metadata`: envelope + data are rebuilt from the positive allowlists —
+ *     unknown event type ⇒ `data: {}`; unknown field ⇒ dropped; paths ⇒
+ *     fingerprints; question ⇒ placeholder; fail summaries ⇒ truncated.
+ */
+export function filterEventForTier(
+  event: Record<string, unknown>,
+  tier: PrivacyTier,
+  options: PrivacyFilterOptions = {}
+): Record<string, unknown> {
+  if (tier === 'events' || tier === 'full') return event;
+
+  const salt = options.fingerprintSalt ?? '';
+  const out = filterByAllowlist(event, ENVELOPE_ALLOWLIST, salt);
+
+  const type = typeof event.type === 'string' ? event.type : '';
+  const dataAllowlist = DATA_ALLOWLISTS[type];
+  const data = isRecord(event.data) ? event.data : {};
+  if (type === 'stats.run_record') {
+    out.data = filterStatsRecordMetadata(data, options);
+  } else if (dataAllowlist !== undefined) {
+    out.data = filterByAllowlist(data, dataAllowlist, salt);
+  } else {
+    // Unknown/new event type: default STRIPPED — never leaked.
+    out.data = {};
+  }
+  return out;
+}
