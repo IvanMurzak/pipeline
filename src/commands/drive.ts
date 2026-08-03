@@ -84,12 +84,19 @@
 //
 // The executor spawn goes through an injectable ExecutorRunner seam. The
 // default runner shells out to `claude -p --agent pipeline:step-executor
-// --model {model} --output-format json --json-schema {schema}` (prompt ALWAYS
-// via stdin; a `--flag {token}` pair is dropped when its token resolves to
-// nothing). Because the exact claude flags may need per-machine adjustment,
-// the WHOLE command template is overridable via `--executor-cmd` or the env
-// var PIPELINE_DRIVE_EXECUTOR_CMD — a whitespace-split template in which
-// `{model}` is substituted with the step's resolved model and `{schema}` with
+// --model {model} --plugin-dir {plugin_dir} --output-format json
+// --json-schema {schema}` (prompt ALWAYS via stdin; a `--flag {token}` pair is
+// dropped when its token resolves to nothing). `--plugin-dir` is what keeps
+// `--agent pipeline:step-executor` resolvable once Claude Code's `-p` mode
+// defaults to `--bare` (execution-modes wave 5.2) — bare mode skips
+// auto-discovery of plugins entirely, so the agent name would otherwise
+// resolve to nothing; it expands from CLAUDE_PLUGIN_ROOT, which is set only
+// when this CLI is invoked from inside the plugin (a standalone npm install
+// never sees it, and the pair drops, same as `{effort}`). Because the exact
+// claude flags may need per-machine adjustment, the WHOLE command template is
+// overridable via `--executor-cmd` or the env var PIPELINE_DRIVE_EXECUTOR_CMD
+// — a whitespace-split template in which `{model}` is substituted with the
+// step's resolved model and `{schema}` with
 // the compact step-record JSON Schema (lib/step-schema.ts — deliberately
 // whitespace-free so it survives the split; when a token has no value, the
 // token AND an immediately preceding `-`/`--` flag token are dropped).
@@ -258,9 +265,16 @@ export interface DriveDeps {
  *  granted to the executor via `--add-dir` (verified on 2.1.214: headless
  *  acceptEdits auto-DENIES every write under `.claude/` as "sensitive" — no
  *  allow rule can override it — while an --add-dir'd tmp directory is
- *  writable; this is the narrowest grant that keeps the file channel alive). */
+ *  writable; this is the narrowest grant that keeps the file channel alive).
+ *  `{plugin_dir}` expands to CLAUDE_PLUGIN_ROOT (execution-modes wave 5.2):
+ *  `--agent pipeline:step-executor` only resolves because the plugin is
+ *  auto-discovered today; once `-p` defaults to `--bare` that discovery stops
+ *  and the agent name would resolve to nothing, so the plugin root is passed
+ *  explicitly. Unset (a standalone npm install of the CLI, invoked outside
+ *  the plugin) drops the `--plugin-dir {plugin_dir}` pair entirely — same
+ *  drop-on-no-value rule as `{effort}`, not an empty string. */
 export const DEFAULT_EXECUTOR_TEMPLATE =
-  'claude -p --agent pipeline:step-executor --model {model} --effort {effort} --permission-mode {permissions} --session-id {session} --add-dir {record_dir} --output-format json --json-schema {schema}';
+  'claude -p --agent pipeline:step-executor --model {model} --effort {effort} --permission-mode {permissions} --session-id {session} --add-dir {record_dir} --plugin-dir {plugin_dir} --output-format json --json-schema {schema}';
 
 export interface ExecutorArgvOpts {
   session?: { id: string; resume: boolean };
@@ -274,6 +288,15 @@ export interface ExecutorArgvOpts {
    *  gets `--add-dir <dir>` appended (same convention as `{session}` — custom
    *  claude wrappers must forward unknown flags; fakes ignore argv). */
   recordDir?: string | null;
+  /** The plugin install root — `{plugin_dir}` token (the `--plugin-dir` pair
+   *  that keeps `--agent pipeline:step-executor` resolvable once `-p`
+   *  defaults to `--bare`; execution-modes wave 5.2). Resolved from
+   *  CLAUDE_PLUGIN_ROOT by the caller. Null/absent — a standalone npm install
+   *  of the CLI never has that env var set — drops the pair, the SAME
+   *  plain-scalar rule as `{effort}`: unlike `{session}`/`{record_dir}` it is
+   *  NOT appended to a template that omits the token, so a user's
+   *  `--executor-cmd` override is unaffected by this flag's existence. */
+  pluginDir?: string | null;
 }
 
 /**
@@ -282,12 +305,13 @@ export interface ExecutorArgvOpts {
  * Tokens: `{model}` → the step's resolved model, `{effort}` → the step's
  * resolved reasoning effort, `{schema}` → the compact (whitespace-free)
  * step-record schema, `{permissions}` → the resolved permission mode,
- * `{session}` → the pinned session UUID. When a token has NO value, the token
- * is dropped along with an immediately preceding `-`/`--` flag token so the
- * pair disappears together. Session special cases: when resuming, the flag
- * token immediately preceding `{session}` is REPLACED with `--resume`; a
- * template WITHOUT a `{session}` token gets the session pair appended (custom
- * claude wrappers must forward unknown flags; fakes ignore argv entirely).
+ * `{session}` → the pinned session UUID, `{plugin_dir}` → CLAUDE_PLUGIN_ROOT.
+ * When a token has NO value, the token is dropped along with an immediately
+ * preceding `-`/`--` flag token so the pair disappears together. Session
+ * special cases: when resuming, the flag token immediately preceding
+ * `{session}` is REPLACED with `--resume`; a template WITHOUT a `{session}`
+ * token gets the session pair appended (custom claude wrappers must forward
+ * unknown flags; fakes ignore argv entirely).
  */
 export function buildExecutorArgv(
   template: string,
@@ -312,6 +336,7 @@ export function buildExecutorArgv(
     '{schema}': schema,
     '{permissions}': opts.permissionMode,
     '{record_dir}': opts.recordDir,
+    '{plugin_dir}': opts.pluginDir,
   };
   for (const t of template.split(/\s+/).filter(Boolean)) {
     const token = Object.keys(scalars).find((k) => t.includes(k));
@@ -350,17 +375,31 @@ export function quoteForShell(arg: string): string {
   return /[\s"]/.test(arg) ? '"' + arg.replaceAll('"', '\\"') + '"' : arg;
 }
 
+/** Resolve the `{plugin_dir}` token from CLAUDE_PLUGIN_ROOT. Set only when
+ *  this CLI is invoked from inside the plugin (skills/agents spawn `pipeline
+ *  drive` with that env var already in their process environment, inherited
+ *  by claude's own subprocess spawn); a standalone npm install invoked
+ *  directly from a terminal never has it, and null here is what makes
+ *  buildExecutorArgv drop the `--plugin-dir {plugin_dir}` pair instead of
+ *  expanding it to an empty string. Exported for tests. */
+export function pluginDirToken(env: NodeJS.ProcessEnv = process.env): string | null {
+  const v = env.CLAUDE_PLUGIN_ROOT;
+  return typeof v === 'string' && v.trim() !== '' ? v : null;
+}
+
 /** The production ExecutorRunner: spawn the templated command, write the prompt
  *  to stdin, capture stdout (the JSON envelope) while relaying stdout+stderr to
  *  the drive stderr sink, and resolve with the exit code + captured stdout.
  *  Never throws — spawn failures resolve as {code:null, error}. */
 function subprocessExecutor(template: string, schema: string | null, err: (s: string) => void): ExecutorRunner {
+  const pluginDir = pluginDirToken();
   return (req) =>
     new Promise<ExecutorExit>((done) => {
       const argv = buildExecutorArgv(template, req.model, schema, {
         session: req.session,
         permissionMode: req.permission_mode,
         effort: req.effort,
+        pluginDir,
         // The --add-dir record grant applies to STEP executors only — their
         // record_file lives in the run's tmp drop dir (see runDrive). The
         // improver/script-creator record files are drive-written observability
@@ -617,17 +656,20 @@ export function selfImproveEnabled(env: NodeJS.ProcessEnv = process.env): boolea
  *  pipeline-improver agent definition pins Opus + max effort itself (a
  *  per-spawn model would downgrade it — manager parity). acceptEdits because a
  *  headless session cannot answer permission prompts and the improver's blast
- *  radius is the pipeline tree. The WHOLE template is overridable via
- *  PIPELINE_DRIVE_IMPROVER_CMD. Requires claude >= 2.1.205 for reliable
- *  --json-schema structured output (older versions silently produce
- *  unstructured output — drive falls back to applied:false with a warning). */
+ *  radius is the pipeline tree. `{plugin_dir}` is the same `--agent`-survives-
+ *  `--bare` grant as the step-executor template (execution-modes wave 5.2) —
+ *  dropped, not emptied, when CLAUDE_PLUGIN_ROOT is unset. The WHOLE template
+ *  is overridable via PIPELINE_DRIVE_IMPROVER_CMD. Requires claude >= 2.1.205
+ *  for reliable --json-schema structured output (older versions silently
+ *  produce unstructured output — drive falls back to applied:false with a
+ *  warning). */
 export const DEFAULT_IMPROVER_TEMPLATE =
-  'claude -p --agent pipeline:pipeline-improver --permission-mode acceptEdits --session-id {session} --output-format json --json-schema {schema}';
+  'claude -p --agent pipeline:pipeline-improver --permission-mode acceptEdits --session-id {session} --plugin-dir {plugin_dir} --output-format json --json-schema {schema}';
 
 /** Default script-creator command — the improver template's twin
  *  (PIPELINE_DRIVE_SCRIPT_CREATOR_CMD overrides). */
 export const DEFAULT_SCRIPT_CREATOR_TEMPLATE =
-  'claude -p --agent pipeline:pipeline-script-creator --permission-mode acceptEdits --session-id {session} --output-format json --json-schema {schema}';
+  'claude -p --agent pipeline:pipeline-script-creator --permission-mode acceptEdits --session-id {session} --plugin-dir {plugin_dir} --output-format json --json-schema {schema}';
 
 /** Feedback categories the retrospective feeds to the batch improver: the
  *  three general doc-actionable categories plus 'script-failure' (written only

@@ -16,6 +16,7 @@ import {
   DEFAULT_EXECUTOR_TEMPLATE,
   dropRecordsDirFor,
   extractQuestion,
+  pluginDirToken,
   quoteForShell,
   resolvePermissionMode,
   runDrive,
@@ -1286,6 +1287,40 @@ test('buildExecutorArgv: {record_dir} substitutes --add-dir; drops its pair when
     '--add-dir',
     '/tmp/pd/records',
   ]);
+}, 30000);
+
+// --- execution-modes wave 5.2: {plugin_dir} survives a future `-p --bare` default ---
+
+test('buildExecutorArgv: {plugin_dir} substitutes --plugin-dir when resolved; drops the pair (never an empty string) when absent', () => {
+  const schema = stepRecordSchemaJson();
+  // Value present (CLAUDE_PLUGIN_ROOT set) → --plugin-dir <dir> in place.
+  const withDir = buildExecutorArgv(DEFAULT_EXECUTOR_TEMPLATE, 'sonnet', schema, { pluginDir: '/opt/plugins/pipeline' });
+  const pi = withDir.indexOf('--plugin-dir');
+  expect(pi).toBeGreaterThan(-1);
+  expect(withDir[pi + 1]).toBe('/opt/plugins/pipeline');
+  // Absent (CLAUDE_PLUGIN_ROOT unset — a standalone npm install invoked
+  // outside the plugin) → the pair drops entirely; the literal token must
+  // never reach `claude` as an empty-string argument.
+  const withoutDir = buildExecutorArgv(DEFAULT_EXECUTOR_TEMPLATE, 'sonnet', schema);
+  expect(withoutDir).not.toContain('--plugin-dir');
+  expect(withoutDir.some((t) => t.includes('{plugin_dir}'))).toBe(false);
+  expect(buildExecutorArgv(DEFAULT_EXECUTOR_TEMPLATE, 'sonnet', schema, { pluginDir: null })).not.toContain('--plugin-dir');
+  // A custom --executor-cmd/PIPELINE_DRIVE_EXECUTOR_CMD template that predates
+  // this token has no {plugin_dir} in it and must be unaffected by the flag's
+  // existence — unlike {session}/{record_dir}, it is NOT appended when a
+  // template omits the token.
+  expect(buildExecutorArgv('bun fake.ts {model}', 'opus', null, { pluginDir: '/opt/plugins/pipeline' })).toEqual([
+    'bun',
+    'fake.ts',
+    'opus',
+  ]);
+}, 30000);
+
+test('pluginDirToken: resolves CLAUDE_PLUGIN_ROOT; unset/blank collapses to null', () => {
+  expect(pluginDirToken({ CLAUDE_PLUGIN_ROOT: '/opt/plugins/pipeline' })).toBe('/opt/plugins/pipeline');
+  expect(pluginDirToken({})).toBeNull();
+  expect(pluginDirToken({ CLAUDE_PLUGIN_ROOT: '' })).toBeNull();
+  expect(pluginDirToken({ CLAUDE_PLUGIN_ROOT: '   ' })).toBeNull();
 }, 30000);
 
 test('drive: record recovered from the final-response TEXT when structured_output and files are absent (--agent regression workaround)', () => {

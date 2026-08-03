@@ -247,6 +247,21 @@ test('default improver/script-creator templates: session pinned, schema substitu
   }
 }, 30000);
 
+test('default improver/script-creator templates carry {plugin_dir} — dropped absent, substituted present (execution-modes wave 5.2)', () => {
+  for (const [template, schema] of [
+    [DEFAULT_IMPROVER_TEMPLATE, improverSchemaJson()],
+    [DEFAULT_SCRIPT_CREATOR_TEMPLATE, scriptCreatorSchemaJson()],
+  ] as const) {
+    const withoutDir = buildExecutorArgv(template, null, schema, { session: { id: 'u-1', resume: false } });
+    expect(withoutDir).not.toContain('--plugin-dir');
+    const withDir = buildExecutorArgv(template, null, schema, {
+      session: { id: 'u-1', resume: false },
+      pluginDir: '/opt/plugins/pipeline',
+    });
+    expect(withDir[withDir.indexOf('--plugin-dir') + 1]).toBe('/opt/plugins/pipeline');
+  }
+}, 30000);
+
 test('category partition constants + feedbackSummaryLine (one line, no headings, truncated)', () => {
   for (const c of ['doc-flaw', 'ambiguity', 'script-candidate', 'script-failure']) {
     expect(DOC_ACTIONABLE_CATEGORIES.has(c)).toBe(true);
