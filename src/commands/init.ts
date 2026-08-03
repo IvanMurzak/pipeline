@@ -67,6 +67,9 @@ export interface InitOptions {
   project?: string;
   /** `--no-runner`: connect, but do not enrol THIS machine as a runner. */
   noRunner: boolean;
+  /** DEPRECATED `--no-ui`, accepted as a no-op (see the parser). Recorded only
+   *  so the run can print the one-line deprecation note. */
+  deprecatedNoUi: boolean;
 }
 
 const DEFAULT_TEMPLATE = 'support-answer'; // O4 (10-decisions.md)
@@ -87,6 +90,7 @@ export function parseInitArgs(args: string[]): InitOptions | { error: string } {
     help: false,
     local: false,
     noRunner: false,
+    deprecatedNoUi: false,
   };
   let sawTemplate = false;
   for (let i = 0; i < args.length; i++) {
@@ -108,6 +112,13 @@ export function parseInitArgs(args: string[]): InitOptions | { error: string } {
     else if (a === '--help' || a === '-h') out.help = true;
     else if (a === '--local') out.local = true;
     else if (a === '--no-runner') out.noRunner = true;
+    // DEPRECATED no-op (plugin-thin phase 1): `init` no longer starts the local
+    // dashboard, so there is nothing left for `--no-ui` to suppress. It is still
+    // ACCEPTED rather than rejected — a setup script that passes it predates the
+    // change and must not start failing with a usage error over a flag whose
+    // whole effect was "do less". Same stance as the deprecated `pipeline mesh`
+    // alias (commands/mesh.ts): keep working, say so on stderr, remove later.
+    else if (a === '--no-ui') out.deprecatedNoUi = true;
     else if (a === '--server' || eq('--server') !== undefined) {
       const v = takeValue('--server');
       if (typeof v !== 'string') return v;
@@ -509,6 +520,12 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
   if (parsed.help) {
     deps.out(helpText());
     return 0;
+  }
+  if (parsed.deprecatedNoUi) {
+    // Stderr, not stdout: `init --json` owns the one-JSON-document contract on
+    // stdout, so a note there would corrupt it for every scripted caller — which
+    // is precisely the population still passing this flag.
+    deps.err('pipeline init: --no-ui is deprecated and does nothing — init no longer starts the local dashboard.\n');
   }
   const entry = findTemplate(parsed.template);
   if (!entry) {

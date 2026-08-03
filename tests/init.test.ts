@@ -179,6 +179,7 @@ describe('parseInitArgs', () => {
       // Cloud-first: `local` is the OPT-OUT, so its default is false.
       local: false,
       noRunner: false,
+      deprecatedNoUi: false,
     });
   });
 
@@ -207,6 +208,7 @@ describe('parseInitArgs', () => {
       org: 'acme',
       project: 'proj',
       noRunner: true,
+      deprecatedNoUi: false,
     });
   });
 
@@ -215,13 +217,19 @@ describe('parseInitArgs', () => {
     expect(r).toEqual({
       template: 'support-answer',
       noPlugin: false, noRun: false, run: false, yes: false, json: false, help: false,
-      local: false, noRunner: false,
+      local: false, noRunner: false, deprecatedNoUi: false,
       server: 'http://x', org: 'acme', project: 'p',
     });
   });
 
-  test('--no-ui is no longer a recognized flag (dashboard removed from onboarding, plugin-thin phase 1)', () => {
-    expect(parseInitArgs(['--no-ui'])).toEqual({ error: "unknown flag '--no-ui'" });
+  test('--no-ui is accepted as a deprecated no-op, not rejected (plugin-thin phase 1)', () => {
+    // The dashboard step is gone, so the flag controls nothing — but a setup
+    // script that still passes it predates the change and must not start failing
+    // with a usage error over a flag whose whole effect was "do less". Same
+    // stance as the deprecated \ alias.
+    const parsed = parseInitArgs(['--no-ui']);
+    expect('error' in parsed).toBe(false);
+    expect((parsed as { deprecatedNoUi: boolean }).deprecatedNoUi).toBe(true);
   });
 
   test('a cloud flag with no value is a usage error, not a silent skip', () => {
