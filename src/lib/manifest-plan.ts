@@ -44,17 +44,16 @@ import {
   type Manifest,
   type ManifestStep,
 } from './manifest';
-import {
-  normalizeEffort,
-  normalizeModel,
-  type ComputePlanOptions,
-  type Isolation,
-  type Plan,
-  type PlanStep,
-} from './plan';
+import { normalizeEffort, normalizeModel } from './model';
+// TYPE-ONLY on purpose: lib/plan.ts imports this module to dispatch to it, so a
+// value import here would close the cycle.
+import type { ComputePlanOptions, Isolation, Plan, PlanStep } from './plan';
 import {
   DEFAULT_SCRIPT_TIMEOUT_S,
+  envRefs,
   MANAGER_SAFE_TIMEOUT_S,
+  SECRET_ENV_PATTERN,
+  stepRefs,
   type ScriptStepSpec,
 } from './script-types';
 import type { VariableDecl } from './substitution';
@@ -178,6 +177,8 @@ export function planFromManifest(
     }
   }
 
+  lintBindings(manifest, steps, errors, warnings);
+
   return {
     mode: manifest.execution,
     isolation: ISOLATION_BY_SCOPE[manifest.isolation],
@@ -201,6 +202,96 @@ export function planFromManifest(
     finalize: false,
     delete_branches: true,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Binding lints
+// ---------------------------------------------------------------------------
+
+/**
+ * The `${steps.…}` / `${env.…}` checks the v1 walk ran over `## Params`, run
+ * here over the manifest's `params:`/`args:` instead.
+ *
+ * Not optional polish: without them a typo'd binding is only discovered when
+ * the step actually dispatches — after everything before it has already run and
+ * possibly already written to a branch. The rules and the wording are the v1
+ * ones on purpose; a lint that reads differently in the two formats is one more
+ * thing that can disagree.
+ */
+function lintBindings(
+  manifest: Manifest,
+  steps: PlanStep[],
+  errors: string[],
+  warnings: string[],
+): void {
+  // Graph mode routes on flags, so "runs before" is dynamic and the static
+  // ancestor check cannot mean anything — runtime resolution covers it there.
+  const ancestors = manifest.flow === null ? ancestorSets(manifest) : null;
+  const byName = new Map(steps.map((s) => [s.step_id, s] as const));
+
+  for (const step of steps) {
+    const declared = step.script_spec?.params ?? step.pipeline_spec?.params ?? null;
+    for (const [name, spec] of Object.entries(declared ?? {})) {
+      const from = spec?.from;
+      if (typeof from !== 'string') continue;
+      const label = `step '${step.step_id}' param '${name}'`;
+
+      for (const envName of envRefs(from)) {
+        if (SECRET_ENV_PATTERN.test(envName)) {
+          warnings.push(
+            `${label}: \${env.${envName}} looks like a secret — secrets never travel through params; read it from the environment inside the script instead`,
+          );
+        }
+      }
+
+      for (const ref of stepRefs(from)) {
+        // A malformed reference is rejected at runtime with this exact message,
+        // so the plan rejects it with the same one — and skips the checks below,
+        // which do not apply to a reference that never resolves.
+        if (ref.shapeError) {
+          errors.push(`${label}: ${ref.shapeError}`);
+          continue;
+        }
+        if (!byName.has(ref.stepId)) {
+          errors.push(`${label}: \${steps.${ref.stepId}…} names no step in this pipeline`);
+          continue;
+        }
+        if (ancestors && !(ancestors.get(step.step_id)?.has(ref.stepId) ?? false)) {
+          errors.push(
+            `${label}: \${steps.${ref.stepId}…} does not run before '${step.step_id}' — it can never have produced an output to bind`,
+          );
+          continue;
+        }
+        const producer = byName.get(ref.stepId);
+        const output = producer?.script_spec?.output ?? producer?.pipeline_spec?.output ?? null;
+        if (ref.outputField !== null && output && !Object.hasOwn(output, ref.outputField)) {
+          errors.push(
+            `${label}: step '${ref.stepId}' declares an output without field '${ref.outputField}'`,
+          );
+        }
+      }
+    }
+  }
+}
+
+/** Transitive `needs:` ancestors per step. A sequential pipeline gets these for
+ *  free — an absent `needs` inherits the previous step — so one closure serves
+ *  both execution modes instead of the two rules v1 needed. */
+function ancestorSets(manifest: Manifest): Map<string, Set<string>> {
+  const deps = effectiveNeeds(manifest.steps);
+  const sets = new Map<string, Set<string>>();
+  // Declaration order is a valid topological order only when the manifest is
+  // acyclic — and a cycle is already a manifest ERROR, so the plan halts
+  // regardless of what this computes.
+  for (const step of manifest.steps) {
+    const acc = new Set<string>();
+    for (const d of deps.get(step.name) ?? []) {
+      acc.add(d);
+      for (const t of sets.get(d) ?? []) acc.add(t);
+    }
+    sets.set(step.name, acc);
+  }
+  return sets;
 }
 
 // ---------------------------------------------------------------------------

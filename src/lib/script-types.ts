@@ -141,6 +141,41 @@ export function stepsRefShapeError(refInner: string): string | null {
   return null;
 }
 
+/** One `${steps.<id>…}` reference inside a `from` binding template (§3.2). */
+export interface StepBindingRef {
+  stepId: string;
+  /** The FIRST dot-path segment after `.output.` — the level the producer's
+   *  declared output names. Null for any other shape. */
+  outputField: string | null;
+  /** The §3.2 shape verdict from {@link stepsRefShapeError}: non-null (a ready
+   *  lint message) when the reference is NOT `${steps.<id>.output.<path>}`.
+   *  Runtime resolution hard-fails those as 'invalid' with the SAME message, so
+   *  a plan must error on exactly what a run would reject. */
+  shapeError: string | null;
+}
+
+/** Every `${steps…}` reference in a binding template. SINGLE source shared by
+ *  both plan builders — the v1 markdown walk and the v2 manifest translation
+ *  must lint identical bindings identically. */
+export function stepRefs(template: string): StepBindingRef[] {
+  const out: StepBindingRef[] = [];
+  for (const m of template.matchAll(/\$\{steps\.([^.}]+)([^}]*)\}/g)) {
+    const rest = m[2] ?? '';
+    out.push({
+      stepId: m[1],
+      outputField: rest.startsWith('.output.') ? rest.slice('.output.'.length).split('.')[0] : null,
+      shapeError: stepsRefShapeError(`steps.${m[1]}${rest}`),
+    });
+  }
+  return out;
+}
+
+/** Every `${env.NAME}` name in a binding template — the surface the secret lint
+ *  (§3.3/§11) scans. */
+export function envRefs(template: string): string[] {
+  return [...template.matchAll(/\$\{env\.([^}]+)\}/g)].map((m) => m[1]);
+}
+
 /** Normalize one `## Next` line to its payload: trim, strip one leading bullet
  *  (`- ` / `* `), unwrap one pair of surrounding backticks, trim. SINGLE source
  *  for the `## Next` line grammar shared by the runtime parser

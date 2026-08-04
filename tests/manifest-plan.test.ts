@@ -375,3 +375,129 @@ steps:
     ]);
   });
 });
+
+describe('binding lints — the same checks v1 ran over `## Params`', () => {
+  const producerAndConsumer = (from: string, output = 'sha:\n        type: string') => `
+schema: 2
+name: demo
+steps:
+  - name: build
+    type: script
+    script: build.py
+    output:
+      ${output}
+  - name: ship
+    type: script
+    script: ship.py
+    params:
+      ref:
+        type: string
+        from: ${from}
+`;
+
+  test('a binding to an earlier step and a declared field is clean', () => {
+    const p = plan(producerAndConsumer('${steps.build.output.sha}'));
+    expect(p.errors).toEqual([]);
+  });
+
+  test('a field the producer never declares is caught before the run starts', () => {
+    const p = plan(producerAndConsumer('${steps.build.output.tag}'));
+    expect(p.errors.some((e) => e.includes("without field 'tag'"))).toBe(true);
+  });
+
+  test('a reference to a step that does not exist is an error', () => {
+    const p = plan(producerAndConsumer('${steps.ghost.output.sha}'));
+    expect(p.errors.some((e) => e.includes('names no step in this pipeline'))).toBe(true);
+  });
+
+  test('a reference to a LATER step is an error — it cannot have produced anything yet', () => {
+    const p = plan(`
+schema: 2
+name: demo
+steps:
+  - name: first
+    type: script
+    script: a.py
+    params:
+      ref:
+        type: string
+        from: \${steps.second.output.sha}
+  - name: second
+    type: script
+    script: b.py
+    output:
+      sha:
+        type: string
+`);
+    expect(p.errors.some((e) => e.includes("does not run before 'first'"))).toBe(true);
+  });
+
+  test('a malformed reference errors with the message the runtime would use', () => {
+    const p = plan(producerAndConsumer('${steps.build}'));
+    expect(p.errors.some((e) => e.includes('malformed reference'))).toBe(true);
+    // The ancestor/field checks are skipped — a reference that never resolves
+    // has nothing further to check, and two messages for one typo is noise.
+    expect(p.errors.filter((e) => e.includes("param 'ref'"))).toHaveLength(1);
+  });
+
+  test('a secret-looking env binding warns rather than failing the plan', () => {
+    const p = plan(producerAndConsumer('${env.GITHUB_TOKEN}'));
+    expect(p.errors).toEqual([]);
+    expect(p.warnings.some((w) => w.includes('looks like a secret'))).toBe(true);
+  });
+
+  test('graph mode skips the ancestor check — order is decided at runtime there', () => {
+    const p = plan(`
+schema: 2
+name: demo
+steps:
+  - name: build
+    type: script
+    script: a.py
+    params:
+      ref:
+        type: string
+        from: \${steps.verify.output.sha}
+  - name: verify
+    type: script
+    script: b.py
+    output:
+      sha:
+        type: string
+flow:
+  build:
+    goto: verify
+  verify:
+    - when: retry
+      goto: build
+      max: 2
+    - done: true
+`);
+    expect(p.errors).toEqual([]);
+  });
+
+  test("a pipeline step's args are linted exactly like a script step's params", () => {
+    const p = plan(
+      `
+schema: 2
+name: demo
+steps:
+  - name: build
+    type: script
+    script: a.py
+    output:
+      sha:
+        type: string
+  - name: release
+    type: pipeline
+    pipeline: ../release
+    args:
+      ref:
+        type: string
+        from: \${steps.build.output.nope}
+`,
+      { resolvePipeline: () => ({ root: '/somewhere', tried: [] }) },
+    );
+    expect(p.errors.some((e) => e.includes("without field 'nope'"))).toBe(true);
+  });
+});

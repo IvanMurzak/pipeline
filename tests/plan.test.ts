@@ -937,3 +937,70 @@ test('07 P1 gate: a PP_ token inside banned (non-exempt) frontmatter halts `pipe
   expect(res.action.reason).toContain('plan errors');
   expect(res.action.reason).toContain('not supported in frontmatter');
 });
+
+// ---------------------------------------------------------------------------
+// v2: `pipeline.yml` is the plan when it exists
+// ---------------------------------------------------------------------------
+
+/** A pipeline directory carrying BOTH formats — the shape of a migration in
+ *  progress, and the one case where "which file wins" has to be unambiguous. */
+function scaffoldBoth(yml: string, markdownManifest: string | null, steps: Record<string, string>): string {
+  const root = scaffold(markdownManifest, steps);
+  writeFileSync(join(root, 'pipeline.yml'), yml);
+  return root;
+}
+
+test('pipeline.yml wins over PIPELINE.md — the v1 walk is not consulted at all', () => {
+  const plan = computePlan(
+    scaffoldBoth(
+      [
+        'schema: 2',
+        'name: demo',
+        'steps:',
+        '  - name: implement',
+        '    body: steps/01-a.md',
+        '    model: opus',
+        '  - name: ship',
+        '    body: steps/02-b.md',
+        '',
+      ].join('\n'),
+      // Deliberately contradictory v1 sources: a different mode, and a THIRD
+      // step file the manifest never mentions. If any of it leaks into the
+      // plan, the two formats are being merged rather than chosen between.
+      '---\nexecution: parallel\n---\n',
+      { '01-a.md': '---\nmodel: haiku\n---\n# A\n', '02-b.md': '# B\n', '03-stray.md': '# stray\n' },
+    ),
+  );
+  expect(plan.errors).toEqual([]);
+  expect(plan.steps.map((s) => s.step_id)).toEqual(['implement', 'ship']);
+  expect(plan.steps[0].model).toBe('opus');
+  expect(plan.mode).toBe('sequential');
+  expect(plan.layers).toBeNull();
+});
+
+test('a step is named by the manifest, never by its body filename', () => {
+  const plan = computePlan(
+    scaffoldBoth(
+      'schema: 2\nname: demo\nsteps:\n  - name: implement\n    body: steps/99-zzz.md\n',
+      null,
+      { '99-zzz.md': '---\nstep_id: from-frontmatter\n---\n' },
+    ),
+  );
+  // Neither the filename stem nor the leftover v1 `step_id:` frontmatter has
+  // any say: identity comes from the manifest entry.
+  expect(plan.steps.map((s) => s.step_id)).toEqual(['implement']);
+});
+
+test('a broken pipeline.yml halts — it never falls back to the v1 walk', () => {
+  const plan = computePlan(
+    scaffoldBoth('schema: 2\nname: demo\nsteps:\n  - name: a\n    needs: [ghost]\n    body: steps/01-a.md\n', null, {
+      '01-a.md': '# A\n',
+    }),
+  );
+  expect(plan.errors.some((e) => e.includes("needs unknown step 'ghost'"))).toBe(true);
+});
+
+test('a directory with no pipeline.yml still plans the v1 way', () => {
+  const plan = computePlan(scaffold(null, { '01-a.md': '# A\n', '02-b.md': '# B\n' }));
+  expect(plan.steps.map((s) => s.step_id)).toEqual(['01-a', '02-b']);
+});

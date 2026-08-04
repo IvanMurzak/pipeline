@@ -13,13 +13,17 @@ import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep, basename, dirname } from 'node:path';
 import { parseFrontmatter, type FrontmatterValue } from './frontmatter';
 import { extractGraph, validateGraph, type Graph } from './graph';
+import { MANIFEST_FILENAME, parseManifest } from './manifest';
+import { planFromManifest } from './manifest-plan';
+import { normalizeEffort, normalizeModel } from './model';
 import {
   DEFAULT_SCRIPT_TIMEOUT_S,
+  envRefs,
   MANAGER_SAFE_TIMEOUT_S,
   normalizeNextLine,
   PARAM_TYPES,
   SECRET_ENV_PATTERN,
-  stepsRefShapeError,
+  stepRefs,
   type OnFailurePolicy,
   type ScriptParamSpec,
   type ScriptStepSpec,
@@ -215,41 +219,12 @@ export interface ComputePlanOptions {
   maxCompositionDepth?: number;
 }
 
-const MODEL_ALIASES = new Set(['haiku', 'sonnet', 'opus', 'fable']);
-
-/** The platform's reasoning-effort levels (claude --effort / agent frontmatter
- *  `effort:` / Agent SDK options.effort — verified 2026-07). `inherit`/empty
- *  normalizes to null = use the session default. */
-export const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
-
-/** Normalize a frontmatter `effort:` value to an accepted level / null. Same
- *  contract as normalizeModel: null = inherit, invalid flagged for a warning. */
-export function normalizeEffort(value: FrontmatterValue | undefined): {
-  effort: string | null;
-  invalid: boolean;
-} {
-  if (value == null) return { effort: null, invalid: false };
-  if (Array.isArray(value)) return { effort: null, invalid: true };
-  const v = String(value).trim().toLowerCase();
-  if (v === '' || v === 'inherit') return { effort: null, invalid: false };
-  if (EFFORT_LEVELS.has(v)) return { effort: v, invalid: false };
-  return { effort: null, invalid: true };
-}
-
-/** Normalize a frontmatter `model:` value to an accepted alias / canonical id / null. */
-export function normalizeModel(value: FrontmatterValue | undefined): {
-  model: string | null;
-  invalid: boolean;
-} {
-  if (value == null) return { model: null, invalid: false };
-  if (Array.isArray(value)) return { model: null, invalid: true };
-  const v = value.trim();
-  if (v === '' || v.toLowerCase() === 'inherit') return { model: null, invalid: false };
-  const lower = v.toLowerCase();
-  if (MODEL_ALIASES.has(lower)) return { model: lower, invalid: false };
-  if (v.startsWith('claude-')) return { model: v, invalid: false };
-  return { model: null, invalid: true };
-}
+// The model/effort value spaces live in lib/model.ts so BOTH plan builders can
+// read them — this one out of markdown frontmatter, the v2 translation out of
+// `pipeline.yml` (which must not import this module at runtime, or the two
+// would form a cycle). Re-exported here so every existing importer, including
+// the package's public src/index.ts, is unaffected.
+export { EFFORT_LEVELS, normalizeEffort, normalizeModel } from './model';
 
 // --- Design-time token linting (non-fatal — feeds `warnings`, never `errors`) ---
 //
@@ -408,38 +383,9 @@ function extractSpecBlock(
   return parsed as Record<string, ScriptParamSpec>;
 }
 
-/** One `${steps.<id>…}` reference inside a `from` binding template (§3.2).
- *  `outputField` is the FIRST dot-path segment after `.output.` (the level the
- *  producer's `## Output` block declares), or null for other shapes. */
-interface StepBindingRef {
-  stepId: string;
-  outputField: string | null;
-  /** The §3.2 shape verdict from the SHARED script-types.stepsRefShapeError
-   *  rule: non-null (the ready lint message) when the reference is NOT the
-   *  required `${steps.<id>.output.<path>}` shape (e.g. bare `${steps.foo}`
-   *  or `${steps.foo.output}`). resolveRef hard-fails these as 'invalid' at
-   *  runtime with the SAME message, so the plan must ERROR. */
-  shapeError: string | null;
-}
-
-function stepRefs(template: string): StepBindingRef[] {
-  const out: StepBindingRef[] = [];
-  for (const m of template.matchAll(/\$\{steps\.([^.}]+)([^}]*)\}/g)) {
-    const rest = m[2] ?? '';
-    out.push({
-      stepId: m[1],
-      outputField: rest.startsWith('.output.')
-        ? rest.slice('.output.'.length).split('.')[0]
-        : null,
-      shapeError: stepsRefShapeError(`steps.${m[1]}${rest}`),
-    });
-  }
-  return out;
-}
-
-function envRefs(template: string): string[] {
-  return [...template.matchAll(/\$\{env\.([^}]+)\}/g)].map((m) => m[1]);
-}
+// `stepRefs` / `envRefs` (the ${steps…} and ${env…} binding scanners) now
+// live in script-types.ts beside `stepsRefShapeError`, so the v2 manifest
+// translation lints the same bindings by exactly the same rules.
 
 /** `## Next` mechanical rule for sequential-mode script steps (§2.2/§5.2):
  *  the single line must be one absolute path — POSIX (`/…`), Windows drive
@@ -909,7 +855,60 @@ function lintScriptSurfaces(
   }
 }
 
+/**
+ * The plan for a pipeline, from whichever manifest format it is written in.
+ *
+ * A `pipeline.yml` WINS whenever one exists. It is not a hint or a partial
+ * override: v2's whole premise is that one file says everything, so a directory
+ * holding both formats is a pipeline mid-migration, and reading half of each is
+ * the ambiguity v2 exists to remove. A leftover `PIPELINE.md` beside it is
+ * prose for humans and is not parsed at all.
+ */
 export function computePlan(pipelineRoot: string, options: ComputePlanOptions = {}): Plan {
+  const manifestFile = join(pipelineRoot, MANIFEST_FILENAME);
+  if (existsSync(manifestFile)) {
+    let text: string;
+    try {
+      text = readFileSync(manifestFile, 'utf8');
+    } catch (e) {
+      // Unreadable is not "absent". Falling back to the v1 walk here would run
+      // a DIFFERENT pipeline than the one on disk — silently, and only on the
+      // machine with the permission problem.
+      return haltedPlan([`${MANIFEST_FILENAME} could not be read: ${(e as Error).message}`]);
+    }
+    return planFromManifest(parseManifest(text), pipelineRoot, options);
+  }
+  return computePlanFromMarkdown(pipelineRoot, options);
+}
+
+/** A plan that can only halt — one error, no steps. Used when the manifest
+ *  itself could not be reached, which no partial plan can represent honestly. */
+function haltedPlan(errors: string[]): Plan {
+  return {
+    mode: 'sequential',
+    isolation: 'manual',
+    runner: 'manager',
+    default_model: null,
+    default_effort: null,
+    steps: [],
+    layers: null,
+    graph: null,
+    variables: [],
+    model_overrides: {},
+    effort_overrides: {},
+    errors,
+    warnings: [],
+    worktree_hook_dir: '.pipeline/.hooks',
+    submodules: [],
+    base_branch: 'main',
+    finalize: false,
+    delete_branches: true,
+  };
+}
+
+/** The v1 walk: PIPELINE.md frontmatter + every `steps/**` frontmatter, ordered
+ *  by filename, routed by an optional `## Graph` section. */
+function computePlanFromMarkdown(pipelineRoot: string, options: ComputePlanOptions = {}): Plan {
   const errors: string[] = [];
   const warnings: string[] = [];
 
