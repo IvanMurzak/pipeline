@@ -109,6 +109,16 @@ export interface PlanStep {
    * static view, can honestly say.
    */
   body: BodyEntry[];
+  /**
+   * Whether an automated self-improvement pass may edit this step's body.
+   * Always true for a v1 step, which had no way to say otherwise.
+   *
+   * `false` does not silence the step's problems — they still reach the
+   * retrospective, in the human-only bucket. Forbidding the edit AND losing the
+   * report would be the worst of both: you would stop learning about a defect
+   * precisely in the step you trusted least to fix itself.
+   */
+  self_improve: boolean;
 }
 
 export interface Plan {
@@ -143,6 +153,20 @@ export interface Plan {
    * `flow:`/`## Graph` edges and on layers respectively.)
    */
   advance: 'manifest' | 'reported';
+  /**
+   * Absolute paths no self-improvement pass may write, for THIS pipeline.
+   *
+   * A file is frozen when ANY step including it declares `self_improve: false`.
+   * Per-step permission is leaky on its own once bodies compose: a `_shared/`
+   * fragment included by both a permitted and a forbidden step would otherwise
+   * be edited *through* the permitted one, silently rewriting the protected
+   * step's prompt. One veto freezes the file.
+   *
+   * The manifest itself is always here. A self-editing control file is a
+   * different risk class from self-editing prose — it can change `timeout`,
+   * `needs`, `isolation`: what the run DOES, not what it says.
+   */
+  frozen_body_files: string[];
   /** Topological layers of step_ids — parallel mode only; null otherwise. */
   layers: string[][] | null;
   /** Routing graph (Variant A) parsed from a `## Graph` section of PIPELINE.md,
@@ -908,6 +932,12 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
     }
     return planFromManifest(parseManifest(text), pipelineRoot, options);
   }
+  // Deliberately NOT flagged in `plan.warnings`: that list is design-time lint
+  // about the pipeline's CONTENT, it is persisted into the run state and handed
+  // to the retrospective improver — which would then try to "fix" a deprecation
+  // it cannot fix, on every run. Being v1 is a message for the operator, and
+  // `plan.advance === 'reported'` already identifies one, so the command layer
+  // says it once per run instead (see commands/next.ts).
   return computePlanFromMarkdown(pipelineRoot, options);
 }
 
@@ -922,6 +952,7 @@ function haltedPlan(errors: string[]): Plan {
     default_effort: null,
     steps: [],
     advance: 'reported',
+    frozen_body_files: [],
     layers: null,
     graph: null,
     variables: [],
@@ -1442,6 +1473,9 @@ function computePlanFromMarkdown(pipelineRoot: string, options: ComputePlanOptio
       // A v1 step IS its file, so it declares no composition — `path` is the
       // whole body, and the dispatch keeps reading exactly that one file.
       body: [],
+      // v1 had no way to opt a step out, and every existing pipeline relies on
+      // the improver being allowed to touch its steps.
+      self_improve: true,
     });
 
     // Design-time lints (non-fatal, warnings only).
@@ -1696,6 +1730,9 @@ function computePlanFromMarkdown(pipelineRoot: string, options: ComputePlanOptio
     // The v1 walk has no manifest order to follow: a step's successor is
     // whatever it reports.
     advance: 'reported',
+    // Nothing is frozen: without a manifest there is no step that could have
+    // said so.
+    frozen_body_files: [],
     layers,
     graph,
     variables: variableDecls,

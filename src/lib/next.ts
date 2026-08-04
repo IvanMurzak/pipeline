@@ -393,8 +393,29 @@ export interface MergeBranch {
 export type NextAction =
   | { action: 'run-step'; concurrent: boolean; steps: ActionStep[] }
   | { action: 'merge'; branches: MergeBranch[] }
-  | { action: 'run-improver'; iteration_path: string }
-  | { action: 'run-script-creator'; iteration_path: string; number: number; of: number }
+  | {
+      action: 'run-improver';
+      iteration_path: string;
+      /** Absolute paths this pass must NOT write (plan.frozen_body_files).
+       *  Present only when the pipeline froze something; the improver is an
+       *  agent, so this is a constraint it is TOLD, and the engine's own
+       *  refusal to queue a frozen step is the part that does not rely on
+       *  anyone honouring it. */
+      frozen_files?: string[];
+    }
+  | {
+      action: 'run-script-creator';
+      iteration_path: string;
+      number: number;
+      of: number;
+      /** Same constraint as run-improver's: a frozen step's script is one of
+       *  the things a `self_improve: false` step froze. Structurally
+       *  unreachable today (a frozen step never reaches the improver, so it
+       *  can never produce a script brief) — carried anyway, because the
+       *  script-creator is also invoked from the retrospective, where the
+       *  engine is not the one deciding. */
+      frozen_files?: string[];
+    }
   | {
       action: 'retrospective';
       /** Design-time lint findings captured at init (state.lint_warnings).
@@ -1587,8 +1608,10 @@ function synthesizeStep(
     // budget, matching the pre-A2 halt-on-failure behavior (out of the v1
     // scope: bounded retries apply to enumerated PlanSteps only).
     retries: 0,
-    // An off-plan step is a bare file, so there is nothing to compose.
+    // An off-plan step is a bare file, so there is nothing to compose — and
+    // nothing declared it frozen either.
     body: [],
+    self_improve: true,
   };
 }
 
@@ -1677,7 +1700,14 @@ function onStepPhase(plan: Plan, state: NextState, record: NextRecord | null, op
   // completed
   if (r.has_improvement_brief && state.current_step_id) {
     const step = currentStep(plan, state, opts);
-    if (step) state.improve_queue.push({ step_id: state.current_step_id, iteration_path: step.path });
+    // A step that opted out of self-improvement is not queued at all. Its
+    // problems are NOT silenced — the brief still exists on disk and the
+    // retrospective reads it into the human-only bucket — but no automated
+    // pass gets to rewrite the prompt of a step whose whole job may be to
+    // catch a run that lied about succeeding.
+    if (step && step.self_improve !== false) {
+      state.improve_queue.push({ step_id: state.current_step_id, iteration_path: step.path });
+    }
   }
   // Stash the advancement decision; it's consumed once the improve queue drains.
   state.pending_next = r.next_iteration ?? null;
@@ -1718,7 +1748,7 @@ function onLayerRecord(plan: Plan, state: NextState, record: LayerRecord, opts: 
     const res = results.find((x) => x.step_id === id);
     if (res?.has_improvement_brief) {
       const s = stepByName(plan, id);
-      if (s) state.improve_queue.push({ step_id: id, iteration_path: s.path });
+      if (s && s.self_improve !== false) state.improve_queue.push({ step_id: id, iteration_path: s.path });
     }
   }
   // Worktree mode: merge committed branches first; manual mode skips merge.
@@ -1757,7 +1787,13 @@ function onImproverPhase(plan: Plan, state: NextState, record: NextRecord | null
     state.scripts_done = 0;
     state.phase = 'await-script';
     return {
-      action: { action: 'run-script-creator', iteration_path: state.improve_target ?? '', number: 1, of: n },
+      action: {
+        action: 'run-script-creator',
+        iteration_path: state.improve_target ?? '',
+        number: 1,
+        of: n,
+        ...(plan.frozen_body_files?.length ? { frozen_files: plan.frozen_body_files } : {}),
+      },
       state,
     };
   }
@@ -1776,6 +1812,7 @@ function onScriptPhase(plan: Plan, state: NextState, record: NextRecord | null, 
         iteration_path: state.improve_target ?? '',
         number: state.scripts_done + 1,
         of: state.scripts_total,
+        ...(plan.frozen_body_files?.length ? { frozen_files: plan.frozen_body_files } : {}),
       },
       state,
     };
@@ -1795,7 +1832,14 @@ function processImproveQueue(plan: Plan, state: NextState, opts: NextOpts): Next
     clearImproveCursor(state);
     state.improve_target = item.iteration_path;
     state.phase = 'await-improver';
-    return { action: { action: 'run-improver', iteration_path: item.iteration_path }, state };
+    return {
+      action: {
+        action: 'run-improver',
+        iteration_path: item.iteration_path,
+        ...(plan.frozen_body_files?.length ? { frozen_files: plan.frozen_body_files } : {}),
+      },
+      state,
+    };
   }
   return advance(plan, state, opts);
 }

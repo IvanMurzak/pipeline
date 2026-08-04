@@ -92,6 +92,7 @@ import {
   type WorktreeRecord,
 } from '../lib/next';
 import { MANIFEST_FILENAME } from '../lib/manifest';
+import { MANIFEST_BASENAME } from '../lib/migrate';
 import { emitEvent } from '../lib/event';
 import { statsAppend, statsEnabled, statsFinalizeRun } from '../lib/stats';
 import { backfillProject, findStatsProjectRoot } from '../lib/stats-backfill';
@@ -1662,6 +1663,20 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   const execRootAbs = scoped && wtPipelineRoot !== null ? resolve(wtPipelineRoot) : rootAbs;
   const artifactRoot = scoped && wtPipelineRoot !== null ? execRootAbs : a.root;
   const mode = pickMode(plan);
+
+  // A v1 pipeline still runs exactly as it did — breaking one to make a point
+  // about formats would be the opposite of compatibility — but say so ONCE, at
+  // run init, and name the command that fixes it. Not in `plan.warnings`: that
+  // is design-time lint about the pipeline's CONTENT, it is persisted into the
+  // run state and handed to the retrospective improver, which would then try to
+  // "fix" a deprecation it cannot fix on every single run.
+  if (prevState === null && plan.advance === 'reported' && plan.steps.length) {
+    warnNote(
+      `this pipeline is defined the v1 way (${MANIFEST_BASENAME} + per-step frontmatter + ` +
+        `filename order). \`pipeline migrate --to-manifest --root ${a.root}\` generates a ` +
+        `${MANIFEST_FILENAME} that becomes its single definition; the v1 form keeps working meanwhile.`,
+    );
+  }
 
   // `--start` is a step NAME now. A file path still resolves — every existing
   // caller passes one — but say so, with the name to use instead: a step is an

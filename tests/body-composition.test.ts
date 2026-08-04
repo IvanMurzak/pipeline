@@ -331,3 +331,50 @@ steps:
     expect(step(complete(root, join(root, 'steps', '03-c.md'))).step_id).toBe('03-c');
   });
 });
+
+describe('a v1 pipeline is told it is v1 — once, and with the remedy', () => {
+  function initWithStderr(root: string) {
+    const original = process.stderr.write.bind(process.stderr);
+    let captured = '';
+    (process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+      captured += s;
+      return true;
+    };
+    try {
+      invokeNext({ root, runId: 'r1' });
+      return captured;
+    } finally {
+      (process.stderr as unknown as { write: typeof original }).write = original;
+    }
+  }
+
+  function v1Root() {
+    const root = mkdtempSync(join(tmpdir(), 'v1dep-'));
+    created.push(root);
+    writeFileSync(join(root, 'PIPELINE.md'), '# P\n');
+    mkdirSync(join(root, 'steps'));
+    writeFileSync(join(root, 'steps', '01-a.md'), '# A\n');
+    return root;
+  }
+
+  test('the notice names the command that fixes it, and says v1 keeps working', () => {
+    const captured = initWithStderr(v1Root());
+    expect(captured).toContain('defined the v1 way');
+    expect(captured).toContain('migrate --to-manifest');
+    expect(captured).toContain('keeps working meanwhile');
+  });
+
+  test('it fires at run INIT only — not on every loop call', () => {
+    const root = v1Root();
+    initWithStderr(root); // init
+    const second = initWithStderr(root); // an existing run: no state === null
+    expect(second).not.toContain('defined the v1 way');
+  });
+
+  test('a manifest pipeline is never nagged', () => {
+    const root = scaffold('schema: 2\nname: demo\nsteps:\n  - name: a\n    body: steps/a.md\n', {
+      'steps/a.md': '# A\n',
+    });
+    expect(initWithStderr(root)).not.toContain('defined the v1 way');
+  });
+});

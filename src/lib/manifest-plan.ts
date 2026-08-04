@@ -40,6 +40,8 @@ import { normalizeApprovalRole } from './gate';
 import {
   buildLayers,
   effectiveNeeds,
+  frozenBodyFiles,
+  MANIFEST_FILENAME,
   resolveBody,
   type BodyEntry,
   type Manifest,
@@ -160,6 +162,7 @@ export function planFromManifest(
       // The DECLARATION, absolutized — conditions are evaluated per dispatch
       // against the run's flags, not here (see PlanStep.body).
       body: absolutizeBody(s.body, pipelineRoot),
+      self_improve: s.self_improve,
     };
   });
 
@@ -192,6 +195,7 @@ export function planFromManifest(
     steps,
     // The manifest declares the order, so nothing downstream has to report it.
     advance: 'manifest',
+    frozen_body_files: frozenFiles(manifest, pipelineRoot),
     layers,
     graph: manifest.flow,
     variables: variableDecls(manifest),
@@ -306,6 +310,18 @@ function ancestorSets(manifest: Manifest): Map<string, Set<string>> {
 
 function absolutize(p: string, pipelineRoot: string): string {
   return isAbsolute(p) ? p : join(pipelineRoot, p);
+}
+
+/** Absolute paths no self-improvement pass may write: every body file (and
+ *  script) a `self_improve: false` step reaches, plus the manifest itself.
+ *
+ *  The manifest is unconditional. A self-editing control file is a different
+ *  risk class from self-editing prose — prose changes what a step is told, the
+ *  manifest changes `timeout`, `needs`, `isolation`: what the run DOES. */
+function frozenFiles(manifest: Manifest, pipelineRoot: string): string[] {
+  const frozen = new Set<string>([join(pipelineRoot, MANIFEST_FILENAME)]);
+  for (const f of frozenBodyFiles(manifest)) frozen.add(absolutize(f, pipelineRoot));
+  return [...frozen];
 }
 
 /** The body declaration with every `use:` resolved against the pipeline root,
