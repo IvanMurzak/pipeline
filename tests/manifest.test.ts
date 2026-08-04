@@ -10,7 +10,7 @@ import {
 } from '../src/lib/manifest';
 
 /**
- * v2 manifest (`pipeline.yaml`) — parsing, validation, layering, body
+ * v2 manifest (`pipeline.yml`) — parsing, validation, layering, body
  * composition and the self-improve freeze. Pure: every case is a string in,
  * no filesystem.
  *

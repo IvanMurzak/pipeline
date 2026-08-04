@@ -1,4 +1,4 @@
-// The v2 pipeline manifest — `pipeline.yaml`.
+// The v2 pipeline manifest — `pipeline.yml`.
 //
 // WHY THIS EXISTS. The v1 manifest spread a pipeline's definition across three
 // places that disagreed about who was in charge: `PIPELINE.md` frontmatter, the
@@ -47,7 +47,7 @@ function parseYaml(text: string): unknown {
   return yaml.parse(text);
 }
 
-export const MANIFEST_FILENAME = 'pipeline.yaml';
+export const MANIFEST_FILENAME = 'pipeline.yml';
 export const MANIFEST_SCHEMA = 2;
 
 export type Execution = 'sequential' | 'parallel';
@@ -449,7 +449,7 @@ export function frozenBodyFiles(manifest: Manifest): Set<string> {
 // Entry point
 // ---------------------------------------------------------------------------
 
-/** Parse and validate a `pipeline.yaml`. Pure: no filesystem, no environment.
+/** Parse and validate a `pipeline.yml`. Pure: no filesystem, no environment.
  *  Errors are collected rather than thrown so a caller can print all of them at
  *  once; a manifest with a non-empty `errors` must never be run. */
 export function parseManifest(text: string): Manifest {
