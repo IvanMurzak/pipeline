@@ -38,6 +38,7 @@ import {
   type FormatReaderIO,
 } from '../lib/format-version';
 import { computePlan, findEnclosingPipelineRoot } from '../lib/plan';
+import { runToManifest } from './migrate-to-manifest';
 import {
   MANIFEST_BASENAME,
   MigrationLadderError,
@@ -70,6 +71,10 @@ export interface MigrateDeps {
 
 interface ParsedArgs {
   to?: number;
+  /** `--to-manifest`: generate a v2 pipeline.yml instead of walking the ladder. */
+  toManifest: boolean;
+  /** Overwrite an existing pipeline.yml (refused by default — it is hand-edited). */
+  force: boolean;
   dryRun: boolean;
   root?: string;
   json: boolean;
@@ -77,10 +82,14 @@ interface ParsedArgs {
 }
 
 function parseArgs(args: string[]): ParsedArgs {
-  const out: ParsedArgs = { dryRun: false, json: false };
+  const out: ParsedArgs = { toManifest: false, force: false, dryRun: false, json: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === '--to' || a.startsWith('--to=')) {
+    if (a === '--to-manifest') {
+      out.toManifest = true;
+    } else if (a === '--force') {
+      out.force = true;
+    } else if (a === '--to' || a.startsWith('--to=')) {
       const raw = a === '--to' ? args[++i] : a.slice('--to='.length);
       if (raw === undefined || !/^\d+$/.test(raw.trim()) || Number.parseInt(raw, 10) < 1) {
         out.error = `--to expects a positive integer, got '${raw ?? ''}'`;
@@ -108,11 +117,20 @@ function parseArgs(args: string[]): ParsedArgs {
 
 function usage(): string {
   return [
-    'Usage: pipeline migrate --to <N> [--dry-run] [--root <dir>] [--json]',
+    'Usage: pipeline migrate --to <N>       [--dry-run] [--root <dir>] [--json]',
+    '       pipeline migrate --to-manifest  [--dry-run] [--root <dir>] [--json] [--force]',
     '',
-    '  Migrate a pipeline folder (PIPELINE.md + steps/**) to format <N> along the',
-    '  paired up/down transform ladder. --dry-run prints the diff and writes',
-    '  nothing; without it, the result must pass plan-lint or the migration aborts.',
+    '  --to <N>        Migrate a pipeline folder (PIPELINE.md + steps/**) to format',
+    '                  <N> along the paired up/down transform ladder.',
+    '  --to-manifest   Generate a v2 pipeline.yml from a v1 pipeline: ONE file that',
+    '                  says everything, instead of PIPELINE.md frontmatter + every',
+    '                  step frontmatter + a ## Graph section + the filename order.',
+    '                  Prints the old->new step-name map. Refuses to overwrite an',
+    '                  existing pipeline.yml without --force.',
+    '',
+    '  --dry-run prints what would be written and writes nothing. Without it the',
+    '  result must pass its gate (plan-lint, or plan EQUIVALENCE for --to-manifest)',
+    '  or nothing is written at all.',
   ].join('\n');
 }
 
@@ -215,7 +233,11 @@ export function runMigrate(args: string[], deps: MigrateDeps = {}): number {
 
   const parsed = parseArgs(args);
   if (parsed.error) return emitUsageErr(parsed.error);
-  if (parsed.to === undefined) return emitUsageErr('--to <N> is required');
+  if (parsed.toManifest && parsed.to !== undefined) {
+    return emitUsageErr('--to and --to-manifest are different migrations — pass one');
+  }
+  if (parsed.toManifest) return runToManifest(parsed, out, err, emitUsageErr, deps);
+  if (parsed.to === undefined) return emitUsageErr('--to <N> or --to-manifest is required');
 
   const cwd = deps.cwd ?? process.cwd();
   const exists = deps.exists ?? existsSync;

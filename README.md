@@ -70,6 +70,37 @@ declares `execution: parallel`. Steps that declare `depends-on` without that fla
 run sequentially and emit a warning. This keeps the common (sequential) case at
 O(1) reads on a run start.
 
+### `migrate --to-manifest` — turn a v1 pipeline into a `pipeline.yml`
+
+```bash
+bun src/cli.ts migrate --to-manifest [--root <dir>] [--dry-run] [--json] [--force]
+```
+
+Generates the v2 manifest for a v1 pipeline: ONE file that says everything,
+replacing `PIPELINE.md` frontmatter + every step's frontmatter + a `## Graph`
+section + the filename order. Prints the old→new step-name map — a v1 step id
+that was only a filename stem loses its ordering prefix (`01-implement` →
+`implement`), because the manifest's step list now carries the order.
+
+It is generated from the computed **plan**, not from the source files: the plan
+is what the v1 walk actually decided, so emitting from it is the only way to be
+sure the manifest says what the pipeline already does. The gate before writing
+is therefore **equivalence, not lint** — the manifest is parsed back, re-planned,
+and every field that decides what runs must match. A migration that produces a
+valid pipeline which is not *this* pipeline writes nothing.
+
+It refuses rather than guess:
+
+- an existing `pipeline.yml` is never overwritten (pass `--force`),
+- a v1 pipeline that does not plan cleanly is not translated,
+- anything a v2 manifest cannot express — a script step's inline `command:`, a
+  `(required)` variable, `runner: headless`, `finalize:`, `delete_branches:` —
+  is named, and aborts the write. `--dry-run` still shows what the rest becomes.
+
+`PIPELINE.md` is left in place: it is prose for humans afterwards and is no
+longer parsed. The `## Next` sections in the step files are dead too — the
+manifest decides the order.
+
 ### `drive` — run an entire pipeline headless (EXPERIMENTAL)
 
 ```bash

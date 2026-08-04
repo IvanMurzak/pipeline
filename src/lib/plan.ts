@@ -937,6 +937,17 @@ function haltedPlan(errors: string[]): Plan {
   };
 }
 
+/** The v1 walk, on demand — for a caller that must read the MARKDOWN definition
+ *  even where a `pipeline.yml` exists: `pipeline migrate --to-manifest --force`
+ *  regenerates a manifest from the v1 sources, and would otherwise re-plan the
+ *  very file it is replacing. */
+export function computePlanFromMarkdownFor(
+  pipelineRoot: string,
+  options: ComputePlanOptions = {},
+): Plan {
+  return computePlanFromMarkdown(pipelineRoot, options);
+}
+
 /** The v1 walk: PIPELINE.md frontmatter + every `steps/**` frontmatter, ordered
  *  by filename, routed by an optional `## Graph` section. */
 function computePlanFromMarkdown(pipelineRoot: string, options: ComputePlanOptions = {}): Plan {

@@ -56,10 +56,10 @@ const example = { registry: EXAMPLE_MIGRATIONS, current: EXAMPLE_CURRENT };
 
 // ── usage (exit 2) ───────────────────────────────────────────────────────────
 
-test('usage: --to is required', () => {
+test('usage: a migration must be named — --to <N> or --to-manifest', () => {
   const r = run(['--root', makePipeline()]);
   expect(r.code).toBe(2);
-  expect(r.err).toContain('--to <N> is required');
+  expect(r.err).toContain('--to <N> or --to-manifest is required');
 });
 
 test('usage: unknown argument', () => {
@@ -201,10 +201,10 @@ test('plan-lint abort: never reaches the write seam (injected lint failure)', ()
 
 // ── cli.ts routing (subprocess) ──────────────────────────────────────────────
 
-test('cli routing: `pipeline migrate` with no --to is a usage error (exit 2)', () => {
+test('cli routing: `pipeline migrate` with no migration named is a usage error (exit 2)', () => {
   const r = spawnSync(process.execPath, [CLI, 'migrate'], { encoding: 'utf8' });
   expect(r.status).toBe(2);
-  expect(r.stderr).toContain('--to <N> is required');
+  expect(r.stderr).toContain('--to <N> or --to-manifest is required');
 }, 30000);
 
 test('cli routing: `pipeline migrate --to 1` on a format-1 pipeline exits 0 (noop)', () => {
