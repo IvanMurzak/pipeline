@@ -1,4 +1,4 @@
-// `pipeline drive --root <pipeline_root> --run-id <id> --start <iteration-path>
+// `pipeline drive --root <pipeline_root> --run-id <id> --start <step-name>
 //   [--default-model <m>] [--model <step_id>=<m> ...]
 //   [--default-effort <level>] [--effort <step_id>=<level> ...] [--resume]
 //   [--var NAME=value ...] [--vars-file <path>]
@@ -109,7 +109,7 @@
 // `awaiting_input` event ({run_id, iteration, question_id, question} — the
 // @baizor/pipeline-protocol AwaitingInputData shape the cloud ingest consumes
 // to set the run's parked status; e7 DEFECT-3). Re-run with
-// `--resume --start <same-iteration> --answer "<text>"` and drive resumes the
+// `--resume --start <same-step> --answer "<text>"` and drive resumes the
 // SAME claude session (`--resume <session-id>`) with the answer — the step
 // continues from where it stopped instead of re-deriving its work; the
 // re-entry's engine-emitted `iteration.started` carries `resumed:true`
@@ -130,8 +130,8 @@
 //
 // Exit codes: 0 completed · 1 halted/depth-exhausted · 2 usage error ·
 // 3 blocked (a step delegated a nested blocker; resolve it, then re-run with
-// `--resume --start <same-iteration>`) · 4 awaiting-input (a step asked a
-// question; answer via `--resume --start <same-iteration> --answer <text>`).
+// `--resume --start <same-step>`) · 4 awaiting-input (a step asked a
+// question; answer via `--resume --start <same-step> --answer <text>`).
 
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -1008,7 +1008,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     return 2;
   }
   if (!a.start && !a.resume) {
-    err('pipeline drive: --start <iteration-path> is required (or pass --resume to re-enter a persisted run)\n');
+    err('pipeline drive: --start <step-name> is required (or pass --resume to re-enter a persisted run)\n');
     return 2;
   }
   if (a.modelError !== undefined) {
@@ -1747,7 +1747,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         raw: null,
         recordFile: canonicalRecordFile,
         // SOURCE path (env-variables a5, E11): this iteration_path is surfaced
-        // in the exit-4 JSON, echoed in the `--resume --start <path>` hint, and
+        // in the exit-4 JSON, echoed in the `--resume --start <step-name>` hint, and
         // machine-fed back as `--start` by pipeline-ui's answer flow — a
         // rendered `.runtime/<run>/rendered/` path there would make the engine
         // synthesize an off-plan step on the answer resume instead of resuming
@@ -2139,7 +2139,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
                 question,
                 detail:
                   'the step is an APPROVAL GATE; deliver the decision by re-running pipeline drive with ' +
-                  `--resume --start ${gateStep.path} --answer '{"decision":"approve|reject","comment":<string|null>}' ` +
+                  `--resume --start ${gateStep.step_id} --answer '{"decision":"approve|reject","comment":<string|null>}' ` +
                   '(or --answer-file <path>) — an unparseable answer halts the run, never approves it',
               },
               4,
@@ -2190,7 +2190,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
                 question: r.awaiting.question,
                 detail:
                   'the step asked a question; answer it, then re-run pipeline drive with ' +
-                  `--resume --start ${r.awaiting.iteration_path} --answer "<text>" (or --answer-file <path>) — ` +
+                  `--resume --start ${r.awaiting.step_id} --answer "<text>" (or --answer-file <path>) — ` +
                   'the SAME executor session resumes with your answer',
               },
               4,
@@ -2302,7 +2302,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
             status: 'blocked',
             blocker_record_file: blockerRecordFile,
             detail:
-              'a step reported blocked-delegating; resolve the blocker (see the blocker_delegation brief in the record file), then re-run pipeline drive with --resume --start <same-iteration>',
+              'a step reported blocked-delegating; resolve the blocker (see the blocker_delegation brief in the record file), then re-run pipeline drive with --resume --start <same-step>',
           },
           3,
         );

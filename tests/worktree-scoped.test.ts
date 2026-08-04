@@ -227,7 +227,12 @@ test('F5: branch-divergent pipeline — run executes the BRANCH definition from 
     expect(st1.worktree_scoped).toBe(true);
     expect(st1.worktree_pipeline_root).toBe(wtRoot);
     expect(st1.main_pipeline_root).toBe(mainRoot);
-    expect(st1.current_path).toBe(join(wtRoot, 'steps', '01-step.md'));
+    // The cursor is the step's NAME, which is the same string in both trees —
+    // so unlike the dispatch path above it needs no prefix swap at all. (It
+    // used to be the worktree-prefixed path, and the swap that produced it was
+    // a step of its own.)
+    expect(st1.current_step_id).toBe('01-step');
+    expect(st1.current_path).toBeUndefined();
 
     // ---- step 1 done with an improvement brief → improver targets the WT --
     const r2 = nextCall(

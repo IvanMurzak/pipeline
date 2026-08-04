@@ -1,4 +1,4 @@
-// `pipeline next --root <pipeline_root> --run-id <id> [--start <iteration-path>]
+// `pipeline next --root <pipeline_root> --run-id <id> [--start <step-name>]
 //   [--default-model <m>] [--model <step_id>=<m> ...]
 //   [--default-effort <level>] [--effort <step_id>=<level> ...]
 //   [--var NAME=value ...] [--vars-file <path>]
@@ -80,6 +80,7 @@ import {
   haltRun,
   pickMode,
   samePath,
+  startResolvedByPath,
   type ActionStep,
   type LayerResultEntry,
   type NextState,
@@ -505,7 +506,7 @@ function emitCompletionEvents(
         record.outcome === 'depth-exhausted');
     const argv = [
       kv('run_id', runId),
-      kv('iteration_path', mp(prev.current_path)),
+      kv('iteration_path', mp(currentStepPath(plan, prev))),
       kv('outcome', record.outcome),
       kv('next_iteration_path', record.next_iteration ?? null),
       kv('has_improvement_brief', record.has_improvement_brief === true),
@@ -563,6 +564,7 @@ function emitCompletionEvents(
 // ---------------------------------------------------------------------------
 
 function statsNoteRecord(
+  plan: Plan,
   root: string,
   runId: string,
   prev: NextState | null,
@@ -589,7 +591,10 @@ function statsNoteRecord(
       // Worktree-scoped runs (P2/b3): the state cursor is a WORKTREE path —
       // swap back to the MAIN author path so .stats pairing/placement stays
       // stable (identity on every other run).
-      path: prev.current_path === null ? null : mapPath(prev.current_path),
+      path: (() => {
+        const p = currentStepPath(plan, prev);
+        return p === null ? null : mapPath(p);
+      })(),
       step_id: prev.current_step_id ?? null,
       outcome: record.outcome,
       ...tag,
@@ -623,7 +628,7 @@ function statsNoteAction(root: string, runId: string, action: NextAction): void 
       statsAppend(root, runId, {
         k: 'step.started',
         // SOURCE path label (env-variables a5): completion lines are keyed off
-        // engine state (prev.current_path — always the source), so a rendered
+        // engine state (the plan's own path — always the source), so a rendered
         // `.runtime/<run>/rendered/` dispatch path would de-pair the
         // started/completed lines and put volatile run-scoped paths in .stats.
         // Identical to step.path on every non-rendered dispatch (the engine
@@ -699,7 +704,7 @@ function emitStartedEvents(
       const argv = [
         kv('run_id', runId),
         // SOURCE path label (env-variables a5): iteration.completed is labeled
-        // from engine state (prev.current_path — always the source), and the
+        // from engine state (the plan's own path — always the source), and the
         // v4 sequential fold pairs started/completed by consecutive paths — a
         // rendered dispatch path would break the pairing and surface volatile
         // `.runtime/<run>/rendered/` paths in the UI. Identical to step.path
@@ -1144,8 +1149,25 @@ function warnNote(msg: string): void {
  *  engine's own identity — then the optional step_id fallback). Script-typed
  *  dispatches always map to an enumerated step (off-plan synthesis pins type
  *  'agent'). */
-function planStepFor(plan: Plan, path: string, stepId?: string | null): PlanStep | undefined {
-  return plan.steps.find((s) => samePath(s.path, path)) ?? (stepId ? plan.steps.find((s) => s.step_id === stepId) : undefined);
+/** The enumerated PlanStep behind a dispatch — BY NAME, the engine's identity,
+ *  falling back to path equality only for a dispatch whose name is unknown here
+ *  (an off-plan hand-off). v1 looked up by path first, which broke the moment a
+ *  step's body could be shared, rendered to a shadow copy, or absent entirely. */
+function planStepFor(plan: Plan, stepName: string | null | undefined, path?: string | null): PlanStep | undefined {
+  const named = stepName ? plan.steps.find((s) => s.step_id === stepName) : undefined;
+  if (named) return named;
+  return path ? plan.steps.find((s) => samePath(s.path, path)) : undefined;
+}
+
+/** The dispatch path of the step a parked state was in flight on.
+ *
+ *  The state cursor is a NAME now, so the path comes from the plan — except for
+ *  an off-plan v1 hand-off, whose path is the one thing the state still carries
+ *  because no plan holds it. Everything that used to read `state.current_path`
+ *  reads this instead, so there is one answer to "which file was that step". */
+function currentStepPath(plan: Plan, state: NextState | null): string | null {
+  if (!state) return null;
+  return planStepFor(plan, state.current_step_id)?.path ?? state.current_off_plan_path ?? null;
 }
 
 /** Which dispatches get rendered shadow copies (env-variables a5; E11 v1
@@ -1596,11 +1618,12 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
         result: { action: { action: 'halt', reason: failReason, status: 'halted' }, out: haltOut, code: 1, plan: mainPlan },
       };
     }
-    // Success: the run executes the WORKTREE's definition. Re-point the
-    // pinned start/resume cursor (a --start names the MAIN author path).
-    if (parked.current_path !== null) {
-      const swapped = swapPathPrefix(parked.current_path, mainPipelineRoot, wtRoot);
-      if (swapped !== null) parked.current_path = swapped;
+    // Success: the run executes the WORKTREE's definition. The pinned cursor is
+    // a step NAME, which is the same in both trees — nothing to re-point. Only
+    // an off-plan hand-off carries a path, and that one still needs the swap.
+    if (parked.current_off_plan_path != null) {
+      const swapped = swapPathPrefix(parked.current_off_plan_path, mainPipelineRoot, wtRoot);
+      if (swapped !== null) parked.current_off_plan_path = swapped;
     }
     return { kind: 'feed', plan: wtPlan!, parkedState: parked, record: res.record, provisioned: res.provisioned };
   };
@@ -1637,6 +1660,18 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   const execRootAbs = scoped && wtPipelineRoot !== null ? resolve(wtPipelineRoot) : rootAbs;
   const artifactRoot = scoped && wtPipelineRoot !== null ? execRootAbs : a.root;
   const mode = pickMode(plan);
+
+  // `--start` is a step NAME now. A file path still resolves — every existing
+  // caller passes one — but say so, with the name to use instead: a step is an
+  // entry in the manifest, and its body file is no longer its identity.
+  {
+    const byPath = startResolvedByPath(plan, a.start);
+    if (byPath) {
+      warnNote(
+        `--start takes a step NAME — '${byPath.step_id}' here. The path form still works and will be removed.`,
+      );
+    }
+  }
 
   if (plan.errors.length) {
     const reason = `plan errors: ${plan.errors.join('; ')}`;
@@ -1759,8 +1794,8 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   let gateTag: ScriptTag | undefined;
   if (record !== null && record.kind === 'gate-answer') {
     const pendingGate =
-      prevState?.phase === 'await-step' && prevState.pending_fallback == null && prevState.current_path
-        ? planStepFor(plan, prevState.current_path, prevState.current_step_id)
+      prevState?.phase === 'await-step' && prevState.pending_fallback == null && prevState.current_step_id
+        ? planStepFor(plan, prevState.current_step_id)
         : undefined;
     if (pendingGate?.type === 'gate') {
       record = gateRecordFor(pendingGate, record.answer, mode === 'sequential');
@@ -1812,7 +1847,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   // Auto-emit the completion event for the just-recorded outcome (a resume
   // ignores the record, so nothing is labeled "completed" on that path). MUST
   // run BEFORE computeNext: the engine mutates the state object in place, so
-  // the pre-call phase/current_path are gone afterwards.
+  // the pre-call phase/cursor are gone afterwards.
   // §13 --manual-scripts symmetry: the pass-through dispatch of a SCRIPT-typed
   // plan step was tagged step_type:"script" (dispatch-type keying, §12), so the
   // caller-recorded completion for that same dispatch must carry the tag too —
@@ -1827,14 +1862,14 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
     record?.kind === 'step' &&
     prevState?.phase === 'await-step' &&
     prevState.pending_fallback == null &&
-    prevState.current_path
+    prevState.current_step_id
   ) {
-    const pending = planStepFor(plan, prevState.current_path, prevState.current_step_id);
+    const pending = planStepFor(plan, prevState.current_step_id);
     if (pending?.type === 'script') manualScriptTag = { failureClass: null };
   }
   if (!resume) {
     emitCompletionEvents(plan, prevState, record, a.runId, gateTag ?? manualScriptTag, toMainPath);
-    statsNoteRecord(a.root, a.runId, prevState, record, gateTag ?? manualScriptTag, toMainPath);
+    statsNoteRecord(plan, a.root, a.runId, prevState, record, gateTag ?? manualScriptTag, toMainPath);
   }
   const statsIsInit = prevState === null;
   // §10: an INCOMING agent-step record may carry the additive `output` object
@@ -1873,16 +1908,14 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   // advance PAST the re-issued step inside this same call, and the tail
   // action's FRESH step must not inherit the tag.
   const resumedReentry = resume && prevState !== null && prevState.phase === 'await-step';
-  const resumedPendingPath = resumedReentry ? (prevState!.current_path ?? null) : null;
   const resumedPendingStepId = resumedReentry ? (prevState!.current_step_id ?? null) : null;
 
   // Worktree-scoped pre-provision (P2/b3): the create hook already ran and the
   // run plan is the WORKTREE's — consume the provisioned record against the
   // parked state instead of re-entering init/resume (resume MUST be false: the
   // record is being consumed, not replayed; `start` MUST be dropped: initRun/
-  // resumeRun already pinned it into the parked current_path, which the
-  // pre-provision swapped into the worktree — re-passing the raw MAIN path
-  // would override the swap in onProvisionPhase's selectStep).
+  // resumeRun already pinned it onto the parked cursor — re-passing `--start`
+  // would make onProvisionPhase's selectStep resolve it a second time).
   let { action, state: newState } =
     feed !== null
       ? computeNext(plan, feed.state, feed.record, { ...opts, start: undefined, resume: false })
@@ -2094,7 +2127,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
     // from --answer; a manager-mode caller re-invokes with --record).
     if (action.action === 'run-step' && action.concurrent !== true && action.steps[0]?.type === 'gate') {
       const step = action.steps[0];
-      const spec = planStepFor(plan, step.path, step.step_id)?.gate_spec ?? null;
+      const spec = planStepFor(plan, step.step_id, step.path)?.gate_spec ?? null;
       if (!spec || spec.required_role === null) {
         // Defensive (plan/state drift) — mirrors the script missing-spec halt:
         // computePlan ERRORs on a role-less gate, so a dispatched gate always
@@ -2133,7 +2166,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       // Label the degradation before the engine consumes it (mutates state in
       // place) — the same completion-pair discipline as the script partition.
       emitCompletionEvents(plan, newState, rec, a.runId, { stepType: 'gate', failureClass: null }, toMainPath);
-      statsNoteRecord(a.root, a.runId, newState, rec, { stepType: 'gate', failureClass: null }, toMainPath);
+      statsNoteRecord(plan, a.root, a.runId, newState, rec, { stepType: 'gate', failureClass: null }, toMainPath);
       const r = computeNext(plan, newState, rec, feedOpts());
       action = r.action;
       newState = r.state;
@@ -2148,7 +2181,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       action.steps[0]?.type === 'script'
     ) {
       const step = action.steps[0];
-      const spec = planStepFor(plan, step.path, step.step_id)?.script_spec ?? null;
+      const spec = planStepFor(plan, step.step_id, step.path)?.script_spec ?? null;
       if (!spec) {
         // Defensive (plan/state drift): a script-typed dispatch the plan has no
         // spec for. Feed the uniform §6.3 halt shape rather than handing the
@@ -2189,7 +2222,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
         if (w) warnNote(w);
         if (!res.ledgerReused) {
           emitCompletionEvents(plan, newState, res.record as StepRecord, a.runId, { failureClass: null }, toMainPath);
-          statsNoteRecord(a.root, a.runId, newState, res.record as StepRecord, { failureClass: null }, toMainPath);
+          statsNoteRecord(plan, a.root, a.runId, newState, res.record as StepRecord, { failureClass: null }, toMainPath);
         }
         const r = computeNext(plan, newState, res.record as NextRecord, feedOpts());
         action = r.action;
@@ -2214,7 +2247,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
         res.failurePath !== null &&
         !(newState.repaired_steps ?? []).includes(step.step_id);
       // Snapshot the prev-state fields the completion emitters read
-      // (phase/current_path/current_step_id) — the engine mutates the state
+      // (phase/current_step_id) — the engine mutates the state
       // object in place.
       const prevSnap: NextState = { ...newState };
       const fo = feedOpts();
@@ -2233,7 +2266,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
         { failureClass: cls, terminal: r.state.pending_fallback == null },
         toMainPath,
       );
-      statsNoteRecord(a.root, a.runId, prevSnap, res.record as StepRecord, { failureClass: cls }, toMainPath);
+      statsNoteRecord(plan, a.root, a.runId, prevSnap, res.record as StepRecord, { failureClass: cls }, toMainPath);
       action = r.action;
       newState = r.state;
       continue;
@@ -2263,11 +2296,11 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
         entries.push(entry);
         const rec: NextRecord = { kind: 'layer', results: [entry] };
         emitCompletionEvents(plan, newState, rec, a.runId, { failureClass }, toMainPath);
-        statsNoteRecord(a.root, a.runId, newState, rec, { failureClass }, toMainPath);
+        statsNoteRecord(plan, a.root, a.runId, newState, rec, { failureClass }, toMainPath);
       };
       let parked = false;
       for (const member of scriptMembers) {
-        const spec = planStepFor(plan, member.path, member.step_id)?.script_spec ?? null;
+        const spec = planStepFor(plan, member.step_id, member.path)?.script_spec ?? null;
         if (!spec) {
           entries.push({
             step_id: member.step_id,
@@ -2420,12 +2453,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   const tagResumed =
     resumedReentry &&
     action.action === 'run-step' &&
-    action.steps.some(
-      (s) =>
-        (resumedPendingStepId !== null && s.step_id === resumedPendingStepId) ||
-        (resumedPendingPath !== null &&
-          (samePath(s.path, resumedPendingPath) || samePath(s.source_path, resumedPendingPath))),
-    );
+    action.steps.some((s) => resumedPendingStepId !== null && s.step_id === resumedPendingStepId);
   emitStartedEvents(action, a.runId, toMainPath, tagResumed);
   statsNoteAction(a.root, a.runId, action);
   statsNoteTerminal(a.root, a.runId, action);
@@ -2646,7 +2674,7 @@ function popChild(
     // script-step validator (§3.4) — a violation fails the pipeline step the
     // same way a script's non-conformant stdout does (contract).
     const childState = loadState(active.root, active.run_id);
-    const spec = planStepFor(computePlan(a.root), active.step_path, active.step_id)?.pipeline_spec ?? null;
+    const spec = planStepFor(computePlan(a.root), active.step_id, active.step_path)?.pipeline_spec ?? null;
     const { output, violation } = childRunOutput(
       active.root,
       active.run_id,
@@ -2729,7 +2757,7 @@ function startChild(
   const bindingHalt = (detail: string): InvokeNextResult =>
     feed({ kind: 'step', outcome: 'halted', halt_reason: `pipeline step ${step.step_id} failed (binding): ${detail}` });
 
-  const spec = planStepFor(res.plan ?? computePlan(a.root), step.path, step.step_id)?.pipeline_spec ?? null;
+  const spec = planStepFor(res.plan ?? computePlan(a.root), step.step_id, step.path)?.pipeline_spec ?? null;
   if (!spec || spec.resolved_root === null) {
     // Defensive (plan/state drift): computePlan ERRORs on an unresolvable
     // reference, so a dispatched pipeline step always carries one — unless

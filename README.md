@@ -73,7 +73,7 @@ O(1) reads on a run start.
 ### `drive` — run an entire pipeline headless (EXPERIMENTAL)
 
 ```bash
-bun src/cli.ts drive --root <pipeline_root> --run-id <id> --start <iteration-path>
+bun src/cli.ts drive --root <pipeline_root> --run-id <id> --start <step-name>
   [--default-model <m>] [--model <step_id>=<m> ...]
   [--default-effort <level>] [--effort <step_id>=<level> ...]
   [--var NAME=value ...] [--vars-file <path>]
@@ -173,7 +173,7 @@ pipeline with no `## Graph` section is untouched (legacy sequential/DAG).
 ### `next` — drive a whole run as a mechanical state machine
 
 ```bash
-bun src/cli.ts next --root <pipeline_root> --run-id <id> [--start <iteration-path>] \
+bun src/cli.ts next --root <pipeline_root> --run-id <id> [--start <step-name>] \
   [--default-model <m>] [--record '<json>'] [--resume]
 ```
 
@@ -182,7 +182,7 @@ The orchestration engine the `pipeline-manager` drives. Each call returns the
 the action just performed. The manager loop is just:
 
 ```
-action ← pipeline next --start <first-iteration>     # init (no --record)
+action ← pipeline next --start <first-step>          # init (no --record)
 loop: perform(action); action ← pipeline next --record '<outcome>'
 ```
 

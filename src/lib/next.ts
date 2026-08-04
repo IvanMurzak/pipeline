@@ -54,9 +54,27 @@ export interface NextState {
   phase: NextPhase;
   /** Count of steps dispatched so far — the 1-based `index` for iteration.started. */
   index: number;
-  /** Sequential/graph cursor: the step currently in flight or just recorded. */
+  /**
+   * Sequential/graph cursor: the NAME of the step currently in flight or just
+   * recorded. This is the run's identity for that step, and the only one — the
+   * engine resolves it against the plan by name and never by file path.
+   *
+   * v1 kept a `current_path` beside it and looked steps up by comparing paths,
+   * which made a step's identity depend on where its markdown happened to live:
+   * renaming a file re-identified the step, two steps could share a body, and a
+   * step with no body at all (a script, a gate) had no identity to speak of.
+   */
   current_step_id: string | null;
-  current_path: string | null;
+  /**
+   * The dispatch path of the current step ONLY when that step is not in the
+   * plan — a v1 `next_iteration` hand-off to another pipeline's file, which
+   * `synthesizeStep` turns into a step named after the filename stem. Null for
+   * every planned step, whose path comes from the plan itself.
+   *
+   * Absent from a v2 run: nothing off-plan can be reached when routing comes
+   * from `needs:`/`flow:`.
+   */
+  current_off_plan_path?: string | null;
   /** Graph routing counters (reused by routeNext). */
   route: RouteState;
   /** Parallel: index into plan.layers of the in-flight layer. */
@@ -527,7 +545,15 @@ export type NextRecord =
   | GateAnswerRecord;
 
 export interface NextOpts {
-  /** Starting iteration path (init or resume). When absent, init uses steps[0]. */
+  /**
+   * The step to start (or resume) at, BY NAME. When absent, init uses steps[0].
+   *
+   * v1 took an iteration file PATH here. A path is still accepted and resolved
+   * to the step whose body it is — the skills and every existing invocation
+   * pass one — but it is deprecated: {@link startResolvedByPath} reports it,
+   * and the command layer turns that into a warning naming the step to use.
+   * Once the skills speak names, the path form goes.
+   */
   start?: string;
   /** Resume after a nested blocker landed — re-run the current/start step. */
   resume?: boolean;
@@ -612,6 +638,12 @@ export function samePath(a: string, b: string): boolean {
   return na === nb;
 }
 
+/** Resolve a PATH to a plan step.
+ *
+ *  Not an identity lookup — {@link stepByName} is. The only remaining caller is
+ *  the v1 sequential hand-off, where a step reports its successor as a file
+ *  path (`next_iteration`) and the engine has to work out which step that names
+ *  before dispatching it BY NAME. */
 function findStepByPath(plan: Plan, path: string): PlanStep | undefined {
   return plan.steps.find((s) => samePath(s.path, path));
 }
@@ -624,9 +656,28 @@ export function pickMode(plan: Plan): RunMode {
   return 'sequential';
 }
 
-/** Find a step by its step_id (the by-path companion to findStepByPath). */
-function stepById(plan: Plan, id: string): PlanStep | undefined {
-  return plan.steps.find((s) => s.step_id === id);
+/** Whether a persisted state predates the identity move. `current_path` is the
+ *  discriminator because it is the field that WAS the cursor: an engine that
+ *  keys on names never writes it, and every engine that keyed on paths always
+ *  did (it is set on the same line as `current_step_id` at every dispatch). */
+function hasLegacyPathCursor(state: NextState): boolean {
+  return Object.prototype.hasOwnProperty.call(state, 'current_path');
+}
+
+/** The path to remember beside the cursor: a step's own path when the plan does
+ *  not contain it (a v1 hand-off that `synthesizeStep` invented), else null,
+ *  because a planned step's path is already in the plan. Persisting it only for
+ *  the off-plan case is what keeps a renamed body file from re-identifying a
+ *  step it belongs to. */
+function offPlanPathOf(plan: Plan, step: PlanStep): string | null {
+  return stepByName(plan, step.step_id) === undefined ? step.path : null;
+}
+
+/** Find a step by NAME — the engine's one identity lookup. (`PlanStep.step_id`
+ *  still carries the name; renaming the field is a cross-surface change that
+ *  travels with the skills and agent docs, not with the engine.) */
+function stepByName(plan: Plan, name: string): PlanStep | undefined {
+  return plan.steps.find((s) => s.step_id === name);
 }
 
 // ---------------------------------------------------------------------------
@@ -641,31 +692,81 @@ function isExternal(state: NextState): boolean {
   return state.isolation === 'external' && state.mode !== 'parallel';
 }
 
-/** Resolve the step to dispatch: explicit `--start`, else the persisted
- *  `current_path` (a resume), else the first plan step. Returns undefined only
- *  when the plan has no steps — callers handle that halt with their own reason.
- *  Single source of the selection ladder shared by initRun / resumeRun /
- *  onProvisionPhase. */
+/** Resolve the step to dispatch: explicit `--start`, else the persisted cursor
+ *  (a resume), else the first plan step. Returns undefined when the plan has no
+ *  steps, or when `--start` names one that does not exist — callers turn either
+ *  into a halt with their own reason. Single source of the selection ladder
+ *  shared by initRun / resumeRun / onProvisionPhase. */
 function selectStep(plan: Plan, state: NextState, opts: NextOpts): PlanStep | undefined {
-  // An explicit --start / persisted current_path that is OFF-plan (a family
-  // hub/target hand-off, an unusual nested path) is synthesized — NEVER silently
-  // swapped for steps[0]: a target-rooted run resuming at a synthesized hub step
-  // must re-enter THAT step, not restart at its first enumerated one.
-  const lookup = (p: string): PlanStep =>
-    findStepByPath(plan, p) ?? synthesizeStep(p, state, plan, opts);
-  if (opts.start) return lookup(opts.start);
-  if (state.current_path) return lookup(state.current_path);
+  if (opts.start) return resolveStart(plan, opts.start, state, opts);
+  if (state.current_step_id) return currentStep(plan, state, opts);
   return plan.steps[0];
 }
 
-/** Pin `--start` onto `current_path` so a later onProvisionPhase dispatches it
+/**
+ * Resolve `--start` to a step: by NAME first, then — deprecated — by the path
+ * of its body.
+ *
+ * v1 took only a path, which is why it also had to synthesize a step for a path
+ * OUTSIDE the plan (a family hub/target hand-off starts a run at another
+ * pipeline's file). Both path behaviours are preserved while the path form
+ * lives, because every existing invocation — the skills, a resumed run's saved
+ * command — passes one; {@link startResolvedByPath} lets the command layer warn.
+ *
+ * A NAME, though, is resolved strictly: a name is not a file, so one that names
+ * no step returns undefined and the caller halts, rather than inventing a step
+ * out of a typo.
+ */
+function resolveStart(
+  plan: Plan,
+  start: string,
+  state: NextState,
+  opts: NextOpts,
+): PlanStep | undefined {
+  const named = stepByName(plan, start);
+  if (named) return named;
+  if (!looksLikePath(start)) return undefined;
+  return findStepByPath(plan, start) ?? synthesizeStep(start, state, plan, opts);
+}
+
+/** Whether a `--start` value is the deprecated path form rather than a step
+ *  name. A step name is a single kebab-ish token (the manifest enforces that),
+ *  so any separator — or a `.md` tail — means the caller passed a file. */
+function looksLikePath(value: string): boolean {
+  return value.includes('/') || value.includes('\\') || /\.md$/i.test(value);
+}
+
+/** The step a `--start` value resolved to ONLY via the deprecated path form —
+ *  null when it named a step outright (or matched nothing). The command layer
+ *  uses it to print the name the caller should be passing instead. */
+export function startResolvedByPath(plan: Plan, start: string | undefined): PlanStep | null {
+  if (!start || stepByName(plan, start)) return null;
+  return findStepByPath(plan, start) ?? null;
+}
+
+/** The step the persisted cursor points at. Almost always a plan step; for a
+ *  run parked on an off-plan v1 hand-off, the synthesized step is rebuilt from
+ *  the path recorded beside the cursor — NEVER silently swapped for steps[0],
+ *  which would restart the run instead of resuming it. */
+function currentStep(plan: Plan, state: NextState, opts: NextOpts): PlanStep | undefined {
+  const named = state.current_step_id === null ? undefined : stepByName(plan, state.current_step_id);
+  if (named) return named;
+  const offPlan = state.current_off_plan_path;
+  return offPlan ? synthesizeStep(offPlan, state, plan, opts) : undefined;
+}
+
+/** Pin `--start` onto the cursor so a later onProvisionPhase dispatches it
  *  after the provisioned record (external mode pins before emitProvision; a
- *  crash-respawn `--start` thus wins over a stale current_path). An off-plan
- *  start pins its raw path (selectStep synthesizes it later). No-op without
+ *  crash-respawn `--start` thus wins over a stale cursor). Leaves the cursor
+ *  alone when `--start` names no step — selectStep reports that, and pinning a
+ *  name that resolves to nothing would strand the resume. No-op without
  *  `--start`. */
-function pinStartPath(plan: Plan, state: NextState, opts: NextOpts): void {
+function pinStart(plan: Plan, state: NextState, opts: NextOpts): void {
   if (!opts.start) return;
-  state.current_path = findStepByPath(plan, opts.start)?.path ?? opts.start;
+  const step = resolveStart(plan, opts.start, state, opts);
+  if (!step) return;
+  state.current_step_id = step.step_id;
+  state.current_off_plan_path = offPlanPathOf(plan, step);
 }
 
 /** Emit `provision-worktree` and park in `await-provision`. Used by initRun (run
@@ -749,7 +850,7 @@ function emitFinalize(plan: Plan, state: NextState, opts: NextOpts): NextResult 
 /** await-provision handler: the create hook returned. Record its path/branch/env,
  *  flip worktree_provisioned=true, and dispatch the first (init) or resumed step.
  *  Step selection mirrors initRun/resumeRun: --start, else the resumed
- *  current_path, else the first plan step. */
+ *  cursor, else the first plan step. */
 function onProvisionPhase(plan: Plan, state: NextState, record: NextRecord | null, opts: NextOpts): NextResult {
   if (!record || record.kind !== 'worktree' || record.phase !== 'provisioned') {
     return wrongRecord(plan, state, opts, 'worktree/provisioned', 'await-provision', record);
@@ -776,7 +877,7 @@ function onProvisionPhase(plan: Plan, state: NextState, record: NextRecord | nul
     state.halt_reason = 'external: provisioned but no iteration to run';
     return retroOrTerminal(plan, state, opts);
   }
-  return dispatchStep(state, step);
+  return dispatchStep(plan, state, step);
 }
 
 /** await-teardown handler: the destroy hook returned. Flip to terminal and emit
@@ -846,6 +947,22 @@ export function computeNext(
   opts: NextOpts,
 ): NextResult {
   if (state === null) return initRun(plan, opts);
+
+  // A next.json written before the identity move carries `current_path` — the
+  // step cursor as a FILE PATH. There is no honest way to keep going from one:
+  // its cursor names a file, this engine dispatches by step name, and quietly
+  // mapping one to the other is precisely the path-is-identity coupling the
+  // move removed (the same file can now back several steps, or none). Every
+  // other field this engine ever added was made optional-and-defaulted so a
+  // legacy run kept working; this one cannot be, so it says so instead of
+  // resuming into the wrong step.
+  if (hasLegacyPathCursor(state)) {
+    state.status = 'halted';
+    state.halt_reason =
+      'this run was started by an older CLI that tracked steps by file path — its state cannot be resumed. Start a fresh run (the pipeline itself is unchanged).';
+    state.phase = 'terminal';
+    return { action: { action: 'halt', status: 'halted', reason: state.halt_reason }, state };
+  }
 
   // Backward compat: an old next.json (pre lint_warnings) lacks the key —
   // normalize to [] so every downstream read is safe and legacy runs are
@@ -932,7 +1049,7 @@ function initRun(plan: Plan, opts: NextOpts): NextResult {
     phase: 'await-step',
     index: 0,
     current_step_id: null,
-    current_path: null,
+    current_off_plan_path: null,
     route: emptyRouteState(),
     layer_index: 0,
     layer: [],
@@ -981,8 +1098,8 @@ function initRun(plan: Plan, opts: NextOpts): NextResult {
   if (isExternal(state) && plan.steps.length > 0) {
     // Pin the start step NOW so onProvisionPhase dispatches it after the
     // provisioned record (the --start arrives only on this init call). Absent
-    // --start, current_path stays null and onProvisionPhase falls to steps[0].
-    pinStartPath(plan, state, opts);
+    // --start, the cursor stays null and onProvisionPhase falls to steps[0].
+    pinStart(plan, state, opts);
     return emitProvision(plan, state, opts);
   }
 
@@ -990,10 +1107,21 @@ function initRun(plan: Plan, opts: NextOpts): NextResult {
   const step = selectStep(plan, state, opts);
   if (!step) {
     state.status = 'halted';
-    state.halt_reason = 'no iteration files to run';
+    state.halt_reason = noStepReason(plan, opts, 'no iteration files to run');
     return retroOrTerminal(plan, state, opts);
   }
-  return dispatchStep(state, step);
+  return dispatchStep(plan, state, step);
+}
+
+/** Why nothing could be dispatched. A bad `--start` and an empty pipeline are
+ *  different mistakes, and only one of them is fixed by editing the command —
+ *  so the message names the steps that DO exist instead of reporting the
+ *  pipeline as empty when it plainly is not. */
+function noStepReason(plan: Plan, opts: NextOpts, whenNoSteps: string): string {
+  if (!opts.start) return whenNoSteps;
+  const names = plan.steps.map((s) => s.step_id);
+  if (!names.length) return whenNoSteps;
+  return `--start '${opts.start}' matches no step in this pipeline (steps: ${names.join(', ')})`;
 }
 
 function resumeRun(plan: Plan, state: NextState, opts: NextOpts): NextResult {
@@ -1028,15 +1156,15 @@ function resumeRun(plan: Plan, state: NextState, opts: NextOpts): NextResult {
   if (isExternal(state)) {
     // Pin the resume target NOW (the --start arrives on this call, but the step
     // is dispatched later in onProvisionPhase after the provisioned record). A
-    // crash-respawn --start must win over the stale current_path; otherwise the
-    // existing current_path is preserved.
-    pinStartPath(plan, state, opts);
+    // crash-respawn --start must win over the stale cursor; otherwise the
+    // existing cursor is preserved.
+    pinStart(plan, state, opts);
     return emitProvision(plan, state, opts);
   }
   const step = selectStep(plan, state, opts);
   if (!step) {
     state.status = 'halted';
-    state.halt_reason = 'resume: no iteration to re-enter';
+    state.halt_reason = noStepReason(plan, opts, 'resume: no iteration to re-enter');
     return retroOrTerminal(plan, state, opts);
   }
   // §8 crash re-entry for a pending SCRIPT dispatch: the command layer parks
@@ -1067,10 +1195,8 @@ function resumeRun(plan: Plan, state: NextState, opts: NextOpts): NextResult {
   if (
     state.phase === 'await-step' &&
     state.pending_fallback != null &&
-    state.current_path != null &&
-    samePath(step.path, state.current_path)
+    step.step_id === state.current_step_id
   ) {
-    state.current_step_id = step.step_id;
     return {
       action: {
         action: 'run-step',
@@ -1083,10 +1209,8 @@ function resumeRun(plan: Plan, state: NextState, opts: NextOpts): NextResult {
   if (
     state.phase === 'await-step' &&
     (step.type ?? 'agent') === 'script' &&
-    state.current_path != null &&
-    samePath(step.path, state.current_path)
+    step.step_id === state.current_step_id
   ) {
-    state.current_step_id = step.step_id;
     return {
       action: { action: 'run-step', concurrent: false, steps: [makeActionStep(state, step, state.index, null)] },
       state,
@@ -1095,7 +1219,7 @@ function resumeRun(plan: Plan, state: NextState, opts: NextOpts): NextResult {
   // A2 agent-step retries — crash twin (04 §retries.5), beside the
   // pending_fallback re-emit above: the dispatch in flight at crash time was
   // itself a RETRY attempt when state.agent_attempts already carries one for
-  // this step AND current_path still points at it — set by
+  // this step AND the cursor still names it — set by
   // dispatchAgentRetry BEFORE the crash, the same way pending_fallback marks
   // an in-flight fallback dispatch. Re-emit the SAME pending dispatch — SAME
   // index (NO bump), mirroring the pending_fallback/script re-emits above —
@@ -1111,15 +1235,13 @@ function resumeRun(plan: Plan, state: NextState, opts: NextOpts): NextResult {
     state.phase === 'await-step' &&
     (step.type ?? 'agent') === 'agent' &&
     pendingRetryAttempt > 0 &&
-    state.current_path != null &&
-    samePath(step.path, state.current_path)
+    step.step_id === state.current_step_id
   ) {
-    state.current_step_id = step.step_id;
     const actionStep = makeActionStep(state, step, state.index, null);
     actionStep.retry = pendingRetryAttempt;
     return { action: { action: 'run-step', concurrent: false, steps: [actionStep] }, state };
   }
-  return dispatchStep(state, step);
+  return dispatchStep(plan, state, step);
 }
 
 // ---------------------------------------------------------------------------
@@ -1162,10 +1284,10 @@ function makeActionStep(
   return actionStep;
 }
 
-function dispatchStep(state: NextState, step: PlanStep): NextResult {
+function dispatchStep(plan: Plan, state: NextState, step: PlanStep): NextResult {
   state.index += 1;
   state.current_step_id = step.step_id;
-  state.current_path = step.path;
+  state.current_off_plan_path = offPlanPathOf(plan, step);
   state.phase = 'await-step';
   // A fresh dispatch supersedes any §6.3 pending-fallback marker (it describes
   // only the dispatch it was set for — e.g. a post-fallback graph loop-back to
@@ -1192,10 +1314,10 @@ function dispatchStep(state: NextState, step: PlanStep): NextResult {
  *  on scripts — plan.ts skips the inheritance ladder), but the fallback IS an
  *  agent spawn, so it resolves the run default exactly like an un-pinned
  *  agent step would have. */
-function dispatchFallback(state: NextState, step: PlanStep, failureRecord: string): NextResult {
+function dispatchFallback(plan: Plan, state: NextState, step: PlanStep, failureRecord: string): NextResult {
   state.index += 1;
   state.current_step_id = step.step_id;
-  state.current_path = step.path;
+  state.current_off_plan_path = offPlanPathOf(plan, step);
   state.phase = 'await-step';
   // Persist the pending-fallback marker: the dispatch now in flight is the
   // agent fallback, not a script run — the ONLY durable fact that lets a
@@ -1241,10 +1363,10 @@ function makeFallbackStep(
  *  dispatch supersedes any stale marker). `attempt` (1-based, already written
  *  to state.agent_attempts[step_id] by the caller) is tagged onto the
  *  ActionStep for the additive `retry: n` event annotation. */
-function dispatchAgentRetry(state: NextState, step: PlanStep, attempt: number): NextResult {
+function dispatchAgentRetry(plan: Plan, state: NextState, step: PlanStep, attempt: number): NextResult {
   state.index += 1;
   state.current_step_id = step.step_id;
-  state.current_path = step.path;
+  state.current_off_plan_path = offPlanPathOf(plan, step);
   state.phase = 'await-step';
   state.pending_fallback = null;
   state.active_child = null;
@@ -1266,7 +1388,7 @@ function dispatchLayer(plan: Plan, state: NextState, layerIndex: number, opts: N
   const useWorktree = state.isolation === 'worktree';
   const steps: ActionStep[] = [];
   for (const id of ids) {
-    const s = stepById(plan, id);
+    const s = stepByName(plan, id);
     if (!s) continue;
     state.index += 1;
     steps.push(makeActionStep(state, s, state.index, useWorktree ? 'worktree' : null));
@@ -1307,7 +1429,7 @@ function dispatchLayer(plan: Plan, state: NextState, layerIndex: number, opts: N
 function redispatchPending(plan: Plan, state: NextState, opts: NextOpts): NextResult {
   if (state.mode === 'parallel') {
     const found = state.layer
-      .map((id) => stepById(plan, id))
+      .map((id) => stepByName(plan, id))
       .filter((s): s is PlanStep => s !== undefined);
     const useWorktree = state.isolation === 'worktree';
     let idx = state.index - found.length;
@@ -1315,14 +1437,13 @@ function redispatchPending(plan: Plan, state: NextState, opts: NextOpts): NextRe
     state.phase = 'await-step';
     return { action: { action: 'run-step', concurrent: true, steps }, state };
   }
-  if (!state.current_path) {
+  const step = currentStep(plan, state, opts);
+  if (!step) {
     // Defensive: await-step with no pending dispatch is a corrupt state.
     state.status = 'halted';
-    state.halt_reason = 'continue record but no pending step (current_path is null)';
+    state.halt_reason = 'continue record but no pending step (the cursor names none)';
     return retroOrTerminal(plan, state, opts);
   }
-  const step =
-    findStepByPath(plan, state.current_path) ?? synthesizeStep(state.current_path, state, plan, opts);
   state.phase = 'await-step';
   // §6.3: if the pending dispatch is the AGENT FALLBACK of a failed script
   // step, "the same pending dispatch" means the fallback ActionStep — never a
@@ -1443,13 +1564,12 @@ function onStepPhase(plan: Plan, state: NextState, record: NextRecord | null, op
     opts.scriptFallback &&
     state.mode !== 'parallel' &&
     state.current_step_id !== null &&
-    state.current_path !== null &&
-    (state.fallback_attempted ?? {})[state.current_step_id] !== true
+    (state.fallback_attempted ?? {})[state.current_step_id] !== true &&
+    currentStep(plan, state, opts) !== undefined
   ) {
     (state.fallback_attempted ??= {})[state.current_step_id] = true;
-    const step =
-      findStepByPath(plan, state.current_path) ?? synthesizeStep(state.current_path, state, plan, opts);
-    return dispatchFallback(state, step, opts.scriptFallback.failure_record);
+    const step = currentStep(plan, state, opts)!;
+    return dispatchFallback(plan, state, step, opts.scriptFallback.failure_record);
   }
   // A2 agent-step retries (04-runner-crash-resume.md §retries), sibling of
   // the scriptFallback block above: a transiently-halted AGENT step
@@ -1474,15 +1594,14 @@ function onStepPhase(plan: Plan, state: NextState, record: NextRecord | null, op
     record.outcome === 'halted' &&
     state.mode !== 'parallel' &&
     state.current_step_id !== null &&
-    state.current_path !== null
+    currentStep(plan, state, opts) !== undefined
   ) {
-    const step =
-      findStepByPath(plan, state.current_path) ?? synthesizeStep(state.current_path, state, plan, opts);
+    const step = currentStep(plan, state, opts)!;
     const budget = step.retries ?? 0;
     const attempts = (state.agent_attempts ?? {})[state.current_step_id] ?? 0;
     if (budget > 0 && attempts < budget) {
       (state.agent_attempts ??= {})[state.current_step_id] = attempts + 1;
-      return dispatchAgentRetry(state, step, attempts + 1);
+      return dispatchAgentRetry(plan, state, step, attempts + 1);
     }
   }
   if (record && record.kind === 'layer') return onLayerRecord(plan, state, record, opts);
@@ -1513,8 +1632,9 @@ function onStepPhase(plan: Plan, state: NextState, record: NextRecord | null, op
     return retroOrTerminal(plan, state, opts);
   }
   // completed
-  if (r.has_improvement_brief && state.current_step_id && state.current_path) {
-    state.improve_queue.push({ step_id: state.current_step_id, iteration_path: state.current_path });
+  if (r.has_improvement_brief && state.current_step_id) {
+    const step = currentStep(plan, state, opts);
+    if (step) state.improve_queue.push({ step_id: state.current_step_id, iteration_path: step.path });
   }
   // Stash the advancement decision; it's consumed once the improve queue drains.
   state.pending_next = r.next_iteration ?? null;
@@ -1552,7 +1672,7 @@ function onLayerRecord(plan: Plan, state: NextState, record: LayerRecord, opts: 
   for (const id of state.layer) {
     const res = results.find((x) => x.step_id === id);
     if (res?.has_improvement_brief) {
-      const s = stepById(plan, id);
+      const s = stepByName(plan, id);
       if (s) state.improve_queue.push({ step_id: id, iteration_path: s.path });
     }
   }
@@ -1562,7 +1682,7 @@ function onLayerRecord(plan: Plan, state: NextState, record: LayerRecord, opts: 
     for (const id of state.layer) {
       const res = results.find((x) => x.step_id === id);
       if (res?.worktree_branch) {
-        const s = stepById(plan, id);
+        const s = stepByName(plan, id);
         branches.push({ step_id: id, branch: res.worktree_branch, path: res.worktree_path ?? (s?.path ?? '') });
       }
     }
@@ -1654,13 +1774,13 @@ function advance(plan: Plan, state: NextState, opts: NextOpts): NextResult {
       state.halt_reason = decision.reason;
       return retroOrTerminal(plan, state, opts);
     }
-    const step = stepById(plan, decision.target);
+    const step = stepByName(plan, decision.target);
     if (!step) {
       state.status = 'halted';
       state.halt_reason = `graph routed to '${decision.target}' but no step has that step_id`;
       return retroOrTerminal(plan, state, opts);
     }
-    return dispatchStep(state, step);
+    return dispatchStep(plan, state, step);
   }
 
   // Sequential (legacy): advance off the recorded next_iteration hint.
@@ -1673,7 +1793,7 @@ function advance(plan: Plan, state: NextState, opts: NextOpts): NextResult {
   // A planned path resolves to its PlanStep; an off-plan path (an unusual nested
   // next_iteration) gets a synthetic one — either way through the single dispatch.
   const step = findStepByPath(plan, next) ?? synthesizeStep(next, state, plan, opts);
-  return dispatchStep(state, step);
+  return dispatchStep(plan, state, step);
 }
 
 // ---------------------------------------------------------------------------
