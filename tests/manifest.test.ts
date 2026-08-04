@@ -24,7 +24,7 @@ const MINIMAL = `
 schema: 2
 name: demo
 steps:
-  - id: build
+  - name: build
     body: steps/build.md
 `;
 
@@ -50,17 +50,17 @@ describe('header', () => {
   });
 
   test('schema is required — an unversioned manifest is refused', () => {
-    const m = parse(`name: demo\nsteps:\n  - id: a\n    body: a.md\n`);
+    const m = parse(`name: demo\nsteps:\n  - name: a\n    body: a.md\n`);
     expect(m.errors.some((e) => e.startsWith('schema:'))).toBe(true);
   });
 
   test('a future schema is refused rather than guessed at', () => {
-    const m = parse(`schema: 99\nname: demo\nsteps:\n  - id: a\n    body: a.md\n`);
+    const m = parse(`schema: 99\nname: demo\nsteps:\n  - name: a\n    body: a.md\n`);
     expect(m.errors.some((e) => e.includes('not supported'))).toBe(true);
   });
 
   test('name is required', () => {
-    const m = parse(`schema: 2\nsteps:\n  - id: a\n    body: a.md\n`);
+    const m = parse(`schema: 2\nsteps:\n  - name: a\n    body: a.md\n`);
     expect(m.errors).toContain('name: missing');
   });
 
@@ -92,7 +92,7 @@ submodules:
 vars:
   root: C:/x
 steps:
-  - id: a
+  - name: a
     body: a.md
 `);
     expect(m.errors).toEqual([]);
@@ -113,24 +113,24 @@ steps:
 
 describe('unknown values are errors, never fallbacks', () => {
   test("v1's `isolation: manager` is refused instead of downgraded", () => {
-    const m = parse(`schema: 2\nname: d\nisolation: manager\nsteps:\n  - id: a\n    body: a.md\n`);
+    const m = parse(`schema: 2\nname: d\nisolation: manager\nsteps:\n  - name: a\n    body: a.md\n`);
     expect(m.errors.some((e) => e.startsWith('isolation:') && e.includes('manager'))).toBe(true);
   });
 
   test('the retired v1 isolation vocabulary is refused too', () => {
     for (const old of ['worktree', 'manual', 'external']) {
-      const m = parse(`schema: 2\nname: d\nisolation: ${old}\nsteps:\n  - id: a\n    body: a.md\n`);
+      const m = parse(`schema: 2\nname: d\nisolation: ${old}\nsteps:\n  - name: a\n    body: a.md\n`);
       expect(m.errors.some((e) => e.startsWith('isolation:'))).toBe(true);
     }
   });
 
   test('unknown execution is refused', () => {
-    const m = parse(`schema: 2\nname: d\nexecution: dag\nsteps:\n  - id: a\n    body: a.md\n`);
+    const m = parse(`schema: 2\nname: d\nexecution: dag\nsteps:\n  - name: a\n    body: a.md\n`);
     expect(m.errors.some((e) => e.startsWith('execution:'))).toBe(true);
   });
 
   test('a mistyped scalar is reported with its path', () => {
-    const m = parse(`schema: 2\nname: d\nself_improve: yes-please\nsteps:\n  - id: a\n    body: a.md\n`);
+    const m = parse(`schema: 2\nname: d\nself_improve: yes-please\nsteps:\n  - name: a\n    body: a.md\n`);
     expect(m.errors.some((e) => e.startsWith('self_improve:'))).toBe(true);
   });
 });
@@ -151,7 +151,7 @@ describe('body composition', () => {
 schema: 2
 name: d
 steps:
-  - id: a
+  - name: a
     body:
       - _shared/preamble.md
       - steps/a.md
@@ -166,7 +166,7 @@ steps:
 schema: 2
 name: d
 steps:
-  - id: a
+  - name: a
     body:
       - steps/a.md
       - { use: _shared/retry.md, when: retry }
@@ -181,7 +181,7 @@ steps:
 schema: 2
 name: d
 steps:
-  - id: a
+  - name: a
     body:
       - _shared/pre.md
       - oneof:
@@ -203,7 +203,7 @@ steps:
 schema: 2
 name: d
 steps:
-  - id: a
+  - name: a
     body:
       - oneof:
           - { use: x.md, when: a }
@@ -217,7 +217,7 @@ steps:
 schema: 2
 name: d
 steps:
-  - id: a
+  - name: a
     body:
       - oneof:
           - { use: fallback.md }
@@ -231,7 +231,7 @@ steps:
 schema: 2
 name: d
 steps:
-  - id: a
+  - name: a
     body:
       - oneof:
           - { use: x.md, when: f }
@@ -242,7 +242,7 @@ steps:
   });
 
   test('an agent step with no body is refused', () => {
-    const m = parse(`schema: 2\nname: d\nsteps:\n  - id: a\n`);
+    const m = parse(`schema: 2\nname: d\nsteps:\n  - name: a\n`);
     expect(m.errors.some((e) => e.includes("needs a 'body'"))).toBe(true);
   });
 });
@@ -256,11 +256,11 @@ describe('needs and layering', () => {
 schema: 2
 name: d
 steps:
-  - id: a
+  - name: a
     body: a.md
-  - id: b
+  - name: b
     body: b.md
-  - id: c
+  - name: c
     body: c.md
 `;
 
@@ -279,9 +279,9 @@ steps:
 schema: 2
 name: d
 steps:
-  - id: a
+  - name: a
     body: a.md
-  - id: b
+  - name: b
     body: b.md
     needs: []
 `);
@@ -295,15 +295,15 @@ steps:
 schema: 2
 name: d
 steps:
-  - id: setup
+  - name: setup
     body: s.md
-  - id: left
+  - name: left
     body: l.md
     needs: [setup]
-  - id: right
+  - name: right
     body: r.md
     needs: [setup]
-  - id: join
+  - name: join
     body: j.md
     needs: [left, right]
 `);
@@ -316,10 +316,10 @@ steps:
 schema: 2
 name: d
 steps:
-  - id: zebra
+  - name: zebra
     body: z.md
     needs: []
-  - id: apple
+  - name: apple
     body: a.md
     needs: []
 `);
@@ -331,10 +331,10 @@ steps:
 schema: 2
 name: d
 steps:
-  - id: a
+  - name: a
     body: a.md
     needs: [b]
-  - id: b
+  - name: b
     body: b.md
     needs: [a]
 `);
@@ -342,31 +342,62 @@ steps:
   });
 
   test('a step cannot need itself', () => {
-    const m = parse(`schema: 2\nname: d\nsteps:\n  - id: a\n    body: a.md\n    needs: [a]\n`);
+    const m = parse(`schema: 2\nname: d\nsteps:\n  - name: a\n    body: a.md\n    needs: [a]\n`);
     expect(m.errors.some((e) => e.includes('needs itself'))).toBe(true);
   });
 
   test('needs on an unknown step is a hard error', () => {
-    const m = parse(`schema: 2\nname: d\nsteps:\n  - id: a\n    body: a.md\n    needs: [ghost]\n`);
+    const m = parse(`schema: 2\nname: d\nsteps:\n  - name: a\n    body: a.md\n    needs: [ghost]\n`);
     expect(m.errors.some((e) => e.includes("unknown step 'ghost'"))).toBe(true);
   });
 
-  test('duplicate ids are refused', () => {
+  test("a step's name is its identity — nothing about it comes from a file", () => {
     const m = parse(`
 schema: 2
 name: d
 steps:
-  - id: a
+  - name: build
+    body:
+      - a.md
+      - b.md
+  - name: verify
+    type: script
+    script: v.py
+`);
+    expect(m.errors).toEqual([]);
+    // Two bodies on one step, none on another: neither disturbs identity,
+    // because identity is the declared name, not a path.
+    expect(m.steps.map((s) => s.name)).toEqual(['build', 'verify']);
+    expect(bodyFiles(m.steps[0])).toEqual(['a.md', 'b.md']);
+    expect(bodyFiles(m.steps[1])).toEqual([]);
+  });
+
+  test('a step without a name is refused', () => {
+    const m = parse(`schema: 2\nname: d\nsteps:\n  - body: a.md\n`);
+    expect(m.errors.some((e) => e.includes("missing 'name'"))).toBe(true);
+  });
+
+  test("the design-time 'id:' key is named in the error, not left to guesswork", () => {
+    const m = parse(`schema: 2\nname: d\nsteps:\n  - id: build\n    body: a.md\n`);
+    expect(m.errors.some((e) => e.includes("identified by 'name:'"))).toBe(true);
+  });
+
+  test('duplicate names are refused', () => {
+    const m = parse(`
+schema: 2
+name: d
+steps:
+  - name: a
     body: a.md
-  - id: a
+  - name: a
     body: b.md
 `);
-    expect(m.errors.some((e) => e.includes("duplicate step id 'a'"))).toBe(true);
+    expect(m.errors.some((e) => e.includes("duplicate step name 'a'"))).toBe(true);
   });
 
   test('execution does not change the graph — only how much of it runs at once', () => {
-    const seq = parse(`schema: 2\nname: d\nexecution: sequential\nsteps:\n  - id: a\n    body: a.md\n  - id: b\n    body: b.md\n    needs: []\n`);
-    const par = parse(`schema: 2\nname: d\nexecution: parallel\nsteps:\n  - id: a\n    body: a.md\n  - id: b\n    body: b.md\n    needs: []\n`);
+    const seq = parse(`schema: 2\nname: d\nexecution: sequential\nsteps:\n  - name: a\n    body: a.md\n  - name: b\n    body: b.md\n    needs: []\n`);
+    const par = parse(`schema: 2\nname: d\nexecution: parallel\nsteps:\n  - name: a\n    body: a.md\n  - name: b\n    body: b.md\n    needs: []\n`);
     expect(buildLayers(seq.steps).layers).toEqual(buildLayers(par.steps).layers);
   });
 });
@@ -381,7 +412,7 @@ describe('step types', () => {
 schema: 2
 name: d
 steps:
-  - id: verify
+  - name: verify
     type: script
     script: scripts/verify.py
     timeout: 180
@@ -405,7 +436,7 @@ steps:
 schema: 2
 name: d
 steps:
-  - id: release
+  - name: release
     type: pipeline
     pipeline: ../release-package
     isolation: own
@@ -421,22 +452,22 @@ steps:
   });
 
   test('each type requires its own key', () => {
-    expect(parse(`schema: 2\nname: d\nsteps:\n  - id: a\n    type: script\n`).errors.some((e) => e.includes("needs 'script:'"))).toBe(true);
-    expect(parse(`schema: 2\nname: d\nsteps:\n  - id: a\n    type: pipeline\n`).errors.some((e) => e.includes("needs 'pipeline:'"))).toBe(true);
+    expect(parse(`schema: 2\nname: d\nsteps:\n  - name: a\n    type: script\n`).errors.some((e) => e.includes("needs 'script:'"))).toBe(true);
+    expect(parse(`schema: 2\nname: d\nsteps:\n  - name: a\n    type: pipeline\n`).errors.some((e) => e.includes("needs 'pipeline:'"))).toBe(true);
   });
 
   test('a key belonging to another type is refused, not ignored', () => {
-    const m = parse(`schema: 2\nname: d\nsteps:\n  - id: a\n    body: a.md\n    script: x.py\n`);
+    const m = parse(`schema: 2\nname: d\nsteps:\n  - name: a\n    body: a.md\n    script: x.py\n`);
     expect(m.errors.some((e) => e.includes("add 'type: script'"))).toBe(true);
   });
 
   test('only a pipeline step may declare isolation — the header owns it otherwise', () => {
-    const m = parse(`schema: 2\nname: d\nsteps:\n  - id: a\n    body: a.md\n    isolation: own\n`);
+    const m = parse(`schema: 2\nname: d\nsteps:\n  - name: a\n    body: a.md\n    isolation: own\n`);
     expect(m.errors.some((e) => e.includes('only a'))).toBe(true);
   });
 
   test('an unknown step type is refused', () => {
-    const m = parse(`schema: 2\nname: d\nsteps:\n  - id: a\n    type: wizard\n    body: a.md\n`);
+    const m = parse(`schema: 2\nname: d\nsteps:\n  - name: a\n    type: wizard\n    body: a.md\n`);
     expect(m.errors.some((e) => e.includes('steps[0].type'))).toBe(true);
   });
 });
@@ -458,9 +489,9 @@ schema: 2
 name: d
 self_improve: false
 steps:
-  - id: locked
+  - name: locked
     body: a.md
-  - id: open
+  - name: open
     body: b.md
     self_improve: true
 `);
@@ -473,11 +504,11 @@ steps:
 schema: 2
 name: d
 steps:
-  - id: open
+  - name: open
     body:
       - _shared/context.md
       - steps/open.md
-  - id: locked
+  - name: locked
     body:
       - _shared/context.md
       - steps/locked.md
@@ -497,7 +528,7 @@ steps:
 schema: 2
 name: d
 steps:
-  - id: verify
+  - name: verify
     type: script
     script: scripts/verify.py
     self_improve: false
@@ -515,7 +546,7 @@ steps:
 schema: 2
 name: d
 steps:
-  - id: a
+  - name: a
     self_improve: false
     body:
       - oneof:
@@ -538,11 +569,11 @@ describe('flow', () => {
 schema: 2
 name: d
 steps:
-  - id: implement
+  - name: implement
     body: i.md
-  - id: review
+  - name: review
     body: r.md
-  - id: package
+  - name: package
     body: p.md
 flow:
   implement: { goto: review }
@@ -560,7 +591,7 @@ flow:
 schema: 2
 name: d
 steps:
-  - id: a
+  - name: a
     body: a.md
 flow:
   a: { goto: nowhere }

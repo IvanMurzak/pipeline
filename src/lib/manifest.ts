@@ -15,8 +15,11 @@
 //   * The graph is DATA, not a mode: `needs:` declares dependencies, `flow:`
 //     declares conditional routing, and `execution:` only says how much of the
 //     resulting graph may run at once.
-//   * Filenames carry nothing. A step's id is `id:`; its order comes from
-//     `needs:`/`flow:`; its body is whatever `body:` points at. Numeric
+//   * Filenames carry nothing. A STEP IS NOT A FILE — it is an entry in this
+//     manifest, identified by its `name:`, unique within the pipeline. Order
+//     comes from
+//     `needs:`/`flow:`; its body is whatever `body:` points at, which may be
+//     several files or none at all. Numeric
 //     prefixes are gone because there is nothing left for them to encode.
 //   * An unknown value is an ERROR, never a warning with a silent fallback.
 //     Every "treating as X" warning in v1 was a way to look configured while
@@ -63,7 +66,7 @@ export type StepType = 'agent' | 'script' | 'pipeline';
 const EXECUTIONS: Execution[] = ['sequential', 'parallel'];
 const ISOLATIONS: Isolation[] = ['none', 'step', 'run'];
 const STEP_TYPES: StepType[] = ['agent', 'script', 'pipeline'];
-const ID_RE = /^[a-z0-9][a-z0-9._-]*$/i;
+const NAME_RE = /^[a-z0-9][a-z0-9._-]*$/i;
 
 /** One resolved include in a step's body.
  *  `include` is unconditional when `when` is null; `oneof` takes the FIRST
@@ -78,7 +81,9 @@ export interface BodyOption {
 }
 
 export interface ManifestStep {
-  id: string;
+  /** Unique within this pipeline. THE step's identity — a step is an entry in
+   *  this manifest, not a file, so nothing about its identity comes from disk. */
+  name: string;
   type: StepType;
   /** Normalized to a list even when the manifest wrote a bare string. */
   body: BodyEntry[];
@@ -265,20 +270,25 @@ function parseStep(
     return null;
   }
 
-  const id = readString(raw.id, `${at}.id`, errors);
-  if (!id) {
-    if (raw.id === undefined) errors.push(`${at}: missing 'id'`);
+  // `id:` was the field's working name during design. Say so explicitly rather
+  // than letting it surface as a confusing "missing 'name'".
+  if (raw.id !== undefined) {
+    errors.push(`${at}.id: renamed — a step is identified by 'name:' now`);
+  }
+  const name = readString(raw.name, `${at}.name`, errors);
+  if (!name) {
+    if (raw.name === undefined) errors.push(`${at}: missing 'name'`);
     return null;
   }
-  if (!ID_RE.test(id)) {
-    errors.push(`${at}.id: '${id}' is not a valid step id (letters, digits, dot, dash, underscore)`);
+  if (!NAME_RE.test(name)) {
+    errors.push(`${at}.name: '${name}' is not a valid step name (letters, digits, dot, dash, underscore)`);
   }
 
   const type = raw.type === undefined ? 'agent' : readEnum(raw.type, STEP_TYPES, `${at}.type`, errors);
   if (!type) return null;
 
   const step: ManifestStep = {
-    id,
+    name,
     type,
     body: parseBody(raw.body, `${at}.body`, errors),
     needs: raw.needs === undefined ? null : (readStringList(raw.needs, `${at}.needs`, errors) ?? []),
@@ -347,7 +357,7 @@ function parseFlow(v: unknown, errors: string[]): Graph | null {
 export function effectiveNeeds(steps: ManifestStep[]): Map<string, string[]> {
   const deps = new Map<string, string[]>();
   steps.forEach((s, i) => {
-    deps.set(s.id, s.needs !== null ? s.needs : i === 0 ? [] : [steps[i - 1].id]);
+    deps.set(s.name, s.needs !== null ? s.needs : i === 0 ? [] : [steps[i - 1].name]);
   });
   return deps;
 }
@@ -365,8 +375,8 @@ export function buildLayers(steps: ManifestStep[]): LayerResult {
   const errors: string[] = [];
   const known = new Set<string>();
   for (const s of steps) {
-    if (known.has(s.id)) errors.push(`duplicate step id '${s.id}'`);
-    known.add(s.id);
+    if (known.has(s.name)) errors.push(`duplicate step name '${s.name}'`);
+    known.add(s.name);
   }
 
   const deps = effectiveNeeds(steps);
@@ -380,7 +390,7 @@ export function buildLayers(steps: ManifestStep[]): LayerResult {
 
   const layers: string[][] = [];
   const done = new Set<string>();
-  const remaining = new Set(steps.map((s) => s.id));
+  const remaining = new Set(steps.map((s) => s.name));
   while (remaining.size) {
     const ready = [...remaining].filter((id) => (deps.get(id) ?? []).every((d) => done.has(d)));
     if (!ready.length) {
@@ -388,7 +398,7 @@ export function buildLayers(steps: ManifestStep[]): LayerResult {
       break;
     }
     // Declaration order inside a layer, so a sequential run is deterministic.
-    const ordered = steps.filter((s) => ready.includes(s.id)).map((s) => s.id);
+    const ordered = steps.filter((s) => ready.includes(s.name)).map((s) => s.name);
     layers.push(ordered);
     for (const id of ordered) {
       done.add(id);
@@ -499,7 +509,7 @@ export function parseManifest(text: string): Manifest {
   }
 
   const flow = parseFlow(doc.flow, errors);
-  if (flow) errors.push(...validateGraph(flow, new Set(steps.map((s) => s.id))));
+  if (flow) errors.push(...validateGraph(flow, new Set(steps.map((s) => s.name))));
 
   const { errors: layerErrors } = buildLayers(steps);
   errors.push(...layerErrors);
