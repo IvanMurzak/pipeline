@@ -1,20 +1,25 @@
 {
   "name": "@baizor/pipeline",
   "version": "0.10.0",
-  "type": "module",
-  "description": "Unified local CLI for the Claude-Pipeline plugin: deterministic planning (and, in later phases, matching / routing / event emission / UI) computed OUTSIDE the LLM context so agents pay near-zero tokens for control-flow work. Runs directly with Bun; a Node-targeted bundle can be produced for embedding in other local projects.",
-  "homepage": "https://ai-pipeline.dev",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/IvanMurzak/pipeline-claude.git",
     "directory": "apps/pipeline-cli"
   },
-  "bin": {
-    "pipeline": "src/cli.ts"
-  },
   "exports": {
     ".": "./src/index.ts",
     "./plan": "./src/lib/plan.ts"
+  },
+  "bin": {
+    "pipeline": "src/cli.ts"
+  },
+  "description": "Unified local CLI for the Claude-Pipeline plugin: deterministic planning (and, in later phases, matching / routing / event emission / UI) computed OUTSIDE the LLM context so agents pay near-zero tokens for control-flow work. Runs directly with Bun; a Node-targeted bundle can be produced for embedding in other local projects.",
+  "engines": {
+    "bun": ">=1.3.14"
+  },
+  "homepage": "https://ai-pipeline.dev",
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "cli": "bun src/cli.ts",
@@ -22,10 +27,5 @@
     "test:seq": "bun test tests/",
     "build": "bun build src/cli.ts --target=node --format=esm --outfile=dist/cli.mjs"
   },
-  "engines": {
-    "bun": ">=1.0.0"
-  },
-  "publishConfig": {
-    "access": "public"
-  }
+  "type": "module"
 }
