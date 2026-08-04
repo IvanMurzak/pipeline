@@ -13,7 +13,7 @@ import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep, basename, dirname } from 'node:path';
 import { parseFrontmatter, type FrontmatterValue } from './frontmatter';
 import { extractGraph, validateGraph, type Graph } from './graph';
-import { MANIFEST_FILENAME, parseManifest } from './manifest';
+import { MANIFEST_FILENAME, parseManifest, type BodyEntry } from './manifest';
 import { planFromManifest } from './manifest-plan';
 import { normalizeEffort, normalizeModel } from './model';
 import {
@@ -97,6 +97,18 @@ export interface PlanStep {
    * `script_spec.retries`). Sequential steps only in v1 (see next.ts).
    */
   retries: number;
+  /**
+   * The step's body DECLARATION: which markdown files compose its prompt, in
+   * order, with the conditions that decide whether each is included. Paths are
+   * absolute. Empty for a v1 step, whose body is the single file at `path`.
+   *
+   * It stays a declaration rather than a resolved list because the conditions
+   * read the run's flags, which do not exist when the plan is computed —
+   * resolution happens per dispatch (`resolveBody`). `path` above is the label
+   * this declaration produces with NO flags set, which is what a plan, being a
+   * static view, can honestly say.
+   */
+  body: BodyEntry[];
 }
 
 export interface Plan {
@@ -113,6 +125,24 @@ export interface Plan {
   /** Pipeline-level reasoning effort (PIPELINE.md `effort:`), null = inherit. */
   default_effort: string | null;
   steps: PlanStep[];
+  /**
+   * Who decides which step runs next in SEQUENTIAL mode.
+   *
+   * `reported` (v1) — each step reports a `next_iteration` FILE PATH and the
+   * engine dispatches whatever that names. Reporting none ends the run as
+   * `completed`: a step that simply forgot its `## Next` line reads as a
+   * successful pipeline.
+   *
+   * `manifest` (v2) — the order is the manifest's, and a step reports nothing.
+   * It is not merely tidier: once a step composes several markdown files its
+   * prompt is not a file at all, so there is no path left for a step to name.
+   * `PIPELINE_COMPLETE` is still honoured, because ending early is a decision a
+   * step is entitled to make; a reported path is not, and is ignored.
+   *
+   * (`graph` and `parallel` modes are unaffected — they already route on
+   * `flow:`/`## Graph` edges and on layers respectively.)
+   */
+  advance: 'manifest' | 'reported';
   /** Topological layers of step_ids — parallel mode only; null otherwise. */
   layers: string[][] | null;
   /** Routing graph (Variant A) parsed from a `## Graph` section of PIPELINE.md,
@@ -891,6 +921,7 @@ function haltedPlan(errors: string[]): Plan {
     default_model: null,
     default_effort: null,
     steps: [],
+    advance: 'reported',
     layers: null,
     graph: null,
     variables: [],
@@ -1397,6 +1428,9 @@ function computePlanFromMarkdown(pipelineRoot: string, options: ComputePlanOptio
       pipeline_spec: pipelineSpec,
       gate_spec: gateSpec,
       retries: agentRetries,
+      // A v1 step IS its file, so it declares no composition — `path` is the
+      // whole body, and the dispatch keeps reading exactly that one file.
+      body: [],
     });
 
     // Design-time lints (non-fatal, warnings only).
@@ -1648,6 +1682,9 @@ function computePlanFromMarkdown(pipelineRoot: string, options: ComputePlanOptio
     default_model: defaultModel ?? null,
     default_effort: defaultEffort ?? null,
     steps,
+    // The v1 walk has no manifest order to follow: a step's successor is
+    // whatever it reports.
+    advance: 'reported',
     layers,
     graph,
     variables: variableDecls,

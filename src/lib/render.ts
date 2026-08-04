@@ -1,10 +1,17 @@
-// Lazy rendered shadow copies for AGENT steps (env-variables design 05 §5,
-// D6 — P4/a5).
+// Lazy shadow copies of an AGENT step's prompt (env-variables design 05 §5,
+// D6 — P4/a5), covering two transforms that both turn source markdown into the
+// text an executor actually reads:
 //
-// When (and only when) a run has a frozen PP_* variable map AND the pipeline
-// declares variables, the command layer calls renderActionSteps() at action-
-// emission time. It produces a per-run substituted copy of the CURRENT step
-// file(s) + PIPELINE.md under
+//   * SUBSTITUTION — resolve `${PP_*}` against the run's frozen variable map.
+//   * COMPOSITION — a v2 step is not a file but a manifest entry, so its prompt
+//     may be several markdown files in declared order (`bodies`). They are
+//     concatenated into ONE document, written at the first fragment's path so
+//     the relative sibling references inside it keep resolving.
+//
+// The command layer calls renderActionSteps() at action-emission time whenever
+// either applies: the run has a frozen PP_* map AND the pipeline declares
+// variables, or a dispatched step composes more than one body file. It produces
+// a per-run copy of the CURRENT step prompt(s) + PIPELINE.md under
 //
 //     <pipeline_root>/.runtime/<run-id>/rendered/<pipeline-slug>/
 //
@@ -262,6 +269,7 @@ function mirrorDir(
   destDir: string,
   relDir: string,
   contentByKey: Map<string, string>,
+  written?: Set<string>,
 ): void {
   for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
     if (isExcludedEntry(entry.name)) continue;
@@ -277,13 +285,36 @@ function mirrorDir(
       isFile = st.isFile;
     }
     if (isDir) {
-      mirrorDir(srcPath, destPath, rel, contentByKey);
+      mirrorDir(srcPath, destPath, rel, contentByKey, written);
       continue;
     }
     if (!isFile) continue;
-    const prepared = contentByKey.get(relKey(rel));
-    if (prepared !== undefined) writeFileAtomic(destPath, prepared);
-    else copyFileAtomic(srcPath, destPath);
+    const key = relKey(rel);
+    const prepared = contentByKey.get(key);
+    if (prepared !== undefined) {
+      writeFileAtomic(destPath, prepared);
+      written?.add(key);
+    } else copyFileAtomic(srcPath, destPath);
+  }
+}
+
+/** Write prepared content the mirror could not place, because it has no source
+ *  file to mirror over: a COMPOSED step's document lives at `steps/<name>.md`,
+ *  a path that exists only in the shadow tree — the step's fragments are real
+ *  files elsewhere, the assembled prompt is not a file anywhere. */
+function writeUnmirrored(
+  destRoot: string,
+  contentByKey: Map<string, string>,
+  written: Set<string>,
+  relByKey: Map<string, string>,
+): void {
+  for (const [key, content] of contentByKey) {
+    if (written.has(key)) continue;
+    const rel = relByKey.get(key);
+    if (rel === undefined) continue;
+    const destPath = join(destRoot, rel);
+    mkdirSync(join(destPath, '..'), { recursive: true });
+    writeFileAtomic(destPath, content);
   }
 }
 
@@ -320,8 +351,20 @@ export interface RenderStepsInput {
   pipelineRootAbs: string;
   runId: string;
   /** Absolute SOURCE paths of the agent step files this action dispatches
-   *  (the substitution surfaces alongside PIPELINE.md). */
+   *  (the substitution surfaces alongside PIPELINE.md). For a COMPOSED step
+   *  this is the FIRST body file — the one the composed prompt is written over
+   *  in the shadow tree, so its relative sibling references keep resolving. */
   stepSources: string[];
+  /**
+   * Per `stepSources` entry (aligned by index): the ordered body files whose
+   * contents make up that step's prompt.
+   *
+   * A v2 step is not a file — it is a manifest entry that may compose several,
+   * so the surface that gets substituted is their CONCATENATION rather than one
+   * file's text. Omitted, empty, or a single entry ⇒ the step is its own file
+   * and this is a plain render, byte-identically to before composition existed.
+   */
+  bodies?: Array<string[] | undefined>;
   /** The run's FROZEN PP_* map (never a live env read, D9/D11). */
   vars: ResolvedVars;
 }
@@ -366,38 +409,72 @@ export function renderActionSteps(input: RenderStepsInput): RenderStepsResult {
   const renderedRoot = renderedRootFor(rootAbs, input.runId);
 
   // Substitution surfaces: PIPELINE.md + each in-root step file (deduped).
+  // A COMPOSED step's surface is written at its FIRST body file's rel, and its
+  // content comes from every fragment — see `fragmentsOf`.
   const surfaceRels = new Map<string, string>(); // key -> rel
-  surfaceRels.set(relKey('PIPELINE.md'), 'PIPELINE.md');
-  for (const rel of rels) if (rel !== null) surfaceRels.set(relKey(rel), rel);
+  // PIPELINE.md is a surface only where one exists. A v2 pipeline has none —
+  // and `pipeline.yml` deliberately does not take its place: substituting into
+  // the manifest would let a variable rewrite `timeout`, `needs`, `isolation`,
+  // i.e. execution semantics, which is the same reason the manifest is never
+  // self-improved.
+  if (statKind(join(rootAbs, 'PIPELINE.md'))?.isFile) {
+    surfaceRels.set(relKey('PIPELINE.md'), 'PIPELINE.md');
+  }
+  const fragmentsByKey = new Map<string, string[]>(); // key -> absolute fragment paths
+  rels.forEach((rel, i) => {
+    if (rel === null) return;
+    const key = relKey(rel);
+    surfaceRels.set(key, rel);
+    const composed = input.bodies?.[i];
+    if (composed && composed.length > 1) fragmentsByKey.set(key, composed);
+  });
 
   // Read + re-check + substitute every surface BEFORE any write: a blocked or
   // unreadable surface fails the whole action with zero tree mutations.
   const contentByKey = new Map<string, string>(); // relKey -> rendered content
+  const relByKey = new Map<string, string>(surfaceRels); // relKey -> rel
   const blockers: string[] = [];
   for (const [key, rel] of surfaceRels) {
-    const label = posixRel(rel);
-    let raw: string;
-    try {
-      raw = readFileSync(join(rootAbs, rel), 'utf8');
-    } catch (e) {
-      return {
-        ok: false,
-        reason: `rendered copy of ${label} could not be produced — source unreadable: ${e instanceof Error ? e.message : String(e)}`,
-      };
+    // Each fragment is checked and substituted on its OWN text, so a blocked
+    // occurrence still reports the file and line it actually lives in rather
+    // than an offset into a concatenation that exists nowhere on disk.
+    const fragments = fragmentsByKey.get(key) ?? [join(rootAbs, rel)];
+    const composed = fragments.length > 1;
+    const parts: string[] = [];
+    let failed = false;
+    for (const abs of fragments) {
+      const label = posixRel(relUnder(rootAbs, abs) ?? abs);
+      let raw: string;
+      try {
+        raw = readFileSync(abs, 'utf8');
+      } catch (e) {
+        return {
+          ok: false,
+          reason: `rendered copy of ${label} could not be produced — source unreadable: ${e instanceof Error ? e.message : String(e)}`,
+        };
+      }
+      const { frontmatterRaw, body } = splitRawFrontmatter(raw);
+      const fileBlockers = renderBlockers(body, newlineCount(frontmatterRaw), input.vars, label);
+      if (fileBlockers.length) {
+        blockers.push(...fileBlockers);
+        failed = true;
+        continue;
+      }
+      try {
+        // Frontmatter rides RAW (byte-preserved) on a single-file surface;
+        // a composed prompt DROPS it, because in v2 a step's model, type and
+        // order come from the manifest — leaving several stale `---` blocks
+        // stacked mid-document would only be noise for whoever reads it.
+        const rendered = substituteText(body, input.vars);
+        parts.push(composed ? rendered.trim() : frontmatterRaw + rendered);
+      } catch (e) {
+        // Unreachable by scan/substitute parity — defense in depth only.
+        blockers.push(`  ${label}: ${e instanceof Error ? e.message : String(e)}`);
+        failed = true;
+      }
     }
-    const { frontmatterRaw, body } = splitRawFrontmatter(raw);
-    const fileBlockers = renderBlockers(body, newlineCount(frontmatterRaw), input.vars, label);
-    if (fileBlockers.length) {
-      blockers.push(...fileBlockers);
-      continue;
-    }
-    try {
-      // Frontmatter rides RAW (byte-preserved); only the body is substituted.
-      contentByKey.set(key, frontmatterRaw + substituteText(body, input.vars));
-    } catch (e) {
-      // Unreachable by scan/substitute parity — defense in depth only.
-      blockers.push(`  ${label}: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    if (failed) continue;
+    contentByKey.set(key, composed ? parts.filter(Boolean).join('\n\n') + '\n' : parts[0]);
   }
   if (blockers.length) {
     return {
@@ -418,7 +495,9 @@ export function renderActionSteps(input: RenderStepsInput): RenderStepsResult {
   try {
     pruneDir(renderedRoot, rootAbs);
     mkdirSync(renderedRoot, { recursive: true });
-    mirrorDir(rootAbs, renderedRoot, '', contentByKey);
+    const written = new Set<string>();
+    mirrorDir(rootAbs, renderedRoot, '', contentByKey, written);
+    writeUnmirrored(renderedRoot, contentByKey, written, relByKey);
   } catch (e) {
     return {
       ok: false,

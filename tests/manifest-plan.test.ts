@@ -177,7 +177,10 @@ describe('step bodies and the path the engine keys on', () => {
     expect(p.steps[0].rel).toBe('_shared/preamble.md');
   });
 
-  test('a composed body dispatches its FIRST file (composition of the rest is chunk 2)', () => {
+  test('a COMPOSED step is labelled by its name, not by a fragment it may share', () => {
+    // The composed prompt is written at this label inside the run's shadow
+    // tree; a shared `_shared/preamble.md` is the first fragment of many steps,
+    // so labelling by it would name them all the same thing.
     const p = plan(`
 schema: 2
 name: demo
@@ -187,7 +190,17 @@ steps:
       - _shared/preamble.md
       - steps/01-a.md
 `);
-    expect(p.steps[0].path).toBe(join(ROOT, '_shared', 'preamble.md'));
+    expect(p.steps[0].path).toBe(join(ROOT, 'steps', 'a.md'));
+    expect(p.steps[0].rel).toBe('a.md');
+    // The fragments themselves ride the declaration, resolved per dispatch.
+    expect(p.steps[0].body.map((e) => (e.kind === 'include' ? e.use : ''))).toEqual([
+      join(ROOT, '_shared', 'preamble.md'),
+      join(ROOT, 'steps', '01-a.md'),
+    ]);
+  });
+
+  test('a manifest plan advances by the manifest; a v1 walk by what a step reports', () => {
+    expect(plan(LINEAR).advance).toBe('manifest');
   });
 
   test('a bodyless step still gets a stable key — nothing reads it, but the engine compares it', () => {

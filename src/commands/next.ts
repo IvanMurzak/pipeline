@@ -79,6 +79,7 @@ import {
   computeNext,
   haltRun,
   pickMode,
+  nextByManifest,
   samePath,
   startResolvedByPath,
   type ActionStep,
@@ -90,6 +91,7 @@ import {
   type StepRecord,
   type WorktreeRecord,
 } from '../lib/next';
+import { MANIFEST_FILENAME } from '../lib/manifest';
 import { emitEvent } from '../lib/event';
 import { statsAppend, statsEnabled, statsFinalizeRun } from '../lib/stats';
 import { backfillProject, findStatsProjectRoot } from '../lib/stats-backfill';
@@ -1867,6 +1869,29 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
     const pending = planStepFor(plan, prevState.current_step_id);
     if (pending?.type === 'script') manualScriptTag = { failureClass: null };
   }
+  // A manifest-routed run ignores a step's `next_iteration`, so say so when the
+  // two DISAGREE — that is a `## Next` line left behind by a manifest edit, and
+  // the run is about to go somewhere the step file does not claim. Silent when
+  // they agree (every migrated pipeline still carries its old `## Next`) and
+  // silent on PIPELINE_COMPLETE, which the engine honours.
+  if (
+    !resume &&
+    plan.advance === 'manifest' &&
+    record?.kind === 'step' &&
+    prevState?.phase === 'await-step' &&
+    typeof record.next_iteration === 'string' &&
+    record.next_iteration !== 'PIPELINE_COMPLETE'
+  ) {
+    const declared = nextByManifest(plan, prevState.current_step_id ?? null);
+    const reported = planStepFor(plan, null, record.next_iteration);
+    if (reported?.step_id !== declared?.step_id) {
+      warnNote(
+        `step '${prevState.current_step_id}' reported next_iteration ${record.next_iteration}, ` +
+          `but ${MANIFEST_FILENAME} runs '${declared?.step_id ?? '(end of pipeline)'}' next — ` +
+          'the manifest decides the order; remove the stale `## Next` section',
+      );
+    }
+  }
   if (!resume) {
     emitCompletionEvents(plan, prevState, record, a.runId, gateTag ?? manualScriptTag, toMainPath);
     statsNoteRecord(plan, a.root, a.runId, prevState, record, gateTag ?? manualScriptTag, toMainPath);
@@ -2405,9 +2430,18 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   // error: an F2-style reason, external teardown still runs, stats finalize,
   // exit 1 — never a substituteText throw (07 P4 gate).
   // -------------------------------------------------------------------------
-  if (action.action === 'run-step' && frozenVars !== null && hasDeclarations(plan.variables)) {
+  //
+  // COMPOSITION (v2 `body:`) rides the same seam: a step whose prompt is
+  // several markdown files is materialized into one document at the first
+  // fragment's path in the same shadow tree, so it inherits the sibling mirror,
+  // the atomic writes and the prune. That is why the gate below fires on EITHER
+  // trigger — a v2 pipeline with no variables still needs its bodies composed,
+  // and a single-body step still short-circuits to `path === source_path`.
+  if (action.action === 'run-step') {
     const renderable = action.steps.filter(isRenderedDispatch);
-    if (renderable.length) {
+    const composes = renderable.some((s) => (s.body?.length ?? 0) > 1);
+    const substitutes = frozenVars !== null && hasDeclarations(plan.variables);
+    if (renderable.length && (composes || substitutes)) {
       const rendered = renderActionSteps({
         // Scoped runs render FROM the worktree tree INTO the worktree's
         // `.runtime/<run>/rendered/` (P2/b3) — `s.path` is the execution-tree
@@ -2416,7 +2450,10 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
         pipelineRootAbs: execRootAbs,
         runId: a.runId,
         stepSources: renderable.map((s) => s.path),
-        vars: frozenVars,
+        bodies: renderable.map((s) => s.body),
+        // No declarations ⇒ an empty map, and substitution over it is the
+        // identity: composition alone leaves every `${…}` exactly as authored.
+        vars: frozenVars ?? {},
       });
       if (!rendered.ok) {
         const reason = rendered.reason;

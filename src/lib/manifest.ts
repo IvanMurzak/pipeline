@@ -549,10 +549,17 @@ export function buildLayers(steps: ManifestStep[]): LayerResult {
 
 /** Which files this step's body composes to, in order, given the run's flags.
  *  `flags` uses the SAME vocabulary as `flow:` conditions — one condition
- *  language for the whole manifest was a design requirement, not a shortcut. */
-export function resolveBody(step: ManifestStep, flags: Record<string, unknown> = {}): string[] {
+ *  language for the whole manifest was a design requirement, not a shortcut.
+ *
+ *  Takes the declaration rather than the step so the ENGINE can call it too:
+ *  by dispatch time a step is a `PlanStep`, which carries the declaration with
+ *  its paths already absolutized. */
+export function resolveBodyEntries(
+  body: BodyEntry[],
+  flags: Record<string, unknown> = {},
+): string[] {
   const out: string[] = [];
-  for (const entry of step.body) {
+  for (const entry of body) {
     if (entry.kind === 'include') {
       if (entry.when === null || flags[entry.when]) out.push(entry.use);
       continue;
@@ -561,6 +568,11 @@ export function resolveBody(step: ManifestStep, flags: Record<string, unknown> =
     if (pick) out.push(pick.use);
   }
   return out;
+}
+
+/** {@link resolveBodyEntries} for a parsed manifest step. */
+export function resolveBody(step: ManifestStep, flags: Record<string, unknown> = {}): string[] {
+  return resolveBodyEntries(step.body, flags);
 }
 
 /** Every file a step could ever include, regardless of flags. */

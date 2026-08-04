@@ -41,6 +41,7 @@ import {
   buildLayers,
   effectiveNeeds,
   resolveBody,
+  type BodyEntry,
   type Manifest,
   type ManifestStep,
 } from './manifest';
@@ -156,6 +157,9 @@ export function planFromManifest(
       gate_spec: s.type === 'gate' ? gateSpec(s) : null,
       // Agent-step retry budget (a script step's own budget lives on its spec).
       retries: s.type === 'agent' ? (s.retries ?? 0) : 0,
+      // The DECLARATION, absolutized — conditions are evaluated per dispatch
+      // against the run's flags, not here (see PlanStep.body).
+      body: absolutizeBody(s.body, pipelineRoot),
     };
   });
 
@@ -186,6 +190,8 @@ export function planFromManifest(
     default_model: defaultModel ?? null,
     default_effort: defaultEffort ?? null,
     steps,
+    // The manifest declares the order, so nothing downstream has to report it.
+    advance: 'manifest',
     layers,
     graph: manifest.flow,
     variables: variableDecls(manifest),
@@ -302,29 +308,49 @@ function absolutize(p: string, pipelineRoot: string): string {
   return isAbsolute(p) ? p : join(pipelineRoot, p);
 }
 
+/** The body declaration with every `use:` resolved against the pipeline root,
+ *  so the engine can filter it by flags without knowing where the pipeline
+ *  lives. Structure and order are untouched — only the paths change. */
+function absolutizeBody(body: BodyEntry[], pipelineRoot: string): BodyEntry[] {
+  return body.map((entry) =>
+    entry.kind === 'include'
+      ? { ...entry, use: absolutize(entry.use, pipelineRoot) }
+      : {
+          kind: 'oneof' as const,
+          options: entry.options.map((o) => ({ ...o, use: absolutize(o.use, pipelineRoot) })),
+        },
+  );
+}
+
 /**
- * The path the engine keys this step on.
+ * The path this step is LABELLED by — in events, in `.stats`, in the iteration
+ * tree, and wherever a `--start` path still round-trips.
  *
- * v1 had exactly one answer — the step IS a file. v2 has none: a step composes
- * zero or more bodies, and a script/gate/pipeline step usually has no body at
- * all. Until the engine keys on the name instead, a step needs SOME stable
- * string, so it gets its first body file when it has one and a synthetic
- * `steps/<name>.md` label when it does not.
+ * v1 had exactly one answer: the step IS a file. v2 has none. A step composes
+ * zero, one, or several bodies, so:
  *
- * The synthetic label is never read: only agent steps have their body dispatched
- * to an executor, and an agent step is required to declare one.
+ *   * exactly one body ⇒ that file, which is v1's answer and keeps a
+ *     single-body step's dispatch byte-identical;
+ *   * anything else ⇒ a synthetic `steps/<name>.md`, derived from the step's
+ *     own identity.
+ *
+ * The synthetic label is deliberately NOT the first fragment: a shared
+ * `_shared/preamble.md` is first in several steps, so labelling by it would give
+ * them all the same name in every consumer that keys on the path. It is also
+ * where the COMPOSED document is written inside the run's shadow tree — under
+ * `steps/`, at the depth a step body normally sits, so the relative references
+ * inside it resolve exactly as an ordinary step's do.
  */
 function dispatchPath(step: ManifestStep, bodyPaths: string[], pipelineRoot: string): string {
-  return bodyPaths[0] ?? join(pipelineRoot, 'steps', `${step.name}.md`);
+  return bodyPaths.length === 1 ? bodyPaths[0] : join(pipelineRoot, 'steps', `${step.name}.md`);
 }
 
 /** The iteration tree's row key: the path under `steps/` when the body lives
  *  there (v1's meaning), else the pipeline-root-relative path, POSIX-separated
  *  either way so a plan reads the same on Windows and Linux. */
 function relLabel(step: ManifestStep, bodyPaths: string[], pipelineRoot: string): string {
-  const first = bodyPaths[0];
-  if (first === undefined) return `${step.name}.md`;
-  const fromRoot = relative(pipelineRoot, first).split(/[\\/]/).join('/');
+  if (bodyPaths.length !== 1) return `${step.name}.md`;
+  const fromRoot = relative(pipelineRoot, bodyPaths[0]).split(/[\\/]/).join('/');
   return fromRoot.startsWith('steps/') ? fromRoot.slice('steps/'.length) : fromRoot;
 }
 

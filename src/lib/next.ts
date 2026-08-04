@@ -18,6 +18,7 @@
 
 import type { Plan, PlanStep, Isolation } from './plan';
 import { routeNext, emptyRouteState, type RouteState } from './graph';
+import { resolveBodyEntries } from './manifest';
 import { ENGINE_OUTCOMES } from './step-schema';
 import type { ScriptCreatorOutcome } from './improver-schema';
 import type { StepType } from './script-types';
@@ -75,6 +76,21 @@ export interface NextState {
    * from `needs:`/`flow:`.
    */
   current_off_plan_path?: string | null;
+  /**
+   * The run's ACCUMULATED result flags — every flag any step has reported so
+   * far, latest write wins. What a step's `body:` conditions are evaluated
+   * against, so an include can depend on something an earlier step learned.
+   *
+   * Deliberately NOT what `flow:` routes on. Routing asks "what just
+   * happened", so it keeps reading the completing step's own flags; folding
+   * the accumulated map in would let a flag set at step 1 and never
+   * re-reported still steer a branch at step 9, silently changing every
+   * bounded-loop budget that already exists. Same condition VOCABULARY, two
+   * honestly different scopes.
+   *
+   * Absent on a pre-composition next.json → normalized to {} on load.
+   */
+  flags?: Record<string, unknown>;
   /** Graph routing counters (reused by routeNext). */
   route: RouteState;
   /** Parallel: index into plan.layers of the in-flight layer. */
@@ -293,6 +309,19 @@ export interface ActionStep {
    * pipeline, and §6.3 fallback dispatches keep `path === source_path` (E11).
    */
   source_path: string;
+  /**
+   * The SOURCE files this dispatch's prompt is composed from, in order —
+   * resolved from the step's `body:` declaration against the run's flags, so a
+   * conditional include reflects what the run actually knows right now.
+   *
+   * Present only when the step declares a body (a v2 manifest step) — a v1
+   * step IS its file, so it has none and `path` is the whole prompt. When it
+   * has more than one entry the command layer composes them into a single
+   * markdown and re-points `path` at it, exactly as it does for a rendered
+   * copy; `source_path` stays the FIRST entry, which is what every path-keyed
+   * consumer (events, stats, the improver brief) labels the step by.
+   */
+  body?: string[];
   model: string | null;
   /** Resolved reasoning effort for this spawn (override ?? step frontmatter ??
    *  pipeline default ?? null = inherit). The headless runner passes it as
@@ -979,6 +1008,12 @@ export function computeNext(
     state.fallback_attempted = {};
   }
   if (!Array.isArray(state.repaired_steps)) state.repaired_steps = [];
+  // Backward compat, body composition: a pre-composition next.json has no flag
+  // map — absent ⇒ empty, so a legacy run composes exactly what it did before
+  // (every `when:` reads false, which is also what no-flags-yet means).
+  if (state.flags == null || typeof state.flags !== 'object' || Array.isArray(state.flags)) {
+    state.flags = {};
+  }
   if (state.partial_layer_results === undefined) state.partial_layer_results = null;
   if (state.pending_fallback === undefined) state.pending_fallback = null;
   if (state.active_child === undefined) state.active_child = null;
@@ -1050,6 +1085,7 @@ function initRun(plan: Plan, opts: NextOpts): NextResult {
     index: 0,
     current_step_id: null,
     current_off_plan_path: null,
+    flags: {},
     route: emptyRouteState(),
     layer_index: 0,
     layer: [],
@@ -1258,6 +1294,10 @@ function makeActionStep(
   index: number,
   isolation: 'worktree' | null,
 ): ActionStep {
+  // Resolved HERE, not at plan time: a `when:` reads the run's flags, which do
+  // not exist until steps have run. Empty declaration ⇒ the field is omitted
+  // and the dispatch is byte-identical to a v1 one.
+  const body = resolveBodyEntries(step.body ?? [], state.flags ?? {});
   const actionStep: ActionStep = {
     step_id: step.step_id,
     path: step.path,
@@ -1273,6 +1313,7 @@ function makeActionStep(
     // so the fallback covers only hand-built PlanStep objects in tests.
     type: step.type ?? 'agent',
   };
+  if (body.length) actionStep.body = body;
   // External mode (sequential-only, so never true for layer dispatches): thread
   // the three informational worktree fields so the step `cd`s into the
   // run-level worktree itself — without touching isolation.
@@ -1546,6 +1587,8 @@ function synthesizeStep(
     // budget, matching the pre-A2 halt-on-failure behavior (out of the v1
     // scope: bounded retries apply to enumerated PlanSteps only).
     retries: 0,
+    // An off-plan step is a bare file, so there is nothing to compose.
+    body: [],
   };
 }
 
@@ -1639,6 +1682,8 @@ function onStepPhase(plan: Plan, state: NextState, record: NextRecord | null, op
   // Stash the advancement decision; it's consumed once the improve queue drains.
   state.pending_next = r.next_iteration ?? null;
   state.pending_flags = r.flags ?? null;
+  // …and fold them into the run's accumulated map, which body conditions read.
+  if (r.flags) state.flags = { ...(state.flags ?? {}), ...r.flags };
   return processImproveQueue(plan, state, opts);
 }
 
@@ -1783,9 +1828,30 @@ function advance(plan: Plan, state: NextState, opts: NextOpts): NextResult {
     return dispatchStep(plan, state, step);
   }
 
-  // Sequential (legacy): advance off the recorded next_iteration hint.
+  // Sequential.
   const next = state.pending_next;
   state.pending_next = null;
+
+  if (plan.advance === 'manifest') {
+    // The manifest declares the order, so the step's report is not consulted —
+    // except for PIPELINE_COMPLETE, which is a decision (end early), not a
+    // routing instruction. A path is ignored: a composed step's prompt is not a
+    // file, so there is nothing a report could name. The command layer surfaces
+    // a report that DISAGREES with the manifest, since that means a stale
+    // `## Next` line survived a manifest edit.
+    if (next === 'PIPELINE_COMPLETE') {
+      state.status = 'completed';
+      return retroOrTerminal(plan, state, opts);
+    }
+    const step = nextByManifest(plan, state.current_step_id);
+    if (!step) {
+      state.status = 'completed';
+      return retroOrTerminal(plan, state, opts);
+    }
+    return dispatchStep(plan, state, step);
+  }
+
+  // v1: advance off the recorded next_iteration hint.
   if (!next || next === 'PIPELINE_COMPLETE') {
     state.status = 'completed';
     return retroOrTerminal(plan, state, opts);
@@ -1794,6 +1860,18 @@ function advance(plan: Plan, state: NextState, opts: NextOpts): NextResult {
   // next_iteration) gets a synthetic one — either way through the single dispatch.
   const step = findStepByPath(plan, next) ?? synthesizeStep(next, state, plan, opts);
   return dispatchStep(plan, state, step);
+}
+
+/** The step the MANIFEST puts after `fromName` in a sequential run: the next one
+ *  in plan order, or undefined at the end of the chain. Exported so the command
+ *  layer can compare a step's (now advisory) `next_iteration` against it without
+ *  re-deriving the rule. */
+export function nextByManifest(plan: Plan, fromName: string | null): PlanStep | undefined {
+  if (fromName === null) return plan.steps[0];
+  const i = plan.steps.findIndex((s) => s.step_id === fromName);
+  // A cursor that is not in the plan (an off-plan hand-off) has no manifest
+  // successor — ending the run beats guessing at one.
+  return i < 0 ? undefined : plan.steps[i + 1];
 }
 
 // ---------------------------------------------------------------------------
