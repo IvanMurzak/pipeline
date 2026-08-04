@@ -43,6 +43,18 @@ export interface ScriptParamSpec {
   from?: string;     // binding template, e.g. "${steps.build.output.sha}"
 }
 
+/** The accepted `type` values of a {@link ScriptParamSpec} (§3.1). Lives here,
+ *  with the frozen contract itself, so both declaration sites check the SAME
+ *  vocabulary: v1's fenced `## Params` JSON block (lib/plan.ts) and v2's
+ *  `params:`/`output:`/`args:` manifest keys (lib/manifest.ts). */
+export const PARAM_TYPES: ReadonlySet<string> = new Set([
+  'string',
+  'number',
+  'boolean',
+  'array',
+  'object',
+]);
+
 /** Parsed script-step declaration attached to a PlanStep (frontmatter §2.1 +
  *  the `## Params`/`## Output` blocks §3). Exactly one of script/command is
  *  non-null on a valid plan. */

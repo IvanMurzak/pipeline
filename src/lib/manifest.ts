@@ -23,14 +23,23 @@
 //     prefixes are gone because there is nothing left for them to encode.
 //   * An unknown value is an ERROR, never a warning with a silent fallback.
 //     Every "treating as X" warning in v1 was a way to look configured while
-//     behaving otherwise.
+//     behaving otherwise. The same rule governs where a key may appear: a knob
+//     declared on a step kind that cannot use it is an error, not an ignored
+//     block — a step whose inputs never bind is the loudest failure v2 exists
+//     to prevent.
+//   * Everything v1 kept in a step's markdown — a script's `## Params`, a
+//     gate's `## Message` — is declared HERE. Only an agent step's body is
+//     prose, because only an agent reads prose.
 //
 // This module is PURE — it parses and validates text, and never touches the
 // filesystem. `loadManifest` (fs.ts side) supplies the file reading and the
-// existence checks that need a disk.
+// existence checks that need a disk; `planFromManifest` (lib/manifest-plan.ts)
+// turns the result into the engine's Plan.
 
 import type { Graph, GraphNode } from './graph';
 import { validateGraph } from './graph';
+import { APPROVAL_ROLES } from './gate';
+import { PARAM_TYPES, type ScriptParamSpec } from './script-types';
 
 /** YAML parsing, via the runtime's own parser.
  *
@@ -61,11 +70,14 @@ export type Execution = 'sequential' | 'parallel';
  *  v1's `worktree`/`manual`/`external` named three different axes (mechanism,
  *  ownership, provenance) and two of them were inert in sequential mode. */
 export type Isolation = 'none' | 'step' | 'run';
-export type StepType = 'agent' | 'script' | 'pipeline';
+export type StepType = 'agent' | 'script' | 'pipeline' | 'gate';
+/** What a `type: script` step does when it fails past the mechanical ladder. */
+export type OnFailure = 'halt' | 'agent';
 
 const EXECUTIONS: Execution[] = ['sequential', 'parallel'];
 const ISOLATIONS: Isolation[] = ['none', 'step', 'run'];
-const STEP_TYPES: StepType[] = ['agent', 'script', 'pipeline'];
+const STEP_TYPES: StepType[] = ['agent', 'script', 'pipeline', 'gate'];
+const ON_FAILURES: OnFailure[] = ['halt', 'agent'];
 const NAME_RE = /^[a-z0-9][a-z0-9._-]*$/i;
 
 /** One resolved include in a step's body.
@@ -98,11 +110,28 @@ export interface ManifestStep {
   self_improve: boolean;
   script: string | null;
   pipeline: string | null;
-  args: Record<string, unknown>;
-  params: Record<string, unknown>;
+  /** `type: pipeline` only — the CHILD's inputs. Same declaration vocabulary as
+   *  a script step's `params:`; a different key because a step has exactly one
+   *  kind of input and naming it after the kind keeps the wrong one an error
+   *  rather than a silently-ignored block. */
+  args: Record<string, ScriptParamSpec> | null;
+  /** `type: script` only — the script's inputs. */
+  params: Record<string, ScriptParamSpec> | null;
+  /** What this step publishes for `${steps.<name>.output.<field>}` bindings
+   *  downstream. Declared on script and pipeline steps; null when the step
+   *  publishes nothing declared (downstream bindings then check at runtime
+   *  only, exactly as in v1). */
+  output: Record<string, ScriptParamSpec> | null;
   timeout: number | null;
   retries: number | null;
-  on_failure: string | null;
+  on_failure: OnFailure | null;
+  /** `type: gate` only — who may answer the approval question. Required on a
+   *  gate: a gate anyone could answer is not a gate. */
+  required_role: string | null;
+  /** `type: gate` only — the approval prompt. v1 read this from the step
+   *  body's `## Message` section; a gate runs no agent and reads no body, so
+   *  in v2 it is declared here. Null ⇒ the runtime's default prompt. */
+  message: string | null;
   /** `type: pipeline` only — whether the child gets its own isolation. */
   child_isolation: 'own' | 'inherit' | null;
 }
@@ -189,6 +218,53 @@ function readMap(v: unknown, path: string, errors: string[]): Record<string, unk
     return {};
   }
   return v;
+}
+
+/** A `params:` / `args:` / `output:` block — the SAME declaration vocabulary v1
+ *  wrote as a fenced JSON block under `## Params`, moved into the manifest and
+ *  written as YAML. Checked against `PARAM_TYPES` from the frozen contract so
+ *  the two declaration sites cannot drift.
+ *
+ *  Absent ⇒ null (declared nothing), which is distinct from `{}` (declared an
+ *  empty set) only in intent; both bind nothing. An entry that is not a mapping
+ *  is an ERROR rather than a coerced `{type: string}` — inferring the type is
+ *  exactly the "looks configured, behaves otherwise" failure v2 removes. */
+function readParamSpecs(
+  v: unknown,
+  path: string,
+  errors: string[],
+): Record<string, ScriptParamSpec> | null {
+  if (v === undefined || v === null) return null;
+  if (!isPlainObject(v)) {
+    errors.push(`${path}: expected a mapping of name → { type, … }, got ${Array.isArray(v) ? 'a list' : typeof v}`);
+    return null;
+  }
+  for (const [name, raw] of Object.entries(v)) {
+    const at = `${path}.${name}`;
+    if (!isPlainObject(raw)) {
+      errors.push(
+        `${at}: expected { type: string|number|boolean|array|object, … }, got ${
+          Array.isArray(raw) ? 'a list' : typeof raw
+        } — declare the type, it is never inferred`,
+      );
+      continue;
+    }
+    if (typeof raw.type !== 'string' || !PARAM_TYPES.has(raw.type)) {
+      errors.push(
+        `${at}.type: unknown type ${JSON.stringify(raw.type ?? null)} — expected one of ${[...PARAM_TYPES].join(' | ')}`,
+      );
+    }
+    if (raw.value !== undefined && raw.from !== undefined) {
+      errors.push(`${at}: sets both 'value' and 'from' — they are mutually exclusive`);
+    }
+    if (raw.enum !== undefined && !Array.isArray(raw.enum)) {
+      errors.push(`${at}.enum: expected a list of allowed values`);
+    }
+    if (raw.required !== undefined && typeof raw.required !== 'boolean') {
+      errors.push(`${at}.required: expected true or false, got ${JSON.stringify(raw.required)}`);
+    }
+  }
+  return v as Record<string, ScriptParamSpec>;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,11 +373,17 @@ function parseStep(
     self_improve: readBool(raw.self_improve, `${at}.self_improve`, errors) ?? pipelineSelfImprove,
     script: readString(raw.script, `${at}.script`, errors),
     pipeline: readString(raw.pipeline, `${at}.pipeline`, errors),
-    args: readMap(raw.args, `${at}.args`, errors),
-    params: readMap(raw.params, `${at}.params`, errors),
+    args: readParamSpecs(raw.args, `${at}.args`, errors),
+    params: readParamSpecs(raw.params, `${at}.params`, errors),
+    output: readParamSpecs(raw.output, `${at}.output`, errors),
     timeout: readNumber(raw.timeout, `${at}.timeout`, errors),
     retries: readNumber(raw.retries, `${at}.retries`, errors),
-    on_failure: readString(raw.on_failure, `${at}.on_failure`, errors),
+    on_failure:
+      raw.on_failure === undefined
+        ? null
+        : readEnum(raw.on_failure, ON_FAILURES, `${at}.on_failure`, errors),
+    required_role: null,
+    message: readString(raw.message, `${at}.message`, errors),
     child_isolation: null,
   };
 
@@ -310,6 +392,19 @@ function parseStep(
       errors.push(`${at}.isolation: only a 'type: pipeline' step may set isolation (the pipeline header owns it otherwise)`);
     } else {
       step.child_isolation = readEnum(raw.isolation, ['own', 'inherit'], `${at}.isolation`, errors);
+    }
+  }
+
+  if (raw.required_role !== undefined) {
+    if (type !== 'gate') {
+      errors.push(`${at}.required_role: only a 'type: gate' step may set required_role`);
+    } else {
+      step.required_role = readEnum(
+        raw.required_role,
+        [...APPROVAL_ROLES],
+        `${at}.required_role`,
+        errors,
+      );
     }
   }
 
@@ -324,11 +419,51 @@ function parseStep(
   if (type === 'pipeline' && !step.pipeline) {
     errors.push(`${at}: a 'type: pipeline' step needs 'pipeline:'`);
   }
+  // A gate BLOCKS a run until a privileged human answers; if the manifest does
+  // not say who that is, the gate has no meaning to enforce.
+  if (type === 'gate' && !step.required_role) {
+    errors.push(
+      `${at}: a 'type: gate' step needs 'required_role:' (one of ${[...APPROVAL_ROLES].join(' | ')})`,
+    );
+  }
   if (type !== 'script' && step.script) {
     errors.push(`${at}.script: ignored on a '${type}' step — add 'type: script'`);
   }
   if (type !== 'pipeline' && step.pipeline) {
     errors.push(`${at}.pipeline: ignored on a '${type}' step — add 'type: pipeline'`);
+  }
+  // Inputs are declared once, under the key named for the step kind. Putting
+  // them under the other kind's key is an ERROR, not a silently-ignored block —
+  // a step whose inputs never bind is the loudest failure v2 has to prevent.
+  if (type !== 'script' && step.params) {
+    errors.push(
+      `${at}.params: a '${type}' step declares its inputs under ${type === 'pipeline' ? "'args:'" : 'no key'}`,
+    );
+  }
+  if (type !== 'pipeline' && step.args) {
+    errors.push(
+      `${at}.args: a '${type}' step declares its inputs under ${type === 'script' ? "'params:'" : 'no key'}`,
+    );
+  }
+  if (type !== 'script' && type !== 'pipeline' && step.output) {
+    errors.push(`${at}.output: only a script or pipeline step publishes a declared output`);
+  }
+  if (type !== 'gate' && step.message) {
+    errors.push(`${at}.message: only a 'type: gate' step has an approval prompt`);
+  }
+  // Execution knobs belong to the kind that executes something.
+  for (const [key, value] of [
+    ['timeout', step.timeout],
+    ['on_failure', step.on_failure],
+  ] as const) {
+    if (type !== 'script' && value !== null) {
+      errors.push(`${at}.${key}: only a 'type: script' step has a ${key}`);
+    }
+  }
+  // `retries:` is the one execution knob script AND agent steps share — an
+  // agent step's budget re-dispatches it in a fresh executor (see plan.ts).
+  if (type !== 'script' && type !== 'agent' && step.retries !== null) {
+    errors.push(`${at}.retries: only a script or agent step has a retry budget`);
   }
   return step;
 }

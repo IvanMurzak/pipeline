@@ -407,7 +407,7 @@ steps:
 // ---------------------------------------------------------------------------
 
 describe('step types', () => {
-  test('script steps carry script/params/timeout', () => {
+  test('script steps carry script/params/output/timeout', () => {
     const m = parse(`
 schema: 2
 name: d
@@ -419,7 +419,13 @@ steps:
     retries: 1
     on_failure: agent
     params:
-      root: /x
+      root:
+        type: string
+        required: true
+        from: \${project.root}
+    output:
+      sha:
+        type: string
 `);
     expect(m.errors).toEqual([]);
     const s = m.steps[0];
@@ -428,7 +434,58 @@ steps:
     expect(s.timeout).toBe(180);
     expect(s.retries).toBe(1);
     expect(s.on_failure).toBe('agent');
-    expect(s.params).toEqual({ root: '/x' });
+    expect(s.params).toEqual({
+      root: { type: 'string', required: true, from: '${project.root}' },
+    });
+    expect(s.output).toEqual({ sha: { type: 'string' } });
+  });
+
+  test("a param's type is declared, never inferred from the value", () => {
+    // v1's `## Params` had the same rule; the shorthand `root: /x` reads like
+    // a value but says nothing about what the script may be handed.
+    const m = parse(`
+schema: 2
+name: d
+steps:
+  - name: verify
+    type: script
+    script: s.py
+    params:
+      root: /x
+`);
+    expect(m.errors.some((e) => e.includes('steps[0].params.root') && e.includes('never inferred'))).toBe(true);
+  });
+
+  test('an unknown param type is refused', () => {
+    const m = parse(`
+schema: 2
+name: d
+steps:
+  - name: verify
+    type: script
+    script: s.py
+    params:
+      root:
+        type: path
+`);
+    expect(m.errors.some((e) => e.includes('steps[0].params.root.type'))).toBe(true);
+  });
+
+  test("a param cannot set both 'value' and 'from'", () => {
+    const m = parse(`
+schema: 2
+name: d
+steps:
+  - name: verify
+    type: script
+    script: s.py
+    params:
+      root:
+        type: string
+        value: /x
+        from: \${project.root}
+`);
+    expect(m.errors.some((e) => e.includes('mutually exclusive'))).toBe(true);
   });
 
   test('a pipeline step composes another pipeline as a node', () => {
@@ -441,14 +498,84 @@ steps:
     pipeline: ../release-package
     isolation: own
     args:
-      package: protocol
+      package:
+        type: string
+        value: protocol
 `);
     expect(m.errors).toEqual([]);
     const s = m.steps[0];
     expect(s.type).toBe('pipeline');
     expect(s.pipeline).toBe('../release-package');
     expect(s.child_isolation).toBe('own');
-    expect(s.args).toEqual({ package: 'protocol' });
+    expect(s.args).toEqual({ package: { type: 'string', value: 'protocol' } });
+  });
+
+  test('inputs go under the key named for the step kind, or it is an error', () => {
+    // Not a warning: a step whose declared inputs never bind is the loudest
+    // failure v2 exists to prevent.
+    const scriptWithArgs = parse(
+      `schema: 2\nname: d\nsteps:\n  - name: a\n    type: script\n    script: s.py\n    args:\n      x:\n        type: string\n`,
+    );
+    expect(scriptWithArgs.errors.some((e) => e.includes("steps[0].args") && e.includes("'params:'"))).toBe(true);
+
+    const pipelineWithParams = parse(
+      `schema: 2\nname: d\nsteps:\n  - name: a\n    type: pipeline\n    pipeline: ../x\n    params:\n      x:\n        type: string\n`,
+    );
+    expect(pipelineWithParams.errors.some((e) => e.includes('steps[0].params') && e.includes("'args:'"))).toBe(true);
+  });
+
+  test('an approval gate declares who may answer it', () => {
+    const m = parse(`
+schema: 2
+name: d
+steps:
+  - name: ship
+    type: gate
+    required_role: admin
+    message: Deploy to production?
+`);
+    expect(m.errors).toEqual([]);
+    const s = m.steps[0];
+    expect(s.type).toBe('gate');
+    expect(s.required_role).toBe('admin');
+    expect(s.message).toBe('Deploy to production?');
+    // A gate runs no agent, so it needs no body — and it must not be forced
+    // to invent one just to exist.
+    expect(s.body).toEqual([]);
+  });
+
+  test('a gate without required_role is refused — a gate anyone can answer is not a gate', () => {
+    const m = parse(`schema: 2\nname: d\nsteps:\n  - name: ship\n    type: gate\n`);
+    expect(m.errors.some((e) => e.includes("needs 'required_role:'"))).toBe(true);
+  });
+
+  test('an unknown approval role is refused, not downgraded', () => {
+    const m = parse(`schema: 2\nname: d\nsteps:\n  - name: ship\n    type: gate\n    required_role: wizard\n`);
+    expect(m.errors.some((e) => e.includes('steps[0].required_role'))).toBe(true);
+  });
+
+  test('required_role on a non-gate step is refused', () => {
+    const m = parse(`schema: 2\nname: d\nsteps:\n  - name: a\n    body: a.md\n    required_role: admin\n`);
+    expect(m.errors.some((e) => e.includes("only a 'type: gate' step may set required_role"))).toBe(true);
+  });
+
+  test('execution knobs belong to the kind that executes something', () => {
+    const gateTimeout = parse(
+      `schema: 2\nname: d\nsteps:\n  - name: a\n    type: gate\n    required_role: admin\n    timeout: 5\n`,
+    );
+    expect(gateTimeout.errors.some((e) => e.includes('steps[0].timeout'))).toBe(true);
+    // …but `retries:` is shared with agent steps, whose budget re-dispatches
+    // them in a fresh executor.
+    const agentRetries = parse(`schema: 2\nname: d\nsteps:\n  - name: a\n    body: a.md\n    retries: 2\n`);
+    expect(agentRetries.errors).toEqual([]);
+    expect(agentRetries.steps[0].retries).toBe(2);
+  });
+
+  test('an unknown on_failure is refused, not silently halted', () => {
+    const m = parse(
+      `schema: 2\nname: d\nsteps:\n  - name: a\n    type: script\n    script: s.py\n    on_failure: retry\n`,
+    );
+    expect(m.errors.some((e) => e.includes('steps[0].on_failure'))).toBe(true);
   });
 
   test('each type requires its own key', () => {

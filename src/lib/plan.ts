@@ -17,6 +17,7 @@ import {
   DEFAULT_SCRIPT_TIMEOUT_S,
   MANAGER_SAFE_TIMEOUT_S,
   normalizeNextLine,
+  PARAM_TYPES,
   SECRET_ENV_PATTERN,
   stepsRefShapeError,
   type OnFailurePolicy,
@@ -326,8 +327,9 @@ function longestProceduralRun(lines: string[]): number {
 // (Params/Output vocabulary + binding lints), §7 (manager call-budget lint).
 // Types and constants come from script-types.ts (frozen) — never redeclared.
 
-/** The `## Params` / `## Output` vocabulary's accepted `type` values (§3.1). */
-const PARAM_TYPES = new Set(['string', 'number', 'boolean', 'array', 'object']);
+// The `## Params` / `## Output` vocabulary's accepted `type` values (§3.1) come
+// from script-types.ts — the frozen contract — so the v1 markdown block and the
+// v2 manifest keys can never check different vocabularies.
 
 /** Same fence rule as graph.ts's `## Graph` extraction — kept local because
  *  graph.ts is not this feature's file to edit (see T11 footprint). */
