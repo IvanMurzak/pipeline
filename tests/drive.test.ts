@@ -1490,7 +1490,7 @@ test('drive: a needs-input park JOURNALS awaiting_input (cloud-consumed shape) a
   expect(evt.data.question.context).toBe('no default configured');
   expect(evt.data.question.options).toEqual(['eu', 'us']);
   expect(evt.data.question.question_id).toBe(first.json.question_id);
-  expect(evt.data.step_id).toBe(step0); // additive
+  expect(evt.data.step_name).toBe(step0); // additive (v5 rename of step_id)
   expect(evt.session_id).toBe(first.json.session_id); // the parked claude session
 
   // Answer re-entry: the engine's re-issued iteration.started carries the

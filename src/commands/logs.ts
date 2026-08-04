@@ -140,7 +140,9 @@ function bitsForEvent(type: string, d: Record<string, unknown>): FormatBits {
         codes: [C.cyan],
         summary:
           `#${f(d, 'index') || '?'} ${baseName(f(d, 'iteration_path'))}` +
-          `${f(d, 'step_id') ? ` <${f(d, 'step_id')}>` : ''}` +
+          // v5 `step_name`, falling back to v4 `step_id` so replaying an old
+          // journal still shows the step tag.
+          `${f(d, 'step_name') || f(d, 'step_id') ? ` <${f(d, 'step_name') || f(d, 'step_id')}>` : ''}` +
           `${d['step_type'] === 'script' ? ' [script]' : ''}` +
           `${f(d, 'resolved_model') ? ` [${f(d, 'resolved_model')}]` : ''}`,
       };

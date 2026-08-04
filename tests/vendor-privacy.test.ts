@@ -265,3 +265,39 @@ describe('vendored privacy filter — tier resolution (fail-closed)', () => {
     expect(fromEnv.warning).toContain('failing closed');
   });
 });
+
+describe('vendored privacy filter — v5 step-key rename', () => {
+  // `step_name` (v5) replaced `step_id` (v4) as the iteration events' step
+  // identity. Both must survive the metadata tier: the tier's own doc calls
+  // pipeline-RELATIVE step identity metadata, and the product's per-step
+  // dashboards are built on it. Allowlisting only the new name would silently
+  // strip the identity out of every journal written before the rename.
+  test.each(['iteration.started', 'iteration.resumed', 'iteration.completed'])(
+    '%s keeps BOTH step_name (v5) and step_id (v4) at metadata tier',
+    (type) => {
+      const event = journalEvent(type, 'r1', {
+        iteration_path: 'steps/03-review.md',
+        outcome: 'completed',
+        step_name: 'review',
+        step_id: 'review',
+      });
+      const data = (filterEventForTier(event, 'metadata') as { data: Record<string, unknown> }).data;
+      expect(data.step_name).toBe('review');
+      expect(data.step_id).toBe('review');
+    },
+  );
+
+  test('the step identity is still NOT a way to smuggle content through', () => {
+    // `keep` is verbatim by design, so the guard is the allowlist itself: a
+    // sibling field that merely LOOKS like step identity is dropped.
+    const event = journalEvent('iteration.started', 'r1', {
+      iteration_path: 'steps/01-a.md',
+      step_name: 'a',
+      step_description: SECRETS.promptText,
+    });
+    const data = (filterEventForTier(event, 'metadata') as { data: Record<string, unknown> }).data;
+    expect(data.step_name).toBe('a');
+    expect(data.step_description).toBeUndefined();
+    expect(JSON.stringify(data)).not.toContain(SECRETS.promptText);
+  });
+});

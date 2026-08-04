@@ -2113,7 +2113,9 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
             // and the sweeper's HOLD disposition is unreachable. Shape per
             // @baizor/pipeline-protocol AwaitingInputData:
             // { run_id, iteration, question_id, question:{text,…} } —
-            // additive fields only beyond that.
+            // additive fields only beyond that (`step_name`, v5's rename of
+            // v4's `step_id`, and `iteration_path`; the schema passes unknown
+            // keys through, so both old and new readers stay satisfied).
             journalEvent(
               'awaiting_input',
               {
@@ -2121,7 +2123,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
                 iteration: gateStep.index,
                 question_id: gateQuestionId,
                 question: { ...(question ?? { text: `Approval required to proceed past gate '${gateStep.step_id}'.` }), question_id: gateQuestionId },
-                step_id: gateStep.step_id,
+                step_name: gateStep.step_id,
                 iteration_path: gateStep.path,
               },
               null,
@@ -2161,7 +2163,8 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
             // gets re-dispatched on lease death (design-forbidden). Shape per
             // @baizor/pipeline-protocol AwaitingInputData: { run_id, iteration,
             // question_id, question:{text, context, options} } — additive
-            // fields (step_id, iteration_path) beyond that. Emitted on the
+            // fields (step_name — v5's rename of v4's step_id — and
+            // iteration_path) beyond that. Emitted on the
             // repeat park too (a --resume without --answer), restoring the
             // parked state after the re-entry's iteration.started un-parked it.
             journalEvent(
@@ -2171,7 +2174,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
                 iteration: action.steps[0].index,
                 question_id: r.awaiting.question_id,
                 question: { ...r.awaiting.question, question_id: r.awaiting.question_id },
-                step_id: r.awaiting.step_id,
+                step_name: r.awaiting.step_id,
                 iteration_path: r.awaiting.iteration_path,
               },
               r.awaiting.session_id,

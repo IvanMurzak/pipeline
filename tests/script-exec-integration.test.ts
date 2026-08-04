@@ -676,7 +676,7 @@ test('all-script layer self-feeds: both members execute in-process, next action 
     expect(stateOf(w, 'r9').partial_layer_results).toBe(null);
     // Concurrent-member events carry step_id (v4 rule) + the §12 tag.
     const started = readEvents(w).filter((e) => e.type === 'iteration.started' && e.data.step_type === 'script');
-    expect(started.map((e) => e.data.step_id).sort()).toEqual(['x', 'y']);
+    expect(started.map((e) => e.data.step_name).sort()).toEqual(['x', 'y']);
   });
 });
 
@@ -725,7 +725,7 @@ test('mid-layer park preserves a failed member: no re-execution, no duplicate fe
     expect(after.halt_reason).toMatch(/^script step x failed \(crash\)/);
     expect(after.partial_layer_results).toBe(null); // pen folded + cleared
     // x's started/completed events fired exactly ONCE (window 1).
-    const xEvents = readEvents(w).filter((e) => e.data.step_id === 'x');
+    const xEvents = readEvents(w).filter((e) => e.data.step_name === 'x');
     expect(xEvents.filter((e) => e.type === 'iteration.started').length).toBe(1);
     expect(xEvents.filter((e) => e.type === 'iteration.completed').length).toBe(1);
   });

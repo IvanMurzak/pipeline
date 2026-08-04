@@ -197,7 +197,7 @@ describe('golden — envelope shape', () => {
       'session_id',
       'data',
     ]);
-    expect(ev.schema).toBe(4);
+    expect(ev.schema).toBe(5);
     expect(ev.type).toBe('iteration.started');
     expect(ev.worktree).toBeNull();
     expect(ev.run_id).toBe('abc');
@@ -232,8 +232,8 @@ describe('golden — additive worktree.* event types (no emitter change)', () =>
   // The two new event types for `isolation: external` are emitted through the
   // SAME generic `pipeline event` path as every other type — emitEvent takes a
   // plain string, so no emitter code change is needed. These tests prove the
-  // envelope is a well-formed schema:4 record carrying the worktree data.
-  test('worktree.created writes a well-formed schema:4 envelope', () => {
+  // envelope is a well-formed schema:5 record carrying the worktree data.
+  test('worktree.created writes a well-formed schema:5 envelope', () => {
     const home = mkTmp('home-');
     const repo = mkGitRepo();
     runTs(
@@ -262,7 +262,7 @@ describe('golden — additive worktree.* event types (no emitter change)', () =>
       'session_id',
       'data',
     ]);
-    expect(ev.schema).toBe(4);
+    expect(ev.schema).toBe(5);
     expect(ev.type).toBe('worktree.created');
     expect(ev.run_id).toBe('abc123def456');
     // run_id popped out of data; everything else stays in data with coercion.
@@ -276,7 +276,7 @@ describe('golden — additive worktree.* event types (no emitter change)', () =>
     });
   });
 
-  test('worktree.destroyed writes a well-formed schema:4 envelope (null + outcome)', () => {
+  test('worktree.destroyed writes a well-formed schema:5 envelope (null + outcome)', () => {
     const home = mkTmp('home-');
     const repo = mkGitRepo();
     runTs(
@@ -292,7 +292,7 @@ describe('golden — additive worktree.* event types (no emitter change)', () =>
       controlledEnv(home),
     );
     const ev = JSON.parse(readFileSync(join(repo, EVENTS_REL), 'utf-8').trim());
-    expect(ev.schema).toBe(4);
+    expect(ev.schema).toBe(5);
     expect(ev.type).toBe('worktree.destroyed');
     expect(ev.run_id).toBe('abc123def456');
     expect(ev.data).toEqual({

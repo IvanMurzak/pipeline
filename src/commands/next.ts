@@ -527,7 +527,7 @@ function emitCompletionEvents(
         kv('has_improvement_brief', entry.has_improvement_brief === true),
         kv('halt_reason', entry.halt_reason ?? null),
         kv('terminal', false),
-        kv('step_id', entry.step_id),
+        kv('step_name', entry.step_id),
       ];
       pushScriptTag(argv, script);
       safeEmit('iteration.completed', argv);
@@ -724,9 +724,10 @@ function emitStartedEvents(
       // Additive A2 tag (04 §retries.6): present ONLY on a retry re-dispatch,
       // the 1-based attempt number engine-set on ActionStep.retry.
       if (step.retry !== undefined) argv.push(kv('retry', step.retry));
-      // step_id ONLY on a concurrent layer (v4 rule) — sequential/graph events
-      // omit it so older folds keep the consecutive-window behavior.
-      if (action.concurrent === true) argv.push(kv('step_id', step.step_id));
+      // step_name ONLY on a concurrent layer (the v4 `step_id` rule, renamed
+      // in v5) — sequential/graph events omit it so older folds keep the
+      // consecutive-window behavior.
+      if (action.concurrent === true) argv.push(kv('step_name', step.step_id));
       safeEmit('iteration.started', argv);
     }
     return;

@@ -478,7 +478,7 @@ test('drive: a gate parks the run (exit 4) with the approval question — NO exe
   expect(parks[0].data.question.text).toBe('Deploy to production?');
   expect(parks[0].data.question.approval).toEqual({ required_role: 'admin' });
   expect(parks[0].data.question.question_id).toBe('gate:drivegatepark:gate');
-  expect(parks[0].data.step_id).toBe('gate');
+  expect(parks[0].data.step_name).toBe('gate'); // v5 rename of step_id
   expect(parks[0].session_id).toBe(null); // no claude session behind a gate
   expect(parks[1].data.question_id).toBe(parks[0].data.question_id);
 }, 30000);

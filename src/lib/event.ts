@@ -36,9 +36,15 @@ import { homedir } from 'node:os';
 import { join, dirname, resolve, isAbsolute, basename } from 'node:path';
 import { request as httpRequest } from 'node:http';
 
-// Schema v4 — see EVENTS.md. Kept in lockstep with analytics_relay.ts /
-// server.ts; v4 added the optional `step_id` field on iteration.* events.
-export const SCHEMA_VERSION = 4;
+// Schema v5 — see EVENTS.md. Kept in lockstep with analytics_relay.ts /
+// server.ts. v4 added the optional `step_id` field on iteration.* events; v5
+// RENAMES it to `step_name` (pipeline v2: a step is a manifest entry named by
+// `name:`). The rename is the only non-additive change in the journal's
+// history, which is why it bumps the stamp at all — every prior addition
+// stayed at its version. Readers MUST still accept `step_id` (EVENTS.md's
+// "a daemon at vN parses vN-1 cleanly" invariant): journals already on disk
+// keep folding, so no already-computed analytic reattributes.
+export const SCHEMA_VERSION = 5;
 
 // Keep in sync with hooks/analytics_relay.ts's MIRROR_BINDING_SCHEMA and
 // apps/pipeline-ui/mirror.ts's MirrorBindingRecord shape (issue #11).
