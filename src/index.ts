@@ -36,6 +36,8 @@ export type {
 export {
   emitEvent,
   registerMirrorBinding,
+  registerDriveSessionBinding,
+  pipelineUiEnabled,
   writeLiveness,
   clearLiveness,
   parseKvArgs,
@@ -43,7 +45,7 @@ export {
   SCHEMA_VERSION,
   MIRROR_BINDING_SCHEMA,
 } from './lib/event';
-export type { ResolvedRoot, KvValue, ParsedKv } from './lib/event';
+export type { ResolvedRoot, KvValue, ParsedKv, DriveSessionBinding } from './lib/event';
 
 export {
   extractGraph,

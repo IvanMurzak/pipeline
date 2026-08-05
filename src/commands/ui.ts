@@ -27,6 +27,7 @@ import {
 import { join, resolve, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
+import { pipelineUiEnabled } from '../lib/event';
 
 export interface UiArgs {
   open: boolean;
@@ -45,10 +46,15 @@ export interface DaemonLock {
 /** True when the UI server system is enabled via PIPELINE_UI_ENABLED. The UI is
  *  ON BY DEFAULT (the same master switch the hooks honor); it stays on unless the
  *  user explicitly opts OUT by setting the var to a falsy value (0/false/no/off).
- *  Unset/empty — and any other value — leaves it enabled. */
+ *  Unset/empty — and any other value — leaves it enabled.
+ *
+ *  Delegates to `lib/event.ts`'s `pipelineUiEnabled` (ux-v2 b7) so the CLI has
+ *  ONE copy of the parse: `pipeline drive`'s session-binding writer needs the
+ *  same gate, and a fourth hand-rolled copy would be a fourth thing to keep in
+ *  sync. The two hook scripts still carry their own (they cannot import a
+ *  sibling at runtime). */
 export function uiEnabled(): boolean {
-  const v = (process.env.PIPELINE_UI_ENABLED ?? '').trim().toLowerCase();
-  return v !== '0' && v !== 'false' && v !== 'no' && v !== 'off';
+  return pipelineUiEnabled();
 }
 
 export function parseUiArgs(args: string[]): UiArgs {

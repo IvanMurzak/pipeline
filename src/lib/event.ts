@@ -67,6 +67,26 @@ export function pipelineUiTranscriptsEnabled(): boolean {
   return v !== '0' && v !== 'false' && v !== 'no' && v !== 'off';
 }
 
+/** Master UI opt-out switch (`PIPELINE_UI_ENABLED`, default ON) — the same
+ *  first-statement gate `hooks/analytics_relay.ts` and `hooks/pipeline_ui_relay.ts`
+ *  apply. Only an explicit falsy value (`0`/`false`/`no`/`off`) disables; unset,
+ *  empty and every other value leave it enabled.
+ *
+ *  This is the CLI-side copy of the helper the two hooks duplicate (they cannot
+ *  import a sibling at runtime); `commands/ui.ts`'s `uiEnabled` delegates here,
+ *  so the count of independent copies stays at three. Keep the falsy-parse
+ *  semantics identical in all of them.
+ *
+ *  Used by {@link registerDriveSessionBinding}: "opted out ⇒ no mirror
+ *  bindings" is part of the master switch's contract (`docs/ui-subsystem.md`),
+ *  and drive writes its bindings unprompted, so the gate belongs on that path.
+ *  `emitEvent`/`registerMirrorBinding` deliberately stay ungated — they are
+ *  called explicitly by `/pipeline:run` and journal what `pipeline logs` reads. */
+export function pipelineUiEnabled(): boolean {
+  const v = (process.env.PIPELINE_UI_ENABLED ?? '').trim().toLowerCase();
+  return v !== '0' && v !== 'false' && v !== 'no' && v !== 'off';
+}
+
 // ---------------------------------------------------------------------------
 // Time
 // ---------------------------------------------------------------------------
@@ -733,6 +753,90 @@ export function registerMirrorBinding(argv: string[]): number {
     log(`mirror binding write failed: ${e}`);
   }
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Public API: registerDriveSessionBinding (ux-v2 b7)
+// ---------------------------------------------------------------------------
+
+/** The identity `pipeline drive` pins onto ONE headless `claude -p` session. */
+export interface DriveSessionBinding {
+  /** The run that owns the session (a composed CHILD run's steps carry the
+   *  child's run id, not the parent's — the same id drive stamps on the step's
+   *  own events). */
+  runId: string;
+  /** The session UUID drive passes to `claude --session-id` / `--resume`. This
+   *  is the JOIN KEY: Claude Code hands the same value to every hook that
+   *  fires inside that child, so the hook's `resolveBindingFromEnvOrSession`
+   *  finds this record by construction. */
+  sessionId: string;
+  /** The `step_uuid` (ux-v2 b4) of the execution this session performs. Null
+   *  only when the caller genuinely has no step identity. */
+  stepUuid: string | null;
+  /** The run's project root; resolved from cwd (worktree-aware) when absent. */
+  projectRoot?: string | null;
+  pipelineName?: string | null;
+  iterationPath?: string | null;
+}
+
+/**
+ * PRE-WRITE the session→(run, step) binding that a headless `claude -p` child
+ * will be attributed by, then spawn the child (ux-v2 b7).
+ *
+ * The write must happen BEFORE the spawn: the child's very first hook can fire
+ * within milliseconds of exec, and a binding that lands afterwards would lose
+ * exactly the events this exists to attribute. Drive pins the session id
+ * itself, so the record is complete before the process it describes exists —
+ * attribution by construction, not by correlation.
+ *
+ * `transcript_path` is deliberately `null`: at pre-write time the child's
+ * transcript file does not exist yet, and the daemon's `indexRunTranscripts`
+ * skips pointer-less records, so this binding never widens what MirrorService
+ * tails (issue #11 scope discipline is unchanged).
+ *
+ * Lifecycle: no explicit `terminal` record is written, and none is needed —
+ * `findRunIdForSession` treats a binding as terminated once the run emits
+ * `pipeline.completed`/`pipeline.halted` into events.jsonl, which retires every
+ * binding sharing that run_id at once; a run that never terminates ages out at
+ * `BINDING_MAX_AGE_MS` (7 days); and the daemon compacts the journal to its
+ * newest `BINDINGS_MAX_LINES` records. A session id is minted per step-session
+ * and never reused across runs, so a record whose spawn never happened can
+ * never be matched by anything — it is inert bytes, bounded by compaction.
+ *
+ * Never throws; failure only degrades attribution.
+ */
+export function registerDriveSessionBinding(b: DriveSessionBinding): void {
+  // Master opt-out: "no events, no mirror bindings" (docs/ui-subsystem.md).
+  if (!pipelineUiEnabled()) return;
+  if (!b.runId || !b.sessionId) return;
+
+  const { projectRoot, worktree } = resolveEnvelopeRoot(b.projectRoot ?? null);
+
+  const binding = {
+    event: 'bound',
+    tool_use_id: null,
+    run_id: b.runId,
+    // ux-v2 b7: the step identity travels WITH the run identity, so a hook
+    // event fired inside the child names both by construction.
+    step_uuid: b.stepUuid ?? null,
+    session_id: b.sessionId,
+    transcript_path: null,
+    project_root: projectRoot,
+    worktree: worktree ? worktree : null,
+    pipeline_name: b.pipelineName ? String(b.pipelineName) : '',
+    iteration_path: b.iterationPath ? String(b.iterationPath) : '',
+    start_ts: utcNowIso(),
+    kind: 'drive-session',
+    schema: MIRROR_BINDING_SCHEMA,
+  };
+
+  try {
+    const bp = mirrorBindingsPath();
+    mkdirSync(dirname(bp), { recursive: true });
+    appendFileSync(bp, JSON.stringify(binding) + '\n', 'utf-8');
+  } catch (e) {
+    log(`drive session binding write failed: ${e}`);
+  }
 }
 
 /** Return the value of `key` as the raw value coerced for `... or <fallback>`

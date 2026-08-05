@@ -143,7 +143,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { frozenVariablesError, invokeNext } from './next';
 import { addVarFlag, loadVarsFile, mergeCliVars } from '../lib/run-vars';
 import type { ActionStep, LayerResultEntry, MergeBranch, NextRecord, StepRecord } from '../lib/next';
@@ -171,7 +171,7 @@ import {
   parseScriptCreatorOutput,
   scriptCreatorSchemaJson,
 } from '../lib/improver-schema';
-import { emitEvent, emitEventJson } from '../lib/event';
+import { emitEvent, emitEventJson, registerDriveSessionBinding } from '../lib/event';
 import { newId } from '../lib/ids';
 
 // Re-exported for record consumers that historically imported from here.
@@ -216,7 +216,19 @@ export interface ExecutorRequest {
    *  spawns keep the canonical path (drive-written only). */
   record_file: string;
   /** The pinned claude session: fresh spawns pass `--session-id <id>`, answer
-   *  deliveries pass `--resume <id>` (the same session continues). */
+   *  deliveries pass `--resume <id>` (the same session continues).
+   *
+   *  WHY THE ID IS `randomUUID()` AND NOT `newId()` (ux-v2 b7, deliberate):
+   *  b1/b2 routed every identity THIS PRODUCT mints through the one UUIDv7 mint
+   *  point. A claude session id is not one of them — it identifies a session in
+   *  a FOREIGN system (`claude --session-id`), is never an analytics key, is
+   *  never indexed, and is never joined on by anything in the journal (the run
+   *  and step UUIDs are what b7 propagates and what consumers key on). v7's
+   *  payoff is time-ordered index locality in a namespace we own; here we own
+   *  neither the namespace nor the index, while the version nibble IS the one
+   *  part of the value another vendor's validator could care about. So this
+   *  stays `randomUUID()` — revisit only if Claude Code documents a shape
+   *  requirement that asks for something else. */
   session: { id: string; resume: boolean };
   /** Resolved --permission-mode value; null = inherit machine settings. */
   permission_mode: string | null;
@@ -1251,6 +1263,46 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
 
   const recordPath = (stepId: string) => join(recordsDir, `${stepId}.json`);
   const dropRecordPath = (stepId: string) => join(dropRecordsDir, `${stepId}.json`);
+
+  /** SESSION BINDING PRE-WRITE (ux-v2 b7) — the write half of the run/step
+   *  attribution the hooks read back.
+   *
+   *  Every headless spawn below pins its own session UUID and passes it as
+   *  `claude --session-id` (or `--resume`). Claude Code hands that same value to
+   *  every hook that fires INSIDE the child, so a record keyed by it lets
+   *  `resolveBindingFromEnvOrSession` (hooks/analytics_relay.ts) name the run
+   *  AND the step for a `tool.called` / `turn.usage` / `manager.stopped` that
+   *  the hook itself has no other way to attribute. Before this, those events
+   *  stamped `run_id: null` on the whole driven path: `PIPELINE_UI_RUN_ID` is
+   *  not exported into the child, and no other binding is keyed by the child's
+   *  session.
+   *
+   *  ORDER IS THE POINT: called immediately after the session is persisted and
+   *  strictly BEFORE the spawn — a binding written after exec would miss the
+   *  child's first hooks. Called once per session (not per attempt): a crash
+   *  resume re-enters with the SAME session id and run/step identity, so the
+   *  re-write is a duplicate, not a correction. See registerDriveSessionBinding
+   *  for the record's lifecycle (no terminal record; the run's own
+   *  pipeline.completed/halted retires every binding sharing its run_id). */
+  const bindSession = (
+    sessionId: string,
+    stepRunId: string,
+    stepUuid: string | null,
+    iterationPath: string | null,
+  ): void => {
+    try {
+      registerDriveSessionBinding({
+        runId: stepRunId,
+        sessionId,
+        stepUuid,
+        pipelineName: basename(rootAbs),
+        iterationPath,
+      });
+    } catch {
+      // Attribution is observability — never let it break a run.
+    }
+  };
+
   /** Best-effort removal of the run's tmp record drop dir (terminal actions
    *  only — parked/blocked runs may still resume and re-use it). */
   const cleanupDropDir = (): void => {
@@ -1497,6 +1549,12 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     kind: 'improver' | 'script-creator',
     prefix: 'improver' | 'script',
     freshPrompt: () => string | null,
+    /** ux-v2 b7 — the identity of the `improver:` / `script_creator:` class
+     *  step this session IS (ux-v2 b4, `02` D15). `stepUuid` is the same value
+     *  the caller stamps on `improver.started` / `script_creator.started`, so
+     *  the hook events fired inside this `claude -p` name the same execution
+     *  the lifecycle events do. Carried into the pre-spawn session binding. */
+    identity: { stepUuid: string | null; iterationPath: string | null },
   ): Promise<SelfImproveSession> => {
     const { key, prior } = claimSelfImproveKey(prefix);
     const recordFile = recordPath(key);
@@ -1536,6 +1594,8 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
       resume = false;
     }
     writeStepSession(sessionsDir, key, sess);
+    // ux-v2 b7: same pre-spawn binding the step path writes — see bindSession.
+    bindSession(sess.session_id, runId, identity.stepUuid, identity.iterationPath);
     progress(`${kind}.session_started`, { session: key, session_id: sess.session_id, ...(resume ? { resumed: true } : {}) });
     for (;;) {
       rmSync(recordFile, { force: true });
@@ -1662,8 +1722,12 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
       // session the retrospective spawns for this run's feedback batch.
       const retroImproverUuid = newId();
       safeEmit('improver.started', { run_id: runId, iteration_path: retroRoot, step_uuid: retroImproverUuid });
-      const res = await runSelfImproveSession(improverRunner, 'improver', 'improver', () =>
-        buildRetroImproverPrompt(retroRoot, feedbackDir, runId, lintWarnings),
+      const res = await runSelfImproveSession(
+        improverRunner,
+        'improver',
+        'improver',
+        () => buildRetroImproverPrompt(retroRoot, feedbackDir, runId, lintWarnings),
+        { stepUuid: retroImproverUuid, iterationPath: retroRoot },
       );
       if (res.structured === null) {
         progress('warning', { detail: `retrospective improver pass not applied: ${res.detail}` });
@@ -1693,8 +1757,13 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
       for (let i = 0; i < parsed.script_creation_briefs.length; i++) {
         const retroScriptUuid = newId();
         safeEmit('script_creator.started', { run_id: runId, iteration_path: retroRoot, step_uuid: retroScriptUuid });
-        const sres = await runSelfImproveSession(scriptCreatorRunner, 'script-creator', 'script', () =>
-          buildScriptCreatorPrompt(parsed.script_creation_briefs[i], i + 1, parsed.script_creation_briefs.length, runId, retroRoot),
+        const sres = await runSelfImproveSession(
+          scriptCreatorRunner,
+          'script-creator',
+          'script',
+          () =>
+            buildScriptCreatorPrompt(parsed.script_creation_briefs[i], i + 1, parsed.script_creation_briefs.length, runId, retroRoot),
+          { stepUuid: retroScriptUuid, iterationPath: retroRoot },
         );
         if (sres.structured === null) {
           progress('warning', {
@@ -1930,6 +1999,10 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
       initialResume = false;
     }
     writeStepSession(sessionsDir, stepKey, sess);
+    // ux-v2 b7: bind session → (run, step) BEFORE the executor spawns, so the
+    // hooks firing inside `claude -p` attribute to this run AND this step
+    // (ActionStep.step_uuid, ux-v2 b4) by construction.
+    bindSession(sess.session_id, stepRunId, step.step_uuid, step.source_path);
 
     // Manifest fallback resolves against the step's OWN pipeline (a child
     // run's steps read the child manifest's permission-mode, not the parent's).
@@ -2337,10 +2410,18 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         }
         scriptBriefs = [];
         persistScriptBriefs(scriptBriefs);
-        const res = await runSelfImproveSession(improverRunner, 'improver', 'improver', () => {
-          const brief = takeBrief(action.iteration_path);
-          return brief === null ? null : buildImproverPrompt(action.iteration_path, brief, runId, worktreePipelineRoot ?? rootAbs);
-        });
+        const res = await runSelfImproveSession(
+          improverRunner,
+          'improver',
+          'improver',
+          () => {
+            const brief = takeBrief(action.iteration_path);
+            return brief === null ? null : buildImproverPrompt(action.iteration_path, brief, runId, worktreePipelineRoot ?? rootAbs);
+          },
+          // ux-v2 b7: the engine minted this action's step_uuid (b4) — the same
+          // one the auto-emitted improver.started carries.
+          { stepUuid: action.step_uuid, iterationPath: action.iteration_path },
+        );
         if (res.structured === null) {
           progress('warning', { detail: `improver pass for ${action.iteration_path} not applied: ${res.detail}` });
         }
@@ -2370,12 +2451,20 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
           continue;
         }
         if (scriptBriefs.length === 0) scriptBriefs = loadScriptBriefs(); // re-entry after a mid-queue crash
-        const res = await runSelfImproveSession(scriptCreatorRunner, 'script-creator', 'script', () => {
-          const brief = scriptBriefs[action.number - 1] ?? null;
-          return brief === null
-            ? null
-            : buildScriptCreatorPrompt(brief, action.number, action.of, runId, worktreePipelineRoot ?? rootAbs);
-        });
+        const res = await runSelfImproveSession(
+          scriptCreatorRunner,
+          'script-creator',
+          'script',
+          () => {
+            const brief = scriptBriefs[action.number - 1] ?? null;
+            return brief === null
+              ? null
+              : buildScriptCreatorPrompt(brief, action.number, action.of, runId, worktreePipelineRoot ?? rootAbs);
+          },
+          // ux-v2 b7: per-brief identity — each `number` is its own spawn and
+          // its own UUID (see the run-script-creator action's step_uuid doc).
+          { stepUuid: action.step_uuid, iterationPath: action.iteration_path },
+        );
         if (res.structured === null) {
           progress('warning', { detail: `script-creator ${action.number}/${action.of} refused: ${res.detail}` });
         }
