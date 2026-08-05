@@ -338,6 +338,11 @@ test('drive self-improve: run-improver spawns a pinned improver session with the
   expect(started?.data.iteration_path).toBe(plan.steps[0].path);
   const completed = events.find((e) => e.type === 'improver.completed');
   expect(completed?.data.applied).toBe(true);
+  // ux-v2 b4: the Tier-1 improver action (auto-emitted by invokeNext, not
+  // drive's own retrospective safeEmit) carries the SAME step_uuid from its
+  // started to its completed event too.
+  expect(started?.data.step_uuid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  expect(completed?.data.step_uuid).toBe(started?.data.step_uuid);
   const appliedEv = events.find((e) => e.type === 'improvement.applied');
   expect(appliedEv?.data.source).toBe('tier1');
   expect(appliedEv?.data.summary).toBe('fixed the linter reference');
@@ -557,6 +562,20 @@ test('drive self-improve: retrospective partitions all six categories (+script-f
   expect(retroEv?.data.skipped).toBe(2);
   expect(retroEv?.data.improver_applied).toBe(true);
   expect(retroEv?.data.scripts_created).toBe(1);
+
+  // ux-v2 b4: the retrospective's improver session carries ONE stable UUIDv7
+  // from its started event to its completed event, distinct from the
+  // script-creator's own — two client-minted step identities, never conflated.
+  const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const improverStarted = events.find((e) => e.type === 'improver.started');
+  const improverCompleted = events.find((e) => e.type === 'improver.completed');
+  const scriptStarted = events.find((e) => e.type === 'script_creator.started');
+  const scriptCompleted = events.find((e) => e.type === 'script_creator.completed');
+  expect(improverStarted?.data.step_uuid).toMatch(UUID_V7_RE);
+  expect(improverCompleted?.data.step_uuid).toBe(improverStarted?.data.step_uuid);
+  expect(scriptStarted?.data.step_uuid).toMatch(UUID_V7_RE);
+  expect(scriptCompleted?.data.step_uuid).toBe(scriptStarted?.data.step_uuid);
+  expect(scriptStarted?.data.step_uuid).not.toBe(improverStarted?.data.step_uuid);
 
   // NO file content in ANY emitted event (privacy tier, 07).
   const journal = readFileSync(join(root, '.pipeline', '.runtime', 'events.jsonl'), 'utf8');

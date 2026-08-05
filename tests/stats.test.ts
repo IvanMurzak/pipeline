@@ -226,6 +226,49 @@ describe('summarizeRun (pure fold)', () => {
     expect(rec.llm_steps).toBe(0);
     expect(rec.tokens).toBeNull();
   });
+
+  // ux-v2 b4: step_uuid rides the buffer (mirrors step_type's precedent at
+  // T31) — additive, so a runs.jsonl line WITHOUT it (every fixture above)
+  // still folds to a byte-identical StepStat (no step_uuid key at all).
+  test('step_uuid rides both the started and completed lines — additive, preferring the completion copy', () => {
+    const rec = summarizeRun(
+      [
+        { t: t0, k: 'run.started', mode: 'sequential', model: 'sonnet' },
+        { t: t0 + 1_000, k: 'step.started', path: '/p/steps/01-build.md', model: 'sonnet', step_uuid: 'uuid-a' },
+        { t: t0 + 2_000, k: 'step.completed', path: '/p/steps/01-build.md', outcome: 'completed', step_uuid: 'uuid-a' },
+      ],
+      { runId: 'u1', pipeline: 'p', outcome: 'completed', haltReason: null, runner: 'manager', endedMs: t0 + 3_000 },
+    );
+    expect(rec.steps[0].id).toBe('01-build'); // step_key: untouched, same value it always had
+    expect(rec.steps[0].step_uuid).toBe('uuid-a');
+  });
+
+  test('step_uuid on the START only (a completion the started uuid never reached) still folds through', () => {
+    const rec = summarizeRun(
+      [
+        { t: t0, k: 'run.started', mode: 'sequential', model: 'sonnet' },
+        { t: t0 + 1_000, k: 'step.started', path: '/p/steps/01-build.md', model: 'sonnet', step_uuid: 'uuid-b' },
+        { t: t0 + 2_000, k: 'step.completed', path: '/p/steps/01-build.md', outcome: 'completed' },
+      ],
+      { runId: 'u2', pipeline: 'p', outcome: 'completed', haltReason: null, runner: 'manager', endedMs: t0 + 3_000 },
+    );
+    expect(rec.steps[0].step_uuid).toBe('uuid-b');
+  });
+
+  test('two DIFFERENT step_uuids across two dispatches of the SAME step_key (a genuine re-run) are kept distinct, never merged', () => {
+    const rec = summarizeRun(
+      [
+        { t: t0, k: 'run.started', mode: 'sequential', model: 'sonnet' },
+        { t: t0 + 1_000, k: 'step.started', path: '/p/steps/01-flaky.md', model: 'sonnet', step_uuid: 'uuid-attempt-1' },
+        { t: t0 + 2_000, k: 'step.completed', path: '/p/steps/01-flaky.md', outcome: 'halted', step_uuid: 'uuid-attempt-1' },
+        { t: t0 + 3_000, k: 'step.started', path: '/p/steps/01-flaky.md', model: 'sonnet', step_uuid: 'uuid-attempt-2' },
+        { t: t0 + 4_000, k: 'step.completed', path: '/p/steps/01-flaky.md', outcome: 'completed', step_uuid: 'uuid-attempt-2' },
+      ],
+      { runId: 'u3', pipeline: 'p', outcome: 'completed', haltReason: null, runner: 'manager', endedMs: t0 + 5_000 },
+    );
+    expect(rec.steps.map((s) => s.id)).toEqual(['01-flaky', '01-flaky']); // SAME step_key, twice
+    expect(rec.steps.map((s) => s.step_uuid)).toEqual(['uuid-attempt-1', 'uuid-attempt-2']); // two DISTINCT executions
+  });
 });
 
 describe('fmtDuration', () => {

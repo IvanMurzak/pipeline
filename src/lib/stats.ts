@@ -175,6 +175,16 @@ export function parseBufferLines(text: string): BufferLine[] {
 
 export interface StepStat {
   id: string;
+  /** UUIDv7 row identity for this ONE execution (ux-v2 b4, `02` D15) —
+   *  ADDITIVE, alongside `id` (the step_key dimension, unchanged in shape and
+   *  meaning: it groups the SAME step across DIFFERENT runs, per the
+   *  optimizer/step_rollups contract). `step_uuid` is the opposite: a re-run
+   *  of the same step gets a NEW uuid here while `id` stays identical. The
+   *  SAME value rides the paired `iteration.*` event, so a local run
+   *  reporting via both paths (events + this file) names one execution once.
+   *  Optional so a runs.jsonl line written before this field existed still
+   *  parses (`parseRunRecords`) — absent means "measured before b4". */
+  step_uuid?: string;
   /** ISO of the step.started line (null when only a completion was seen) —
    *  lets enrichment attribute a tool failure's timestamp to a step. */
   started_at: string | null;
@@ -276,7 +286,10 @@ export function summarizeRun(
 ): RunRecord {
   const startedMs = lines.length ? lines[0].t : null;
   let mode: string | null = null;
-  const stepStart = new Map<string, { t: number; model: string | null; effort: string | null; scriptStep: boolean }>();
+  const stepStart = new Map<
+    string,
+    { t: number; model: string | null; effort: string | null; scriptStep: boolean; uuid: string | null }
+  >();
   const steps: StepStat[] = [];
   let improverRuns = 0;
   let improverApplied = 0;
@@ -301,6 +314,7 @@ export function summarizeRun(
           model: typeof line.model === 'string' ? line.model : null,
           effort: typeof line.effort === 'string' ? line.effort : null,
           scriptStep,
+          uuid: typeof line.step_uuid === 'string' && line.step_uuid ? line.step_uuid : null,
         });
         break;
       }
@@ -313,6 +327,10 @@ export function summarizeRun(
         // entries) is still tagged. failure_class rides the completion only.
         const scriptStep = started?.scriptStep === true || line.step_type === 'script';
         const failureClass = typeof line.failure_class === 'string' ? line.failure_class : undefined;
+        // ux-v2 b4: step_uuid rides BOTH lines (mirrors step_type above) —
+        // prefer the completion's own copy, fall back to the paired start.
+        const stepUuid =
+          (typeof line.step_uuid === 'string' && line.step_uuid ? line.step_uuid : null) ?? started?.uuid ?? null;
         steps.push({
           id,
           started_at: started ? (iso(started.t) as string) : null,
@@ -322,6 +340,7 @@ export function summarizeRun(
           effort: started?.effort ?? null,
           // Additive tags — omitted entirely for agent steps so their StepStat
           // shape is byte-identical to pre-0.71 records.
+          ...(stepUuid ? { step_uuid: stepUuid } : {}),
           ...(scriptStep ? { step_type: 'script' as const } : {}),
           ...(failureClass ? { failure_class: failureClass } : {}),
         });

@@ -166,6 +166,7 @@ import {
   scriptCreatorSchemaJson,
 } from '../lib/improver-schema';
 import { emitEvent, emitEventJson } from '../lib/event';
+import { newId } from '../lib/ids';
 
 // Re-exported for record consumers that historically imported from here.
 export { extractQuestion, type StepQuestion };
@@ -1553,7 +1554,11 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     if (docActionable.length > 0) {
       // Retro-internal events are the CALLER's to emit — the whole
       // retrospective is one engine action, invisible to the auto-emitter.
-      safeEmit('improver.started', { run_id: runId, iteration_path: retroRoot });
+      // ux-v2 b4: mint the identity ONCE, before the started event, and carry
+      // the SAME value onto the completed event — this is the ONE improver
+      // session the retrospective spawns for this run's feedback batch.
+      const retroImproverUuid = newId();
+      safeEmit('improver.started', { run_id: runId, iteration_path: retroRoot, step_uuid: retroImproverUuid });
       const res = await runSelfImproveSession(improverRunner, 'improver', 'improver', () =>
         buildRetroImproverPrompt(retroRoot, feedbackDir, runId, lintWarnings),
       );
@@ -1569,6 +1574,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         iteration_path: retroRoot,
         applied: parsed.applied,
         has_script_brief: parsed.script_creation_briefs.length > 0,
+        step_uuid: retroImproverUuid,
       });
       if (parsed.applied) {
         noteImprovementApplied({
@@ -1578,9 +1584,12 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
           script_briefs: parsed.script_creation_briefs.length,
         });
       }
-      // Script-creators are STRICTLY SEQUENTIAL — they edit shared docs.
+      // Script-creators are STRICTLY SEQUENTIAL — they edit shared docs. Each
+      // brief is its OWN spawn, so each gets its own fresh identity (never the
+      // improver's, never a sibling brief's).
       for (let i = 0; i < parsed.script_creation_briefs.length; i++) {
-        safeEmit('script_creator.started', { run_id: runId, iteration_path: retroRoot });
+        const retroScriptUuid = newId();
+        safeEmit('script_creator.started', { run_id: runId, iteration_path: retroRoot, step_uuid: retroScriptUuid });
         const sres = await runSelfImproveSession(scriptCreatorRunner, 'script-creator', 'script', () =>
           buildScriptCreatorPrompt(parsed.script_creation_briefs[i], i + 1, parsed.script_creation_briefs.length, runId, retroRoot),
         );
@@ -1596,6 +1605,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
           iteration_path: retroRoot,
           script_path: sparsed.script_path,
           outcome: sparsed.outcome,
+          step_uuid: retroScriptUuid,
         });
         if (sparsed.outcome !== 'refused') {
           noteImprovementApplied({

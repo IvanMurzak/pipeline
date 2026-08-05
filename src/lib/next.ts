@@ -22,6 +22,7 @@ import { resolveBodyEntries } from './manifest';
 import { ENGINE_OUTCOMES } from './step-schema';
 import type { ScriptCreatorOutcome } from './improver-schema';
 import type { StepType } from './script-types';
+import { newId } from './ids';
 import { resolve } from 'node:path';
 
 export type RunMode = 'sequential' | 'graph' | 'parallel';
@@ -66,6 +67,33 @@ export interface NextState {
    * step with no body at all (a script, a gate) had no identity to speak of.
    */
   current_step_id: string | null;
+  /**
+   * UUIDv7 identity (ux-v2 b4, `02` D15) of whatever dispatch this phase is
+   * currently awaiting a record for — a step (sequential/graph 'await-step'),
+   * an improver session ('await-improver'), or a script-creator session
+   * ('await-script'). One field covers all three because the phases are
+   * mutually exclusive: exactly one of them is ever in flight.
+   *
+   * Minted FRESH on every dispatch that genuinely moves the run forward (an
+   * index bump, a freshly popped improve-queue item) — see `mintStepUuid`.
+   * REUSED, never re-minted, when a pending dispatch is re-emitted
+   * idempotently without having actually executed again (§7 `continue`,
+   * crash re-entry) — see `reuseStepUuid`. This is what makes "a re-run of
+   * the same step emits a new UUID" true while "the SAME in-flight dispatch,
+   * asked about twice, answers with the SAME UUID" also stays true.
+   *
+   * Optional so a next.json written before this field existed loads fine;
+   * every reuse site falls back to minting rather than reading `undefined`.
+   */
+  current_step_uuid?: string | null;
+  /**
+   * Parallel mode's per-member twin of `current_step_uuid` — index-aligned
+   * with `layer` (below), one UUIDv7 per step dispatched in the in-flight
+   * layer. Populated by `dispatchLayer`; read back by `redispatchPending`'s
+   * parallel branch so a §7 `continue` re-emit of the SAME layer carries the
+   * SAME per-member identities instead of minting a fresh set.
+   */
+  layer_uuids?: string[];
   /**
    * The dispatch path of the current step ONLY when that step is not in the
    * plan — a v1 `next_iteration` hand-off to another pipeline's file, which
@@ -297,6 +325,19 @@ export interface ActiveChildRun {
 
 export interface ActionStep {
   step_id: string;
+  /**
+   * UUIDv7 row identity for this ONE execution (ux-v2 b4, `02` D15) — distinct
+   * from `step_id`, which is the analytics DIMENSION shared across every run
+   * of this step (`04` §2 rule 5: "step_key survives as a dimension column").
+   * Minted at dispatch time by the single construction point (`makeActionStep`);
+   * a re-dispatch that genuinely runs the step again (retry, fallback, graph
+   * loop-back) gets a NEW value, while an idempotent re-emit of a dispatch
+   * still pending (§7 `continue`, crash re-entry) carries the SAME value it
+   * was first given. Carried onto `iteration.started`/`iteration.completed`
+   * and the `runs.jsonl` StepStat row so both reporting paths name the same
+   * execution.
+   */
+  step_uuid: string;
   path: string;
   /**
    * The step's SOURCE iteration file (env-variables design, D6): always set.
@@ -396,6 +437,10 @@ export type NextAction =
   | {
       action: 'run-improver';
       iteration_path: string;
+      /** UUIDv7 identity for THIS improver session (ux-v2 b4, `02` D15) —
+       *  the improver:* step class the client mints (`04` §2 rule 2). Carried
+       *  onto `improver.started`/`improver.completed`. */
+      step_uuid: string;
       /** Absolute paths this pass must NOT write (plan.frozen_body_files).
        *  Present only when the pipeline froze something; the improver is an
        *  agent, so this is a constraint it is TOLD, and the engine's own
@@ -408,6 +453,12 @@ export type NextAction =
       iteration_path: string;
       number: number;
       of: number;
+      /** UUIDv7 identity for THIS script-creator session (ux-v2 b4, `02`
+       *  D15) — the script_creator:* step class the client mints (`04` §2
+       *  rule 2). Carried onto `script_creator.started`/`.completed`. Each
+       *  brief in a multi-script batch is its OWN spawn (a fresh session per
+       *  `number`), so each gets its own UUID — never reused across `number`s. */
+      step_uuid: string;
       /** Same constraint as run-improver's: a frozen step's script is one of
        *  the things a `self_improve: false` step froze. Structurally
        *  unreachable today (a frozen step never reaches the improver, so it
@@ -1258,7 +1309,9 @@ function resumeRun(plan: Plan, state: NextState, opts: NextOpts): NextResult {
       action: {
         action: 'run-step',
         concurrent: false,
-        steps: [makeFallbackStep(state, step, state.index, state.pending_fallback.failure_record)],
+        steps: [
+          makeFallbackStep(state, step, state.index, state.pending_fallback.failure_record, reuseStepUuid(state)),
+        ],
       },
       state,
     };
@@ -1269,7 +1322,11 @@ function resumeRun(plan: Plan, state: NextState, opts: NextOpts): NextResult {
     step.step_id === state.current_step_id
   ) {
     return {
-      action: { action: 'run-step', concurrent: false, steps: [makeActionStep(state, step, state.index, null)] },
+      action: {
+        action: 'run-step',
+        concurrent: false,
+        steps: [makeActionStep(state, step, state.index, null, reuseStepUuid(state))],
+      },
       state,
     };
   }
@@ -1294,7 +1351,7 @@ function resumeRun(plan: Plan, state: NextState, opts: NextOpts): NextResult {
     pendingRetryAttempt > 0 &&
     step.step_id === state.current_step_id
   ) {
-    const actionStep = makeActionStep(state, step, state.index, null);
+    const actionStep = makeActionStep(state, step, state.index, null, reuseStepUuid(state));
     actionStep.retry = pendingRetryAttempt;
     return { action: { action: 'run-step', concurrent: false, steps: [actionStep] }, state };
   }
@@ -1305,15 +1362,38 @@ function resumeRun(plan: Plan, state: NextState, opts: NextOpts): NextResult {
 // Dispatch helpers
 // ---------------------------------------------------------------------------
 
+/** Mint a FRESH step-identity UUID (ux-v2 b4) for a dispatch that genuinely
+ *  moves the run forward — an index bump, a freshly popped improve-queue
+ *  item — and persist it as `current_step_uuid`, the state's record of
+ *  "whatever is currently in flight". A later idempotent re-emission of this
+ *  SAME pending dispatch reads it back via `reuseStepUuid` instead of
+ *  minting a second identity for one execution. */
+function mintStepUuid(state: NextState): string {
+  const id = newId();
+  state.current_step_uuid = id;
+  return id;
+}
+
+/** Reuse the identity already recorded as in-flight — the idempotent-re-emit
+ *  twin of `mintStepUuid` (§7 `continue`, crash re-entry: same pending
+ *  dispatch, same UUID). Falls back to minting only for a next.json written
+ *  before this field existed; never throws on a missing value. */
+function reuseStepUuid(state: NextState): string {
+  return state.current_step_uuid ?? mintStepUuid(state);
+}
+
 /** Build one run-step ActionStep — the single construction point shared by
  *  every dispatch (fresh, layer, §7 continue re-emit, §6.3 fallback), so the
  *  `type` threading + external-worktree threading can never diverge. `index`
- *  is the caller-chosen dispatch index (see the ActionStep.index doc). */
+ *  is the caller-chosen dispatch index (see the ActionStep.index doc);
+ *  `stepUuid` is the caller-chosen identity (see `ActionStep.step_uuid` and
+ *  `mintStepUuid`/`reuseStepUuid`). */
 function makeActionStep(
   state: NextState,
   step: PlanStep,
   index: number,
   isolation: 'worktree' | null,
+  stepUuid: string,
 ): ActionStep {
   // Resolved HERE, not at plan time: a `when:` reads the run's flags, which do
   // not exist until steps have run. Empty declaration ⇒ the field is omitted
@@ -1321,6 +1401,7 @@ function makeActionStep(
   const body = resolveBodyEntries(step.body ?? [], state.flags ?? {});
   const actionStep: ActionStep = {
     step_id: step.step_id,
+    step_uuid: stepUuid,
     path: step.path,
     // Always set; identical to `path` here — the command layer re-points an
     // agent step's `path` at its rendered shadow copy on variable-declaring
@@ -1359,7 +1440,7 @@ function dispatchStep(plan: Plan, state: NextState, step: PlanStep): NextResult 
   state.active_child = null;
   // Sequential steps run in-place: isolation:null is hardcoded (NEVER the native
   // 'worktree' option), exactly as before.
-  const actionStep = makeActionStep(state, step, state.index, null);
+  const actionStep = makeActionStep(state, step, state.index, null, mintStepUuid(state));
   return {
     action: { action: 'run-step', concurrent: false, steps: [actionStep] },
     state,
@@ -1388,7 +1469,11 @@ function dispatchFallback(plan: Plan, state: NextState, step: PlanStep, failureR
   state.pending_fallback = { failure_record: failureRecord };
   state.active_child = null; // a fresh dispatch supersedes any T3-10 stack link
   return {
-    action: { action: 'run-step', concurrent: false, steps: [makeFallbackStep(state, step, state.index, failureRecord)] },
+    action: {
+      action: 'run-step',
+      concurrent: false,
+      steps: [makeFallbackStep(state, step, state.index, failureRecord, mintStepUuid(state))],
+    },
     state,
   };
 }
@@ -1400,14 +1485,17 @@ function dispatchFallback(plan: Plan, state: NextState, step: PlanStep, failureR
  *  executor achieves the Goal manually; the markdown body IS the fallback
  *  spec). Model/effort: a script step carries null by §2.1, but the fallback
  *  IS an agent spawn, so it resolves the run default exactly like an
- *  un-pinned agent step would have. */
+ *  un-pinned agent step would have. `stepUuid`: the caller decides mint
+ *  (dispatchFallback, a genuinely new spawn) vs. reuse (the crash-resume /
+ *  §7 continue re-emits of this SAME pending fallback dispatch). */
 function makeFallbackStep(
   state: NextState,
   step: PlanStep,
   index: number,
   failureRecord: string,
+  stepUuid: string,
 ): ActionStep {
-  const actionStep = makeActionStep(state, step, index, null);
+  const actionStep = makeActionStep(state, step, index, null, stepUuid);
   actionStep.type = 'agent';
   actionStep.fallback = 'script-failure';
   actionStep.failure_record = failureRecord;
@@ -1432,7 +1520,7 @@ function dispatchAgentRetry(plan: Plan, state: NextState, step: PlanStep, attemp
   state.phase = 'await-step';
   state.pending_fallback = null;
   state.active_child = null;
-  const actionStep = makeActionStep(state, step, state.index, null);
+  const actionStep = makeActionStep(state, step, state.index, null, mintStepUuid(state));
   actionStep.retry = attempt;
   return {
     action: { action: 'run-step', concurrent: false, steps: [actionStep] },
@@ -1449,14 +1537,22 @@ function dispatchLayer(plan: Plan, state: NextState, layerIndex: number, opts: N
   const ids = layers[layerIndex];
   const useWorktree = state.isolation === 'worktree';
   const steps: ActionStep[] = [];
+  // Index-aligned with `steps` (NOT `ids` — a name that resolves to no plan
+  // step is skipped from both), so redispatchPending's parallel branch — which
+  // re-derives the SAME filtered list from state.layer — can zip them back
+  // together by position by position.
+  const uuids: string[] = [];
   for (const id of ids) {
     const s = stepByName(plan, id);
     if (!s) continue;
     state.index += 1;
-    steps.push(makeActionStep(state, s, state.index, useWorktree ? 'worktree' : null));
+    const uuid = newId();
+    uuids.push(uuid);
+    steps.push(makeActionStep(state, s, state.index, useWorktree ? 'worktree' : null, uuid));
   }
   state.layer_index = layerIndex;
   state.layer = ids.slice();
+  state.layer_uuids = uuids;
   state.phase = 'await-step';
   // Defensive: pending_fallback is never SET in parallel mode (§6.4 degrades
   // the fallback to halt), but a fresh layer dispatch supersedes it regardless.
@@ -1495,7 +1591,14 @@ function redispatchPending(plan: Plan, state: NextState, opts: NextOpts): NextRe
       .filter((s): s is PlanStep => s !== undefined);
     const useWorktree = state.isolation === 'worktree';
     let idx = state.index - found.length;
-    const steps = found.map((s) => makeActionStep(state, s, ++idx, useWorktree ? 'worktree' : null));
+    // Zip back by position: dispatchLayer built `layer_uuids` over the SAME
+    // filtered (name resolves to a plan step) list, in the same order. A
+    // next.json written before this field existed (or a plan that changed
+    // shape underneath a parked run) falls back to a fresh mint per member
+    // rather than crashing on a missing entry.
+    const steps = found.map((s, i) =>
+      makeActionStep(state, s, ++idx, useWorktree ? 'worktree' : null, state.layer_uuids?.[i] ?? newId()),
+    );
     state.phase = 'await-step';
     return { action: { action: 'run-step', concurrent: true, steps }, state };
   }
@@ -1517,12 +1620,14 @@ function redispatchPending(plan: Plan, state: NextState, opts: NextOpts): NextRe
       action: {
         action: 'run-step',
         concurrent: false,
-        steps: [makeFallbackStep(state, step, state.index, state.pending_fallback.failure_record)],
+        steps: [
+          makeFallbackStep(state, step, state.index, state.pending_fallback.failure_record, reuseStepUuid(state)),
+        ],
       },
       state,
     };
   }
-  const actionStep = makeActionStep(state, step, state.index, null);
+  const actionStep = makeActionStep(state, step, state.index, null, reuseStepUuid(state));
   // A2 agent-step retries: the "same pending dispatch" idiom applies to a
   // retry-in-flight too — carry the `retry: n` tag through so a `continue`
   // re-emit of a retry attempt (defense-in-depth; §7 continue targets script
@@ -1792,6 +1897,7 @@ function onImproverPhase(plan: Plan, state: NextState, record: NextRecord | null
         iteration_path: state.improve_target ?? '',
         number: 1,
         of: n,
+        step_uuid: mintStepUuid(state),
         ...(plan.frozen_body_files?.length ? { frozen_files: plan.frozen_body_files } : {}),
       },
       state,
@@ -1812,6 +1918,9 @@ function onScriptPhase(plan: Plan, state: NextState, record: NextRecord | null, 
         iteration_path: state.improve_target ?? '',
         number: state.scripts_done + 1,
         of: state.scripts_total,
+        // Each brief in the batch is its own spawn — a fresh identity, never
+        // the just-finished script-creator's uuid.
+        step_uuid: mintStepUuid(state),
         ...(plan.frozen_body_files?.length ? { frozen_files: plan.frozen_body_files } : {}),
       },
       state,
@@ -1836,6 +1945,7 @@ function processImproveQueue(plan: Plan, state: NextState, opts: NextOpts): Next
       action: {
         action: 'run-improver',
         iteration_path: item.iteration_path,
+        step_uuid: mintStepUuid(state),
         ...(plan.frozen_body_files?.length ? { frozen_files: plan.frozen_body_files } : {}),
       },
       state,

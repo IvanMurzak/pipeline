@@ -516,12 +516,24 @@ function emitCompletionEvents(
       kv('has_blocker_delegation', record.outcome === 'blocked-delegating'),
       kv('halt_reason', record.halt_reason ?? null),
       kv('terminal', terminal),
+      // ux-v2 b4: the SAME UUID this step's `iteration.started` carried —
+      // `prev` is the state as persisted right after that dispatch, so
+      // `current_step_uuid` still names it.
+      kv('step_uuid', prev.current_step_uuid ?? null),
     ];
     pushScriptTag(argv, script);
     safeEmit('iteration.completed', argv);
     return;
   }
   if (record.kind === 'layer' && prev.phase === 'await-step') {
+    // ux-v2 b4: zip prev.layer (dispatch-time ids) with prev.layer_uuids
+    // (index-aligned identities minted for the SAME dispatch) so each
+    // completing entry reports the uuid its own `iteration.started` carried.
+    const layerUuidByStepId = new Map<string, string>();
+    (prev.layer ?? []).forEach((id, i) => {
+      const uuid = prev.layer_uuids?.[i];
+      if (uuid) layerUuidByStepId.set(id, uuid);
+    });
     for (const entry of record.results ?? []) {
       const step = plan.steps.find((s) => s.step_id === entry.step_id);
       const argv = [
@@ -532,6 +544,7 @@ function emitCompletionEvents(
         kv('halt_reason', entry.halt_reason ?? null),
         kv('terminal', false),
         kv('step_name', entry.step_id),
+        kv('step_uuid', layerUuidByStepId.get(entry.step_id) ?? null),
       ];
       pushScriptTag(argv, script);
       safeEmit('iteration.completed', argv);
@@ -544,6 +557,7 @@ function emitCompletionEvents(
       kv('iteration_path', mp(prev.improve_target)),
       kv('applied', record.applied === true),
       kv('has_script_brief', (record.script_briefs ?? 0) > 0),
+      kv('step_uuid', prev.current_step_uuid ?? null),
     ]);
     return;
   }
@@ -553,6 +567,7 @@ function emitCompletionEvents(
       kv('iteration_path', mp(prev.improve_target)),
       kv('script_path', record.script_path ?? null),
       kv('outcome', record.outcome ?? null),
+      kv('step_uuid', prev.current_step_uuid ?? null),
     ]);
   }
   // kind 'retro' / 'merge': no per-iteration event. kind 'worktree': the
@@ -600,13 +615,30 @@ function statsNoteRecord(
       })(),
       step_id: prev.current_step_id ?? null,
       outcome: record.outcome,
+      // ux-v2 b4: the SAME uuid this step's `step.started` line carried
+      // (prev is the state persisted right after that dispatch).
+      step_uuid: prev.current_step_uuid ?? null,
       ...tag,
     });
     return;
   }
   if (record.kind === 'layer' && prev.phase === 'await-step') {
+    // ux-v2 b4: zip prev.layer with prev.layer_uuids (see the identical fold
+    // in emitCompletionEvents) so each completing layer member reports the
+    // uuid its own `step.started` line carried.
+    const layerUuidByStepId = new Map<string, string>();
+    (prev.layer ?? []).forEach((id, i) => {
+      const uuid = prev.layer_uuids?.[i];
+      if (uuid) layerUuidByStepId.set(id, uuid);
+    });
     for (const entry of record.results ?? []) {
-      statsAppend(root, runId, { k: 'step.completed', step_id: entry.step_id, outcome: entry.outcome, ...tag });
+      statsAppend(root, runId, {
+        k: 'step.completed',
+        step_id: entry.step_id,
+        outcome: entry.outcome,
+        step_uuid: layerUuidByStepId.get(entry.step_id) ?? null,
+        ...tag,
+      });
     }
     return;
   }
@@ -638,6 +670,9 @@ function statsNoteAction(root: string, runId: string, action: NextAction): void 
         // always sets source_path).
         path: step.source_path,
         step_id: step.step_id,
+        // ux-v2 b4: the row identity this execution keeps from start to
+        // finish, distinct from step_id (the unchanged analytics dimension).
+        step_uuid: step.step_uuid,
         model: step.model,
         effort: step.effort,
         // Additive step_type tag on SCRIPT/PIPELINE/GATE dispatches only
@@ -716,6 +751,9 @@ function emitStartedEvents(
         kv('index', step.index),
         kv('resolved_model', step.model),
         kv('resolved_effort', step.effort),
+        // ux-v2 b4: the row identity this execution keeps from start to
+        // finish — see ActionStep.step_uuid.
+        kv('step_uuid', step.step_uuid),
       ];
       // Additive v5 G5 tag (e7 DEFECT-3): this dispatch re-issues a step that
       // was already dispatched before (a --resume/auto-resume re-entry parked
@@ -744,11 +782,19 @@ function emitStartedEvents(
     // Worktree-scoped runs (P2/b3): the ACTION keeps the worktree target (the
     // improver edits the run's working tree); the EVENT gets the prefix-swapped
     // main path (identity on every other run — 05.1.3).
-    safeEmit('improver.started', [kv('run_id', runId), kv('iteration_path', mapPath(action.iteration_path))]);
+    safeEmit('improver.started', [
+      kv('run_id', runId),
+      kv('iteration_path', mapPath(action.iteration_path)),
+      kv('step_uuid', action.step_uuid),
+    ]);
     return;
   }
   if (action.action === 'run-script-creator') {
-    safeEmit('script_creator.started', [kv('run_id', runId), kv('iteration_path', mapPath(action.iteration_path))]);
+    safeEmit('script_creator.started', [
+      kv('run_id', runId),
+      kv('iteration_path', mapPath(action.iteration_path)),
+      kv('step_uuid', action.step_uuid),
+    ]);
   }
 }
 
