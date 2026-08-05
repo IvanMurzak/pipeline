@@ -47,8 +47,8 @@ afterEach(() => {
 });
 
 describe('pipeline stats backfill', () => {
-  test('no .stats dir yet → exit 0, --json prints an empty-shaped report', () => {
-    const code = runStats(['backfill', '--project', projectRoot, '--json']);
+  test('no .stats dir yet → exit 0, --json prints an empty-shaped report', async () => {
+    const code = await runStats(['backfill', '--project', projectRoot, '--json']);
     expect(code).toBe(0);
     const report = JSON.parse(out.join('')) as BackfillReport;
     expect(report).toEqual({
@@ -62,25 +62,25 @@ describe('pipeline stats backfill', () => {
     });
   });
 
-  test('PIPELINE_STATS_ENABLED=0 → exit 0, disabled message, no report printed', () => {
+  test('PIPELINE_STATS_ENABLED=0 → exit 0, disabled message, no report printed', async () => {
     process.env.PIPELINE_STATS_ENABLED = '0';
-    const code = runStats(['backfill', '--project', projectRoot]);
+    const code = await runStats(['backfill', '--project', projectRoot]);
     expect(code).toBe(0);
     expect(out.join('')).toContain('DISABLED');
   });
 
-  test('unknown flag → exit 2, usage on stderr', () => {
-    const code = runStats(['backfill', '--bogus']);
+  test('unknown flag → exit 2, usage on stderr', async () => {
+    const code = await runStats(['backfill', '--bogus']);
     expect(code).toBe(2);
     expect(out.join('')).toContain('usage:');
   });
 
-  test('--project requires a value → exit 2', () => {
-    const code = runStats(['backfill', '--project']);
+  test('--project requires a value → exit 2', async () => {
+    const code = await runStats(['backfill', '--project']);
     expect(code).toBe(2);
   });
 
-  test('enriches a real tokens:null manager record and prints a human summary by default', () => {
+  test('enriches a real tokens:null manager record and prints a human summary by default', async () => {
     const home = join(sandbox, 'home');
     mkdirSync(home, { recursive: true });
     const now = Date.now();
@@ -137,7 +137,7 @@ describe('pipeline stats backfill', () => {
     process.env.USERPROFILE = home;
     process.env.HOME = home;
     try {
-      const code = runStats(['backfill', '--project', projectRoot]);
+      const code = await runStats(['backfill', '--project', projectRoot]);
       expect(code).toBe(0);
     } finally {
       if (savedHome.USERPROFILE === undefined) delete process.env.USERPROFILE;

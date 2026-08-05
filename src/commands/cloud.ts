@@ -193,6 +193,17 @@ import {
   type RunnerEnrolDeps,
   type ShellRunner,
 } from '../lib/runner-enrol';
+import { telemetrySyncEnabled, TelemetryOutbox } from '../lib/telemetry-outbox';
+import { findHistoryRecords, enqueueHistoryRecords, type HistoryEnqueueResult } from '../lib/telemetry-history';
+import {
+  DEFAULT_MAX_REQUESTS,
+  realUploadFetch,
+  TelemetryUploader,
+  type FlushResult,
+  type UploadFetch,
+  type UploadTarget,
+} from '../lib/telemetry-upload';
+import { recordLastFlush } from '../lib/telemetry-status';
 
 // ---------------------------------------------------------------------------
 // HTTP seam
@@ -278,6 +289,18 @@ export interface CloudDeps {
    *  and waits; a non-TTY prints the assumed default (yes) and resolves
    *  immediately, mirroring `commands/init.ts`'s own `defaultPromptYesNo`. */
   promptYesNo?: (promptText: string) => Promise<boolean>;
+
+  // ---- History backfill (task b13) — OPTIONAL, `realDeps` needs no changes
+  // (defaults to the real, timeout-bounded ingest transport).
+
+  /** The ingest POST transport `enqueueConnectHistory` drains freshly-queued
+   *  history through, immediately after a successful connect —
+   *  `lib/telemetry-upload.ts`'s `UploadFetch`, the SAME seam
+   *  `commands/telemetry-daemon.ts` injects for its own poll cycle. Defaults
+   *  to `realUploadFetch` (timeout-bounded, response body never read). Tests
+   *  inject a scripted fake so no real network call happens; production
+   *  code never needs to set this. */
+  uploadFetch?: UploadFetch;
 }
 
 function realHostname(): string {
@@ -468,6 +491,7 @@ const USAGE =
   '                              [--reauth] [--device] [--json]\n' +
   '                              [--machine-token <token>]\n' +
   '                              [--runner | --no-runner] [--runner-name <name>]\n' +
+  '                              [--no-history]\n' +
   '  Authenticate and bind this project to the cloud control plane. Opens a\n' +
   '  browser by default (one approval, no typed code); falls back to a device\n' +
   '  code when no browser is reachable, or always with --device.\n' +
@@ -477,6 +501,12 @@ const USAGE =
   `  preferring ${MACHINE_TOKEN_ENV}. Combining either with --device is a usage error.\n` +
   '  Writes non-secret slugs to .pipeline/cloud.json; the credential is\n' +
   '  stored separately in a secure per-user location (never in the project).\n' +
+  '\n' +
+  '  On success, every finished run already on disk (.pipeline/.stats/**/\n' +
+  '  runs.jsonl) is queued for upload, org-tagged and marked origin:"local" —\n' +
+  '  so the dashboard is not empty on day one (task b13, 08-user-workflows.md\n' +
+  '  J1). --no-history skips this scan entirely; new runs still stream either\n' +
+  '  way. Check queue/drop status any time with `pipeline stats telemetry`.\n' +
   '\n' +
   '  After connecting, asks "Also run cloud pipelines on this machine?" and,\n' +
   '  if yes, mints + registers + installs this machine as a runner — no\n' +
@@ -508,10 +538,21 @@ export interface ConnectOptions {
   runner: boolean;
   /** Overrides the default runner name (this machine's hostname). */
   runnerName?: string;
+  /** Skip the `.stats/**\/runs.jsonl` history scan/enqueue entirely (task b13,
+   *  `03` F1's own "Opt-outs" line). Live runs still stream — this only
+   *  concerns records that already exist on disk before this connect. */
+  noHistory: boolean;
 }
 
 export function parseConnectArgs(args: string[]): ConnectOptions | { error: string } {
-  const out: ConnectOptions = { reauth: false, device: false, json: false, noRunner: false, runner: false };
+  const out: ConnectOptions = {
+    reauth: false,
+    device: false,
+    json: false,
+    noRunner: false,
+    runner: false,
+    noHistory: false,
+  };
   const takeValue = (flag: string, i: number): string | { error: string } => {
     const v = args[i + 1];
     if (v === undefined || v.startsWith('--')) return { error: `${flag} requires a value` };
@@ -551,6 +592,8 @@ export function parseConnectArgs(args: string[]): ConnectOptions | { error: stri
         if (typeof v !== 'string') return v;
         out.machineToken = v;
       }
+    } else if (a === '--no-history') {
+      out.noHistory = true;
     } else if (a === '--no-runner') {
       out.noRunner = true;
     } else if (a === '--runner') {
@@ -1405,6 +1448,151 @@ function writeBindingAndReport(
 }
 
 // ---------------------------------------------------------------------------
+// History backfill (task b13, `03` F1, `08` J1) — "the dashboard is not
+// empty on day one".
+// ---------------------------------------------------------------------------
+
+/**
+ * After a successful connect, enumerate every finished run already on disk
+ * (`.pipeline/.stats/**\/runs.jsonl`, `lib/telemetry-history.ts`), enqueue
+ * each one — org-tagged, `origin: "local"` — into this project's outbox, and
+ * immediately attempt ONE bounded flush so the dashboard is populated by the
+ * time this command returns, not merely queued for the next hook/`drive`
+ * invocation to notice. `--no-history` skips this entirely; live runs still
+ * stream regardless (`b9`'s journal drain is unaffected by anything here).
+ *
+ * WHY AN INLINE FLUSH IS SAFE HERE, UNLIKE EVERYWHERE ELSE IN THIS PACKAGE.
+ * `telemetry-upload.ts`'s own header is explicit that `flushOnce()` must
+ * never run "in a hook, ... inline in `drive`, ... in any code a pipeline
+ * step awaits" — because a RUN's critical path must never carry network
+ * latency (D2). `pipeline cloud connect` is not a run: it is already a
+ * multi-second, explicitly-awaited, network-bound command (the OAuth
+ * round trip that just completed), and the SAME reasoning already justifies
+ * `pipeline stats telemetry --drain` calling `flushOnce()` synchronously on
+ * request. This is that same category — an explicit, bounded, user-initiated
+ * action — not a hidden cost on a hot path.
+ *
+ * The `TelemetryUploader`'s target is built DIRECTLY from the credential
+ * `connect()` just obtained (never `resolveUploadTarget`, which re-reads the
+ * credential store from disk) — there is nothing stale to re-resolve when the
+ * token is still in hand. `maxRequests` is raised to cover the WHOLE batch
+ * (`chunkByRun` makes one ingest request per distinct run — matrix 6's
+ * 47-record case is 47 requests, comfortably over the uploader's own default
+ * cap of 20) so a single `flushOnce()` call can drain it in one pass, bounded
+ * by that call's own `flushDeadlineMs` (20s default) regardless.
+ *
+ * NEVER throws and NEVER changes `connect`'s exit code (D2). Both halves —
+ * enqueue and flush — are independently best-effort already
+ * (`lib/telemetry-history.ts` for the former, `TelemetryUploader.flushOnce`
+ * for the latter); this wraps the whole step in one more belt-and-braces
+ * `try` so a surprise here degrades to "queued but not yet delivered", which
+ * `pipeline stats telemetry`/`--drain` and the next `pipeline cloud connect`
+ * or `pipeline drive`-spawned daemon both recover on their own — the source
+ * `runs.jsonl` files are untouched by any of this.
+ */
+async function enqueueConnectHistory(
+  deps: CloudDeps,
+  opts: ConnectOptions,
+  auth: ApiAuth,
+): Promise<HistoryEnqueueResult | null> {
+  if (opts.noHistory) return null;
+  if (!telemetrySyncEnabled(deps.env)) return null;
+  const say = (s: string): void => (opts.json ? deps.err(s) : deps.out(s));
+  try {
+    const entries = findHistoryRecords(deps.cwd);
+    if (entries.length === 0) return null;
+    say(`\n  Found ${entries.length} past run${entries.length === 1 ? '' : 's'} in this project.\n`);
+    const outbox = new TelemetryOutbox({ projectRoot: deps.cwd, org: auth.orgSlug, env: deps.env, now: deps.now });
+    const result = enqueueHistoryRecords(entries, (payload) => outbox.enqueueStats(payload));
+    say(`  ↑ uploading history… ${result.enqueued}/${result.found} queued\n`);
+    if (result.skipped > 0) {
+      // Not silent (b13 DoD: "dropped records are reported with a count") —
+      // and not lost either: the source files are untouched, so this count
+      // is retried whole on the next connect. `pipeline stats telemetry`
+      // reports the durable drop/quarantine counters if any of THOSE also
+      // fired along the way.
+      say(
+        `  (${result.skipped} not queued this pass — retried automatically on the next ` +
+          '`pipeline cloud connect`, or see `pipeline stats telemetry`)\n',
+      );
+    }
+    if (result.enqueued > 0) await flushConnectHistory(deps, auth, outbox, result.enqueued, say);
+    return result;
+  } catch {
+    return null; // D2 — see this function's doc comment.
+  }
+}
+
+/** One bounded, best-effort `flushOnce()` right after `enqueueConnectHistory`
+ *  queues records — see that function's doc comment for why this is safe
+ *  here. Never throws; a failure just leaves the records queued for
+ *  `pipeline stats telemetry --drain` or the next daemon poll. */
+async function flushConnectHistory(
+  deps: CloudDeps,
+  auth: ApiAuth,
+  outbox: TelemetryOutbox,
+  queuedCount: number,
+  say: (s: string) => void,
+): Promise<void> {
+  try {
+    const target: UploadTarget = {
+      server: auth.server,
+      org: auth.orgSlug,
+      ...(auth.orgId ? { orgId: auth.orgId } : {}),
+      token: auth.accessToken,
+    };
+    const uploader = new TelemetryUploader({
+      outbox,
+      target,
+      env: deps.env,
+      now: deps.now,
+      fetch: deps.uploadFetch ?? realUploadFetch,
+      maxRequests: Math.max(DEFAULT_MAX_REQUESTS, queuedCount),
+    });
+    const result: FlushResult = await uploader.flushOnce();
+    // Same gating as `commands/telemetry-daemon.ts`'s `pollProjectOnce` —
+    // durable evidence a LATER `pipeline stats telemetry` can read, even
+    // though this attempt happened inside `connect` rather than the daemon.
+    if (
+      result.outcome === 'retry' ||
+      result.outcome === 'quarantined' ||
+      result.outcome === 'deadline' ||
+      result.outcome === 'error'
+    ) {
+      recordLastFlush(deps.cwd, result, deps.now());
+    }
+    if (result.outcome === 'sent' && result.records_sent >= queuedCount) {
+      say(`  ✓ delivered — the dashboard is up to date.\n`);
+    } else if (result.records_sent > 0 || result.records_quarantined > 0) {
+      say(
+        `  ↑ delivered ${result.records_sent}/${queuedCount} so far` +
+          (result.records_quarantined > 0 ? ` (${result.records_quarantined} rejected, set aside)` : '') +
+          ' — the rest will sync automatically, or run `pipeline stats telemetry --drain`.\n',
+      );
+    } else {
+      say('  (could not reach the server yet — will sync automatically, or run `pipeline stats telemetry --drain`.)\n');
+    }
+  } catch {
+    say('  (could not reach the server yet — will sync automatically, or run `pipeline stats telemetry --drain`.)\n');
+  }
+}
+
+/** The `08` J1 footer — always printed after a successful connect (history
+ *  attempted or not), so the on/off state and the two opt-outs are visible
+ *  in the SAME screen the connect result already printed to. */
+function printConnectTelemetryFooter(deps: CloudDeps, opts: ConnectOptions): void {
+  const say = (s: string): void => (opts.json ? deps.err(s) : deps.out(s));
+  const on = telemetrySyncEnabled(deps.env);
+  say(`\n  Telemetry: ${on ? 'on — runs stream to your dashboard.' : 'off (PIPELINE_SYNC_LOCAL_STATS=0).'}\n`);
+  if (on) {
+    say(
+      '  Opt out of history: --no-history   ·   Opt out entirely: PIPELINE_SYNC_LOCAL_STATS=0\n',
+    );
+  }
+  say('  Check anytime: pipeline stats telemetry\n');
+}
+
+// ---------------------------------------------------------------------------
 // The reusable auth ladder (extracted for task a9)
 // ---------------------------------------------------------------------------
 
@@ -1648,6 +1836,11 @@ async function connect(deps: CloudDeps, opts: ConnectOptions, machineToken: stri
   const { machineToken: _rawMachineTokenFlag, ...rest } = opts;
   const auth = await authenticateApi(deps, { ...rest, ...(machineToken !== undefined ? { machineToken } : {}) });
   const code = writeBindingAndReport(deps, opts, auth.server, auth.credentialPath, auth.orgSlug, auth.now);
+  // task b13: layered on an ALREADY-successful connect, same posture as
+  // runner enrolment below — never changes the exit code (see
+  // `enqueueConnectHistory`'s own doc comment, D2).
+  await enqueueConnectHistory(deps, opts, auth);
+  printConnectTelemetryFooter(deps, opts);
   // task a6: enrolment is layered on an ALREADY-successful connect and never
   // changes its exit code (see `maybeEnrolRunner`).
   await maybeEnrolRunner(deps, opts, auth.server, auth.accessToken, auth.orgId);

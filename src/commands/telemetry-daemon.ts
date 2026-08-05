@@ -91,6 +91,7 @@ import { telemetryDir, telemetrySyncEnabled, TelemetryOutbox } from '../lib/tele
 import { cloudJsonPath, realFs, type CloudFs } from '../lib/cloud-config';
 import { resolveUploadTarget, TelemetryUploader, type UploadFetch, type UploadTarget } from '../lib/telemetry-upload';
 import type { FetchLike } from '../lib/credential-refresh';
+import { recordLastFlush } from '../lib/telemetry-status';
 
 // ---------------------------------------------------------------------------
 // The lock path — the ONE thing the hook must agree with this module about.
@@ -244,6 +245,27 @@ export function acquireDaemonLock(lockPath: string, now: number, selfPid: number
   }
   if (tryCreateDaemonLock(lockPath, selfPid, now)) return { action: 'acquired' };
   return { action: 'skip' };
+}
+
+export interface DaemonStatus {
+  /** The lock names a live, non-stale pid — see `isDaemonLockStale`'s own
+   *  criteria (dead pid, or older than `LOCK_STALE_AGE_MS`). */
+  active: boolean;
+  pid: number | null;
+}
+
+/**
+ * READ-ONLY daemon-liveness check for `pipeline stats telemetry` (`b13`, `08`
+ * J6's "streaming state"). Deliberately NOT `acquireDaemonLock` — that
+ * function's whole contract is "create the lock if none exists", which would
+ * make a stats-reporting command falsely claim ownership of a daemon slot it
+ * never spawned. This reuses the SAME staleness criteria
+ * (`isDaemonLockStale`) without ever writing to `lockPath`.
+ */
+export function daemonStatus(lockPath: string, now: number = Date.now()): DaemonStatus {
+  const rec = readDaemonLockRecord(lockPath);
+  if (rec === null || isDaemonLockStale(rec, now)) return { active: false, pid: null };
+  return { active: true, pid: rec.pid };
 }
 
 function finalizeDaemonLock(lockPath: string, pid: number, now: number): void {
@@ -486,6 +508,20 @@ export async function pollProjectOnce(deps: TelemetryDaemonPollDeps, projectRoot
     ...(deps.fetch !== undefined ? { fetch: deps.fetch } : {}),
   });
   const result = await uploader.flushOnce();
+  // `b13`: persist the ONLY evidence `pipeline stats telemetry`'s "Last
+  // error" line has to read — see `lib/telemetry-status.ts`'s header, point
+  // 3. Gated to real-problem outcomes only: 'sent'/'idle'/'disabled' carry
+  // nothing worth overwriting a genuine prior error with, and 'backoff'
+  // means no NEW request was even attempted this cycle (nothing new to
+  // record — the prior entry already describes the ongoing issue).
+  if (
+    result.outcome === 'retry' ||
+    result.outcome === 'quarantined' ||
+    result.outcome === 'deadline' ||
+    result.outcome === 'error'
+  ) {
+    recordLastFlush(projectRoot, result, deps.now());
+  }
   return result.outcome === 'idle' ? 'idle' : 'active';
 }
 
