@@ -324,6 +324,21 @@ describe('pipeline init — happy path', () => {
     expect(h.driveCalls.length).toBe(1);
   });
 
+  test('mint-site conformance (ux-v2 b2): the starter run\'s --run-id is newId(), not `init-<ts36>-<rand6>`', async () => {
+    const proj = tempProject();
+    const h = harness();
+    await runInit(['--dir', proj, '--run'], h.deps);
+    expect(h.driveCalls.length).toBe(1);
+    const args = h.driveCalls[0].args;
+    const runId = args[args.indexOf('--run-id') + 1];
+    expect(runId).not.toMatch(/^init-/);
+    expect(runId).toHaveLength(36);
+    // ver = 0b0111 (nibble 7), var = 0b10 — RFC 9562 §5.7 UUIDv7, decoded at
+    // the bit level exactly like apps/pipeline-cli/tests/ids.test.ts.
+    expect(Number.parseInt(runId.slice(14, 16), 16) >>> 4).toBe(0b0111);
+    expect(Number.parseInt(runId.slice(19, 21), 16) >>> 6).toBe(0b10);
+  });
+
   test('declining the prompt does not run, and suggests `pipeline run <template>`', async () => {
     const proj = tempProject();
     const h = harness({ promptAnswer: false });

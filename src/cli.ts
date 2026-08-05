@@ -22,6 +22,7 @@ import { runRelease } from './commands/release';
 import { runStep } from './commands/step-run';
 import { runHash } from './commands/hash';
 import { runClone } from './commands/clone';
+import { runId } from './commands/id';
 
 /**
  * Single-sourced from package.json — resolved relative to THIS file's own
@@ -55,6 +56,12 @@ function usage(): string {
     'Usage: pipeline <command> [options]',
     '',
     'Commands:',
+    '  id [--json]',
+    '      Mint ONE fresh id — RFC 9562 UUIDv7 (src/lib/ids.ts#newId), the ONLY',
+    '      sanctioned way to generate a run id (or a child_run_id) anywhere in',
+    '      this product. plain: the id on one line. --json: {"id":"<id>"}.',
+    '      Exit 0 always (2 on an unknown flag).',
+    '',
     '  init [<template>] [--no-plugin] [--no-run] [--run] [--yes|-y]',
     '       [--dir <path>] [--json]',
     '      Local-first setup in one command: install the Claude Code plugin,',
@@ -350,6 +357,8 @@ async function main(argv: string[]): Promise<number> {
       return runHash(rest);
     case 'clone':
       return runClone(rest);
+    case 'id':
+      return runId(rest);
     case 'init': {
       // Lazy import (mirrors `drive`/`gc`): `init` composes clone + ui +
       // drive + a `claude` shell-out — keep the hot `next` loop's per-spawn

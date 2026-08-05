@@ -251,26 +251,48 @@ function mainCheckoutOf(dir: string): string {
   }
 }
 
-/** A run id as `/pipeline:run` mints it: 12 lowercase hex chars
- *  (`randomBytes(6).toString('hex')`). */
-const RUN_ID_SHAPE = /^[0-9a-f]{12}$/;
-/** Maximal hex runs in the transcript — a run id can only ever occur inside
- *  one of these. */
+/** A run id in either shape this plugin has ever minted:
+ *
+ *  - a canonical 36-char UUID — every mint site since ux-v2 b1/b2 (`newId()`
+ *    mints v7, `hookIdFromToolUseId()` v5). Version-agnostic on purpose: this
+ *    is a lookup key, not a conformance check, and both classes land in
+ *    `.stats` as ordinary run records;
+ *  - the pre-b2 12-lowercase-hex id (`randomBytes(6).toString('hex')`), still
+ *    present in every `.stats` tree written before the migration.
+ *
+ *  Anything else (a hand-written or third-party id) takes the `includes`
+ *  fallback in `hintMentionsRun` rather than silently failing correlation. */
+const UUID_SHAPE_SRC = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const RUN_ID_SHAPE = new RegExp(`^(?:${UUID_SHAPE_SRC}|[0-9a-f]{12})$`);
+/** Maximal hex runs in the transcript — a 12-hex run id can only ever occur
+ *  inside one of these. */
 const HEX_RUN = /[0-9a-f]{12,}/g;
+/** Maximal hex-or-hyphen runs — the same containment argument for a UUID,
+ *  whose every character is drawn from that class. */
+const UUID_RUN = /[0-9a-f-]{36,}/g;
+const UUID_WINDOW = new RegExp(`^${UUID_SHAPE_SRC}$`);
 
 /**
- * Every 12-hex window of the hint transcript, precomputed ONCE.
+ * Every 12-hex AND every UUID-shaped window of the hint transcript,
+ * precomputed ONCE.
  *
  * The correlation test is "does this record's run_id occur literally in the
  * hint", and the obvious spelling — `hintText.includes(runId)` per record —
  * rescans a possibly multi-megabyte string for every candidate, which is where
  * a Stop-rung pass with hundreds of unenriched records spends its budget.
  *
- * The index is EXACT for hex-shaped ids, not an approximation: a run id is all
- * hex, so any literal occurrence lies inside some maximal hex run, and taking
- * every 12-char window of every such run reproduces `includes` precisely
- * (including ids that start mid-hash). Most hex runs are exactly 12 chars, so
- * this is ~one entry each; a 40-char sha contributes 29.
+ * The index is EXACT for both shapes, not an approximation. The argument is
+ * the same in each case: every character of the id is drawn from one character
+ * class, so any literal occurrence lies wholly inside some MAXIMAL run of that
+ * class, and enumerating every window of the right width over every such run
+ * reproduces `includes` precisely — including ids that start mid-hash, and
+ * including two UUID-shaped windows that OVERLAP (which they can, at a stride
+ * of ≥28; a plain non-overlapping global regex scan would miss the second).
+ *
+ * Cost stays ~one entry per occurrence in practice: an isolated UUID is a
+ * 36-char run yielding one window, a 40-char sha yields 29 twelve-char windows
+ * plus 5 cheaply-rejected UUID windows, and a long `-----` rule yields windows
+ * that the shape test rejects on their first character.
  *
  * Returns null when the text is absent — callers then have no hint at all.
  */
@@ -281,7 +303,37 @@ function indexHintRunIds(hintText: string | null): Set<string> | null {
     const run = match[0];
     for (let i = 0; i + 12 <= run.length; i++) index.add(run.slice(i, i + 12));
   }
+  for (const match of hintText.matchAll(UUID_RUN)) {
+    const run = match[0];
+    for (let i = 0; i + 36 <= run.length; i++) {
+      // A UUID has a hyphen at offset 8, so one char compare rejects almost
+      // every offset before the shape test runs. Exactness-preserving: it can
+      // only skip windows UUID_WINDOW would have rejected anyway.
+      if (run.charCodeAt(i + 8) !== 45) continue;
+      const window = run.slice(i, i + 36);
+      if (UUID_WINDOW.test(window)) index.add(window);
+    }
+  }
   return index;
+}
+
+/** Which arm of `hintMentionsRun` each per-record correlation check took,
+ *  counted since the last `resetCorrelationProbe()`.
+ *
+ *  `indexed` — answered by an O(1) lookup in the precomputed window index.
+ *  `scanned` — fell back to a full `hintText.includes(runId)` rescan of the
+ *  whole (possibly multi-megabyte) transcript, which is the cost the index
+ *  exists to avoid.
+ *
+ *  Exported because "the index is exercised for UUIDv7 ids" is otherwise an
+ *  unfalsifiable claim: `includes` and the index return the SAME answer, so
+ *  no assertion on the report can tell the arms apart. Two integer
+ *  increments per record; the numbers are diagnostics, never control flow. */
+export const correlationProbe = { indexed: 0, scanned: 0 };
+
+export function resetCorrelationProbe(): void {
+  correlationProbe.indexed = 0;
+  correlationProbe.scanned = 0;
 }
 
 /** Whether the hint demonstrably mentions this run. Ids that do not match the
@@ -289,7 +341,11 @@ function indexHintRunIds(hintText: string | null): Set<string> | null {
  *  working rather than silently failing correlation. */
 function hintMentionsRun(hintText: string | null, index: Set<string> | null, runId: string): boolean {
   if (hintText === null) return false;
-  if (RUN_ID_SHAPE.test(runId)) return index !== null && index.has(runId);
+  if (RUN_ID_SHAPE.test(runId)) {
+    correlationProbe.indexed++;
+    return index !== null && index.has(runId);
+  }
+  correlationProbe.scanned++;
   return hintText.includes(runId);
 }
 

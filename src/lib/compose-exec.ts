@@ -149,7 +149,17 @@ export function rootRunTree(pipelineRoot: string, runId: string): RunTreeRecord 
 /** Deterministic child run id for one parent `type: pipeline` dispatch:
  *  `<parent_run_id>-<step_id>-<dispatch_index>`. Deterministic so a
  *  crash-resume of the same pending dispatch re-enters the SAME child run;
- *  index-keyed so a graph loop-back (a NEW dispatch) starts a FRESH one. */
+ *  index-keyed so a graph loop-back (a NEW dispatch) starts a FRESH one.
+ *
+ *  ux-v2 b2 (identity audit): deliberately NOT routed through `newId()`.
+ *  This value is a LOOKUP KEY, not a row identity — `registerChildRun` /
+ *  `readRunTree` / `rootRunTree` all re-derive it from `(parentRunId, stepId,
+ *  dispatchIndex)` to find (or re-enter) an EXISTING child run; a resumed
+ *  process can only recompute a key it can also re-derive, and a random
+ *  mint has no derivation. Swapping this for `newId()` would break exactly
+ *  the crash-resume idempotency this function exists for: a re-run of the
+ *  same pending dispatch would mint a NEW id instead of finding the run it
+ *  already started. Keep deriving. */
 export function childRunIdFor(parentRunId: string, stepId: string, dispatchIndex: number): string {
   const safe = stepId.replace(/[^A-Za-z0-9._-]+/g, '_');
   return `${parentRunId}-${safe}-${dispatchIndex}`;

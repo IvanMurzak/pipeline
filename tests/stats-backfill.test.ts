@@ -7,7 +7,13 @@ import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { backfillProject, DEFAULT_BACKFILL_WINDOW_MS } from '../src/lib/stats-backfill';
+import {
+  backfillProject,
+  correlationProbe,
+  DEFAULT_BACKFILL_WINDOW_MS,
+  resetCorrelationProbe,
+} from '../src/lib/stats-backfill';
+import { newId } from '../src/lib/ids';
 import { encodeClaudeProjectDir } from '../../pipeline-ui/transcripts';
 import type { RunRecord } from '../src/lib/stats';
 
@@ -549,5 +555,135 @@ describe('hint correlation index', () => {
     const report = backfillProject(projectRootFor(), { transcriptHint: transcript });
     expect(report.enriched).toEqual([]);
     expect(report.transcript_pruned).toEqual(['ffffffffffff']);
+  });
+
+  // -------------------------------------------------------------------------
+  // ux-v2 b3 — UUIDv7 ids must take the INDEX, not the per-record rescan.
+  //
+  // This was never a correctness bug: `hintMentionsRun`'s fallback arm is
+  // `hintText.includes(runId)`, the exact semantic the index reproduces, so
+  // both arms return the same answer. That is precisely why an assertion on
+  // `report.enriched` cannot tell them apart, and why `correlationProbe`
+  // exists — a claim that "the index is exercised" is otherwise untestable.
+  // -------------------------------------------------------------------------
+
+  /** A hint transcript that mentions `runId` in its text, sized so a rescan is
+   *  visibly more expensive than a lookup. */
+  function writeHintMentioning(runIds: string[], name: string, padKb = 0): string {
+    const dir = join(home, '.claude', 'projects', encodeClaudeProjectDir(projectRootFor()));
+    mkdirSync(dir, { recursive: true });
+    const transcript = join(dir, name);
+    const now = Date.now();
+    const mid = new Date(now - 15_000).toISOString();
+    const pad = padKb > 0 ? 'lorem ipsum dolor sit amet '.repeat((padKb * 1024) / 27) : '';
+    let body =
+      entry(mid, {
+        role: 'assistant',
+        usage: { input_tokens: 11, output_tokens: 3, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        content: [use('t1', 'Read', { file_path: '/x' })],
+      }) + entry(mid, { role: 'user', content: [okResult('t1')] });
+    if (pad) body += entry(mid, { role: 'assistant', content: [{ type: 'text', text: pad }] });
+    for (const runId of runIds) {
+      body += entry(mid, { role: 'assistant', content: [{ type: 'text', text: `run ${runId} done` }] });
+    }
+    writeFileSync(transcript, body, 'utf8');
+    return transcript;
+  }
+
+  test('a UUIDv7 run id correlates AND is answered from the index, never a rescan', () => {
+    const runId = newId();
+    expect(runId).toHaveLength(36);
+    const rec = baseRecord({ run_id: runId, runner: 'headless', pipeline: 'demo' });
+    writeRuns([rec]);
+    const transcript = writeHintMentioning([runId], 'uuidv7.jsonl');
+
+    resetCorrelationProbe();
+    const report = backfillProject(projectRootFor(), { transcriptHint: transcript });
+
+    // Correctness: correlation still holds (the fold ran against the hint).
+    expect(report.enriched).toEqual([runId]);
+    // Performance — the actual b3 claim: the fast path was TAKEN.
+    expect(correlationProbe).toEqual({ indexed: 1, scanned: 0 });
+  });
+
+  test('a UUIDv5 (hook-derived) run id takes the index too — the shape is version-agnostic', () => {
+    // hookIdFromToolUseId mints v5 for bypass spawns; those records land in
+    // .stats exactly like v7 ones and must not fall off the fast path.
+    const runId = '0f8c2b40-1a3d-5e6f-8a9b-0c1d2e3f4a5b';
+    const rec = baseRecord({ run_id: runId, runner: 'headless', pipeline: 'demo' });
+    writeRuns([rec]);
+    const transcript = writeHintMentioning([runId], 'uuidv5.jsonl');
+
+    resetCorrelationProbe();
+    expect(backfillProject(projectRootFor(), { transcriptHint: transcript }).enriched).toEqual([runId]);
+    expect(correlationProbe).toEqual({ indexed: 1, scanned: 0 });
+  });
+
+  test('a UUIDv7 ABSENT from the hint is still (correctly) rejected by the index', () => {
+    const rec = baseRecord({ run_id: newId(), runner: 'headless', pipeline: 'demo' });
+    writeRuns([rec]);
+    const transcript = writeHintMentioning([newId()], 'other-uuid.jsonl');
+
+    resetCorrelationProbe();
+    const report = backfillProject(projectRootFor(), { transcriptHint: transcript });
+    expect(report.enriched).toEqual([]);
+    expect(report.transcript_pruned).toEqual([rec.run_id]);
+    expect(correlationProbe).toEqual({ indexed: 1, scanned: 0 });
+  });
+
+  test('every id shape on the fast path; only a genuinely shapeless id rescans', () => {
+    // One pass, four records: v7, v5, legacy 12-hex — indexed; a hand-written
+    // legacy id — the one remaining rescan, kept on purpose so a custom id
+    // never silently fails correlation.
+    const v7 = newId();
+    const v5 = '0f8c2b40-1a3d-5e6f-8a9b-0c1d2e3f4a5b';
+    const hex12 = 'abcdef012345';
+    const custom = 'my-own-run-id';
+    writeRuns([v7, v5, hex12, custom].map((run_id) => baseRecord({ run_id, runner: 'headless', pipeline: 'demo' })));
+    const transcript = writeHintMentioning([v7, v5, hex12, custom], 'mixed.jsonl');
+
+    resetCorrelationProbe();
+    const report = backfillProject(projectRootFor(), { transcriptHint: transcript });
+    expect(report.enriched.sort()).toEqual([v7, v5, hex12, custom].sort());
+    expect(correlationProbe).toEqual({ indexed: 3, scanned: 1 });
+  });
+
+  test('the index still reproduces `includes` EXACTLY for UUIDs (incl. overlapping/embedded)', () => {
+    // The index is a claim of exactness, not an approximation, so the awkward
+    // cases have to agree with `includes`:
+    //   - a UUID starting mid-run, where the preceding 28 chars are themselves
+    //     UUID-shaped (two overlapping windows — a non-overlapping global regex
+    //     scan would find only the first);
+    //   - a UUID glued to surrounding hex with no delimiter.
+    const first = '11111111-1111-1111-1111-1111';
+    const overlapped = '22222222-2222-2222-2222-222222222222';
+    const embedded = 'aabbccdd-eeff-7011-8022-334455667788';
+    const rec = baseRecord({ run_id: overlapped, runner: 'headless', pipeline: 'demo' });
+    const rec2 = baseRecord({ run_id: embedded, runner: 'headless', pipeline: 'demo' });
+    writeRuns([rec, rec2]);
+    const dir = join(home, '.claude', 'projects', encodeClaudeProjectDir(projectRootFor()));
+    mkdirSync(dir, { recursive: true });
+    const transcript = join(dir, 'adversarial.jsonl');
+    const mid = new Date(Date.now() - 15_000).toISOString();
+    const blob = `${first}${overlapped} and deadbeef${embedded}cafe`;
+    // Sanity: this is exactly the shape the naive scan gets wrong.
+    expect(blob.includes(overlapped)).toBe(true);
+    expect(blob.includes(embedded)).toBe(true);
+    writeFileSync(
+      transcript,
+      entry(mid, {
+        role: 'assistant',
+        usage: { input_tokens: 4, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        content: [use('t1', 'Read', { file_path: '/x' })],
+      }) +
+        entry(mid, { role: 'user', content: [okResult('t1')] }) +
+        entry(mid, { role: 'assistant', content: [{ type: 'text', text: blob }] }),
+      'utf8',
+    );
+
+    resetCorrelationProbe();
+    const report = backfillProject(projectRootFor(), { transcriptHint: transcript });
+    expect(report.enriched.sort()).toEqual([overlapped, embedded].sort());
+    expect(correlationProbe).toEqual({ indexed: 2, scanned: 0 });
   });
 });

@@ -45,6 +45,7 @@ import { findTemplate, copyTemplateTree, formatTemplateList, TEMPLATES } from '.
 import { DEFAULT_SERVER, SERVER_ENV } from '../lib/cloud-config';
 import { computePlan } from '../lib/plan';
 import { runDrive, type DriveDeps } from './drive';
+import { newId } from '../lib/ids';
 
 // ---------------------------------------------------------------------------
 // Args
@@ -436,7 +437,9 @@ async function runStarter(root: string, deps: InitDeps): Promise<RunOutcome> {
   const first = plan.steps[0];
   if (!first) return { ok: false, detail: 'the starter pipeline has no steps' };
 
-  const runId = `init-${deps.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  // THE mint point (ux-v2 b2): every run id in the plugin comes from newId(),
+  // an RFC 9562 UUIDv7 — never a bespoke `init-<ts36>-<rand6>` format.
+  const runId = newId();
   const padWidth = Math.max(14, ...plan.steps.map((s) => s.step_id.length + 3));
   const startedAt = new Map<string, number>();
   let lastFailureDetail: string | null = null;

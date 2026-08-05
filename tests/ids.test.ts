@@ -40,7 +40,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createIdGenerator, newId } from '../src/lib/ids';
+import { createIdGenerator, newId, uuidv5, hookIdFromToolUseId, NAMESPACE_TOOL_USE } from '../src/lib/ids';
 
 const CLI_ROOT = resolve(import.meta.dir, '..');
 const IDS_SRC = join(CLI_ROOT, 'src', 'lib', 'ids.ts');
@@ -411,4 +411,135 @@ describe('the --target=node bundle', () => {
     },
     120_000,
   );
+});
+
+// ── 7. UUIDv5 (RFC 9562 §5.5) — derivation, not minting (ux-v2 b2) ──────────
+//
+// `uuidv5` is additive: it exists so `hooks/analytics_relay.ts` can derive a
+// DETERMINISTIC id from `tool_use_id` (see `hookIdFromToolUseId` below and
+// `tests/hook-bypass-id-determinism.test.ts` in apps/pipeline-ui for the
+// cross-PROCESS version of the determinism check — calling a function twice
+// in one test process proves less than it looks like it proves).
+//
+// CROSS-REPO CONTRACT: `@baizor/pipeline-protocol` (ux-v2 `e2`) ships an
+// INDEPENDENT UUIDv5 implementation for the server-derived `manager` /
+// `step:path:*` step classes (`04-subsystem-rules.md` §2). Both
+// implementations must produce byte-identical output for the same
+// (name, namespace) pair — they are pinned to the SAME external ground
+// truth below (the RFC 4122/9562 worked example, independently reproducible
+// via Python's `uuid.uuid5(uuid.NAMESPACE_DNS, "www.example.com")`) rather
+// than to each other, and the `manager`/`step:path:` vectors exist so a
+// change on either side is caught without the two repos sharing code.
+
+describe('uuidv5 (RFC 9562 §5.5) — RFC ground-truth vector', () => {
+  test('the RFC 4122/9562 worked example: DNS namespace + "www.example.com"', () => {
+    // namespace DNS = 6ba7b810-9dad-11d1-80b4-00c04fd430c8 (RFC 9562 Appendix A).
+    // Cross-checked against Python's uuid.uuid5(uuid.NAMESPACE_DNS,
+    // "www.example.com") and an independent node:crypto SHA-1 computation.
+    expect(uuidv5('www.example.com', '6ba7b810-9dad-11d1-80b4-00c04fd430c8')).toBe(
+      '2ed6657d-e927-568b-95e1-2665a8aea6a2',
+    );
+  });
+
+  test('output carries ver = 0b0101 (nibble 5) and var = 0b10', () => {
+    const id = uuidv5('anything', '6ba7b810-9dad-11d1-80b4-00c04fd430c8');
+    const b = bytesOf(id);
+    expect(versionNibble(b)).toBe(0b0101);
+    expect(variantBits(b)).toBe(0b10);
+  });
+
+  test('is a pure function: same (name, namespace) in, same id out, every time', () => {
+    const ns = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const first = uuidv5('stable-name', ns);
+    for (let i = 0; i < 50; i++) expect(uuidv5('stable-name', ns)).toBe(first);
+  });
+
+  test('different names under the same namespace never collide (spot check)', () => {
+    const ns = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const ids = new Set(Array.from({ length: 200 }, (_, i) => uuidv5(`name-${i}`, ns)));
+    expect(ids.size).toBe(200);
+  });
+});
+
+describe('uuidv5 argument order (name, namespace) — NOT cosmetic', () => {
+  // 04-subsystem-rules.md §2.1 pins the call shape `uuidv5("manager", run_uuid)`
+  // and records a REAL prior bug from getting it backwards.
+  const RUN_UUID = '019fc762-5762-7000-a9bf-922ed8fa00be';
+
+  test('correct order succeeds: uuidv5("manager", run_uuid)', () => {
+    expect(() => uuidv5('manager', RUN_UUID)).not.toThrow();
+  });
+
+  test('reversed order throws TypeError(\'Invalid UUID\') — the exact prior bug', () => {
+    // uuidv5(run_uuid, "manager"): "manager" is not a UUID, so it cannot be
+    // a namespace. This is the taskflow's recorded regression, reproduced
+    // and pinned so it can never silently return again.
+    expect(() => uuidv5(RUN_UUID, 'manager')).toThrow(TypeError);
+    expect(() => uuidv5(RUN_UUID, 'manager')).toThrow('Invalid UUID');
+  });
+
+  test('a malformed namespace (wrong dash positions, non-hex, wrong length) always throws', () => {
+    for (const bad of ['', 'not-a-uuid', RUN_UUID.replace(/-/g, ''), RUN_UUID.slice(0, 35), `${RUN_UUID}x`]) {
+      expect(() => uuidv5('name', bad)).toThrow(TypeError);
+    }
+  });
+});
+
+describe('uuidv5 — server-derived step-class vectors (parity with @baizor/pipeline-protocol e2)', () => {
+  // These pin the EXACT inputs 04-subsystem-rules.md §2 names for the two
+  // server-derived step classes, over a fixed run UUID, so pipeline-protocol's
+  // independent implementation can be checked against these same numbers.
+  const RUN_UUID = '019fc762-5762-7000-a9bf-922ed8fa00be';
+
+  test('"manager" class: uuidv5("manager", run_uuid)', () => {
+    expect(uuidv5('manager', RUN_UUID)).toBe('6f9a18f1-018b-5d3e-a60e-8865d5f9d110');
+  });
+
+  test('"step:path:*" class: uuidv5("step:path:<iterationPath>", run_uuid)', () => {
+    expect(uuidv5('step:path:/abs/example/.pipeline/demo/steps/01-x.md', RUN_UUID)).toBe(
+      '13deb24c-d758-5425-a40a-1fce371ff1e9',
+    );
+  });
+
+  test('idempotent over re-ingest: computing either vector twice never drifts', () => {
+    expect(uuidv5('manager', RUN_UUID)).toBe(uuidv5('manager', RUN_UUID));
+  });
+});
+
+// ── 8. hookIdFromToolUseId — the ONE CLI-side v5 caller ──────────────────────
+
+describe('hookIdFromToolUseId (hooks/analytics_relay.ts bypassRunIdFromToolUseId)', () => {
+  test('pinned test vector', () => {
+    expect(hookIdFromToolUseId('toolu_01H8XJZ7K9M2NPQR3STUVWXYZ0')).toBe(
+      '5e429d42-e46c-5bfb-9fb4-6d56bae76e01',
+    );
+  });
+
+  test('is exactly uuidv5(toolUseId, NAMESPACE_TOOL_USE)', () => {
+    expect(hookIdFromToolUseId('toolu_abc')).toBe(uuidv5('toolu_abc', NAMESPACE_TOOL_USE));
+  });
+
+  test('carries ver = 0b0101 (nibble 5), never 0b0111 (newId()\'s nibble 7)', () => {
+    const b = bytesOf(hookIdFromToolUseId('toolu_any'));
+    expect(versionNibble(b)).toBe(0b0101);
+    expect(variantBits(b)).toBe(0b10);
+  });
+
+  test('deterministic within a process: same tool_use_id, same id, every call', () => {
+    const first = hookIdFromToolUseId('toolu_repeat_check');
+    for (let i = 0; i < 20; i++) expect(hookIdFromToolUseId('toolu_repeat_check')).toBe(first);
+  });
+
+  test('different tool_use_ids never collide (spot check)', () => {
+    const ids = new Set(Array.from({ length: 200 }, (_, i) => hookIdFromToolUseId(`toolu_${i}`)));
+    expect(ids.size).toBe(200);
+  });
+
+  // NOTE: the test that actually matters for the DoD — "a PreToolUse/
+  // PostToolUse pair for the same tool_use_id still resolves to the same
+  // id" across two SEPARATE PROCESSES with no shared state — lives in
+  // apps/pipeline-ui/tests/hook-bypass-id-determinism.test.ts. A same-process
+  // determinism test (above) is necessary but not sufficient: it would pass
+  // even if the real hook relied on in-process module state that does not
+  // survive across the two independent hook invocations Claude Code performs.
 });

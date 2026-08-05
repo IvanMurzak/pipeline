@@ -2,9 +2,22 @@
 //
 //   const runId = newId();   // "019fc762-5762-7000-a9bf-922ed8fa00be"
 //
-// ONE FUNCTION, ONE FORMAT: `newId()` returns an RFC 9562 §5.7 UUIDv7. There is
-// no second mint site, no per-call format argument, and — deliberately — no
-// runtime capability branch. See "WHY HAND-ROLLED" below.
+// ONE FUNCTION, ONE FORMAT FOR MINTING: `newId()` returns an RFC 9562 §5.7
+// UUIDv7. There is no second mint site, no per-call format argument, and —
+// deliberately — no runtime capability branch. See "WHY HAND-ROLLED" below.
+//
+// This file also hosts `uuidv5()` (RFC 9562 §5.5) — a DERIVATION, not a mint.
+// It is additive, added by ux-v2 `b2`, for exactly one CLI-side caller:
+// `hooks/analytics_relay.ts`'s `bypassRunIdFromToolUseId()` needs the SAME id
+// out of PreToolUse and PostToolUse for one `tool_use_id`, computed twice, in
+// two separate hook invocations, with NO shared state — the one case in this
+// product where determinism beats randomness. See `hookIdFromToolUseId()`
+// below. The SERVER-side v5 classes (`manager`, `step:path:*` — `04
+// -subsystem-rules.md` §2) are a separate implementation living in
+// `@baizor/pipeline-protocol` (ux-v2 `e2`'s deliverable, not this file) that
+// MUST match this algorithm byte-for-byte; the pinned test vectors in
+// `tests/ids.test.ts` exist so that implementation can be checked against
+// this one without the two repos sharing code.
 //
 // WHY HAND-ROLLED (and not `Bun.randomUUIDv7()` / `crypto.randomUUID()`):
 //   • `crypto.randomUUID()` is UUIDv4 (version nibble `4`). Wrong version, no
@@ -70,7 +83,7 @@
 // generator construction (which reads no clock and no entropy until the first
 // `newId()` call).
 
-import { randomBytes as nodeRandomBytes } from 'node:crypto';
+import { randomBytes as nodeRandomBytes, createHash } from 'node:crypto';
 
 // ── Bit layout (RFC 9562 §5.7) ───────────────────────────────────────────────
 //
@@ -195,12 +208,110 @@ const mintDefault = createIdGenerator();
  * steps, requests, messages. Never derive one from a hash, never let a prompt
  * invent a format, never call `crypto.randomUUID()` (that is a v4).
  *
- * The one deliberate exception lives server-side: the two step classes the
- * server derives rather than observes (`manager`, `step:path:*`) are UUIDv**5**
- * over the run UUID, so re-ingest stays idempotent. Those do not come from
- * here, and conformance tests must assert the version nibble per class — `7`
- * for anything minted by this function, `5` for those two.
+ * The deliberate exceptions are DERIVATIONS, never mints: the two step
+ * classes the server derives rather than observes (`manager`, `step:path:*`)
+ * are UUIDv**5** over the run UUID, so re-ingest stays idempotent (implemented
+ * in `@baizor/pipeline-protocol`, not here), and this file's own
+ * `hookIdFromToolUseId()` below, for the one CLI-side caller that needs
+ * determinism instead of randomness. Conformance tests must assert the
+ * version nibble per class — `7` for anything minted by this function, `5`
+ * for those derived ones.
  */
 export function newId(): string {
   return mintDefault();
+}
+
+// ── UUIDv5 (RFC 9562 §5.5) — derivation, not minting ─────────────────────────
+//
+// `newId()` above is the only MINT point. `uuidv5()` below is a pure
+// DERIVATION: same (name, namespace) in, same id out, forever — the opposite
+// property to `newId()`'s CSPRNG-backed uniqueness. It exists so
+// `hooks/analytics_relay.ts` can compute the SAME run id from a PreToolUse and
+// a PostToolUse invocation of the SAME `tool_use_id` — two separate hook
+// processes, no shared state, only the input in common (`:1028`'s rationale
+// for why the id must stay deterministic there).
+//
+// ARGUMENT ORDER IS NOT COSMETIC: `uuidv5(name, namespace)`, matching the
+// prevailing JS convention (the `uuid` package's `v5(name, namespace)`).
+// `namespace` MUST itself be a canonical UUID string — `parseUUID` below
+// throws `TypeError('Invalid UUID')` when it is not. The taskflow for this
+// work records a real prior bug from getting this backwards:
+// `uuidv5(run_uuid, "manager")` passes the run UUID as `name` and the literal
+// string `"manager"` as `namespace` — `"manager"` is not a UUID, so THAT call
+// throws. The correct call is `uuidv5("manager", run_uuid)`.
+
+/** Canonical `8-4-4-4-12` UUID string → its 16 bytes. Throws `TypeError('Invalid
+ *  UUID')` — not a generic error — matching the `uuid` package's own contract,
+ *  because `uuidv5`'s namespace argument relies on exactly this failure mode
+ *  to catch a reversed argument order at the call site instead of silently
+ *  hashing garbage. */
+function parseUUID(uuid: string): Uint8Array {
+  if (
+    typeof uuid !== 'string' ||
+    uuid.length !== 36 ||
+    uuid[8] !== '-' ||
+    uuid[13] !== '-' ||
+    uuid[18] !== '-' ||
+    uuid[23] !== '-'
+  ) {
+    throw new TypeError('Invalid UUID');
+  }
+  const hex = uuid.slice(0, 8) + uuid.slice(9, 13) + uuid.slice(14, 18) + uuid.slice(19, 23) + uuid.slice(24);
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
+    throw new TypeError('Invalid UUID');
+  }
+  const out = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+/**
+ * RFC 9562 §5.5 UUIDv5: a deterministic, name-based UUID — SHA-1 over
+ * `namespace bytes ++ name bytes`, truncated to 16 bytes, with the version
+ * nibble forced to `0101` and the variant bits to `0b10`. Pure function, zero
+ * dependencies beyond `node:crypto`'s `createHash` (already imported above)
+ * and the global `TextEncoder` (no import needed — keeps parity with this
+ * file's zero-runtime-dependency contract, see `tests/ids.test.ts`).
+ *
+ * `namespace` must be a canonical UUID string or this throws
+ * `TypeError('Invalid UUID')` — see the argument-order note above.
+ */
+export function uuidv5(name: string, namespace: string): string {
+  const nsBytes = parseUUID(namespace);
+  const nameBytes = new TextEncoder().encode(name);
+  const input = new Uint8Array(nsBytes.length + nameBytes.length);
+  input.set(nsBytes, 0);
+  input.set(nameBytes, nsBytes.length);
+
+  const digest = createHash('sha1').update(input).digest();
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) bytes[i] = digest[i];
+  bytes[6] = (bytes[6] & 0x0f) | 0x50; // ver = 0b0101 (5)
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // var = 0b10
+
+  return toCanonical(bytes);
+}
+
+/**
+ * Fixed namespace UUID for `hookIdFromToolUseId()` below — analogous to RFC
+ * 9562's predefined DNS/URL/OID/X.500 namespaces, but private to this
+ * product. A constant, not a secret: anyone can read it from this source
+ * file, and that is fine — it buys NO security property, only a stable input
+ * to a deterministic hash. Generated once (`crypto.randomUUID()`), pinned
+ * here, and MUST NEVER change: changing it would silently decorrelate any
+ * PreToolUse/PostToolUse pair that straddles a plugin upgrade mid-run.
+ */
+export const NAMESPACE_TOOL_USE = '10422061-094a-4a10-a3c5-c9edc54febb4';
+
+/**
+ * Deterministic id for `hooks/analytics_relay.ts`'s `bypassRunIdFromToolUseId`
+ * — UUIDv5 of `tool_use_id` under `NAMESPACE_TOOL_USE`. NOT a mint site: it
+ * exists because PreToolUse and PostToolUse are separate processes that must
+ * independently compute the SAME id from the SAME `tool_use_id`, with no
+ * channel between them to agree on a random one. Version nibble `5`, variant
+ * `0b10` — see `tests/ids.test.ts` for the pinned test vector and the
+ * two-process determinism test.
+ */
+export function hookIdFromToolUseId(toolUseId: string): string {
+  return uuidv5(toolUseId, NAMESPACE_TOOL_USE);
 }
