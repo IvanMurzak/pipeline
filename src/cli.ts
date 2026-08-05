@@ -335,6 +335,15 @@ function usage(): string {
     '      and exits (smoke-test a connection). Default interval 60000ms.',
     '      (`pipeline mesh notify` still works as a deprecated, warning alias.)',
     '',
+    '  telemetry-daemon --project-root <path> [--poll-interval-ms <n>]',
+    '                    [--idle-exit-ms <n>] [--max-wall-clock-ms <n>] [--once]',
+    '      Detached per-project telemetry uploader (ux-v2 b11): polls `flushOnce`',
+    '      (lib/telemetry-upload.ts) and exits on its own once the queue has been',
+    '      idle for --idle-exit-ms or --max-wall-clock-ms has elapsed, whichever',
+    '      is first. Not meant to be run by hand — hooks/analytics_relay.ts',
+    '      spawns it detached, holding a `wx`-locked single-instance guard',
+    '      BEFORE spawning. --once runs a single poll cycle and exits.',
+    '',
     '  step run <iteration.md> [--param <name>=<value> ...]',
     '           [--var NAME=value ...] [--vars-file <path>] [--json]',
     '      Dry-run ONE `type: script` step exactly as the runtime would (same',
@@ -435,6 +444,14 @@ async function main(argv: string[]): Promise<number> {
       // notification machinery as `department notify`.
       const { runMesh } = await import('./commands/mesh');
       return runMesh(rest);
+    }
+    case 'telemetry-daemon': {
+      // Lazy import (mirrors `cloud`/`department`): pulls in the outbox/upload
+      // machinery (and, through it, vendor/privacy.ts) — keep the hot `next`
+      // loop's per-spawn startup cost unchanged. This command is normally
+      // spawned detached by hooks/analytics_relay.ts, never run inline.
+      const { runTelemetryDaemon } = await import('./commands/telemetry-daemon');
+      return runTelemetryDaemon(rest);
     }
     case 'step':
       return runStep(rest);

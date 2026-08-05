@@ -106,7 +106,7 @@
 //                        into `b9`'s own `state.json`, not a parallel ledger)
 //   any exception      → swallowed. This module never throws into the run (D2)
 //
-// Four 4xx statuses are deliberately KEPT rather than quarantined —
+// Five 4xx statuses are deliberately KEPT rather than quarantined —
 // `KEEP_NOT_QUARANTINE_STATUSES` — and the reasoning is on that constant. In
 // short: 401/403/408/425/429 describe the CREDENTIAL, the CLOCK or the RATE
 // LIMITER, never a malformed record, so retrying the same bytes later can
