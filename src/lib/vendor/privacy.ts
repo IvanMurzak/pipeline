@@ -8,13 +8,13 @@
 //
 // INTENDED SOURCE OF TRUTH: `@baizor/pipeline-protocol`, the published,
 // dependency-pinned package this monorepo already treats as canonical for
-// the wire contract (schemas/types). The `ux-v2` design
-// (`local-pipeline-cloud-telemetry.md`, "Dependency resolution" +
-// delivery-order step 3, "Protocol: publish the privacy filter…") calls for
-// lifting this filter into the protocol package as an additive release; that
-// publish has not happened yet. When it does, this vendored copy — and
-// eventually pipeline-runner's own — are meant to be deleted in favor of
-// importing the published package. See `plugin-thin/02-extract-cli.md`
+// the wire contract (schemas/types). The `ux-v2` taskflow (parent monorepo,
+// `.taskflow/2026-08-03-ux-v2/04-subsystem-rules.md` §5.1 "Copies and the
+// drift check", task `tasks/e1-lift-privacy-filter.md`) calls for lifting
+// this filter into the protocol package as an additive release; that publish
+// has not happened yet. When it does, this vendored copy — and eventually
+// pipeline-runner's own — are meant to be deleted in favor of importing the
+// published package. See `.taskflow/2026-08-03-plugin-thin/02-extract-cli.md`
 // phase 6: "Add real dependencies to the CLI. Delete
 // src/lib/vendor/privacy.ts (`ux-v2` interim) … in favour of real imports."
 //
@@ -36,8 +36,8 @@
 // LOCKSTEP: this file must stay BYTE-IDENTICAL (below this header) to its
 // source until one of the two copies is retired. The check that catches
 // drift lives in the PARENT monorepo (`C:\Projects\AI\ai-pipeline`, where
-// both `public/package/pipeline-runner` and `public/ai-pipeline-plugin` are present
-// as submodules) — `scripts/check-privacy-filter-drift.mjs`, documented in
+// both `public/package/pipeline-runner` and `public/plugin/pipeline-claude` are
+// present as submodules) — `scripts/check-privacy-filter-drift.mjs`, documented in
 // that script's own header. A comparison test inside either OSS repo alone
 // would be vacuous: the other copy is not on disk there, which is a trap
 // this repository has fallen into before (see that design's "Interim drift
