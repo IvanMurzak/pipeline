@@ -1,0 +1,1119 @@
+// telemetry-outbox.ts — the durable, org-tagged telemetry queue (ux-v2 `b9`).
+//
+// WHAT THIS IS. One project writes ONE journal (`.pipeline/.runtime/
+// events.jsonl`, see `event.ts:appendEventLine`), into which every concurrent
+// run interleaves its events. This module is the seam between that journal and
+// anything that ships telemetry off the machine: it tails the journal from a
+// rotation-safe cursor, runs the privacy allowlist, demultiplexes the
+// interleaved `run_id`s into per-run monotonic `seq` counters, tags every
+// record with the org it was queued under, and appends the result to a bounded
+// on-disk queue. Uploading is NOT here — `telemetry-upload.ts` (`b10`) reads
+// this queue; the daemon that calls both is `b11`.
+//
+// The record shape is fixed by the design (`04-subsystem-rules.md` §4):
+//
+//     { org, run_id, seq, kind, payload }
+//
+// ── The four properties this file exists to guarantee ───────────────────────
+//
+// 1. THE PAYLOAD IS FILTERED BEFORE IT TOUCHES DISK. The filter runs inside
+//    `enqueue`, not at flush time, because the queue FILE is itself a
+//    disclosure surface: it sits inside the user's repository, survives
+//    reboots, and is read by a detached daemon. "Filter at upload" would leave
+//    prompts, absolute paths and error excerpts sitting in `.pipeline/` for as
+//    long as the machine is offline. Filtering is therefore a precondition of
+//    persistence, and `tests/telemetry-outbox.test.ts` proves it the only way
+//    that means anything — by planting secrets, draining the real queue, and
+//    scanning the queue file's BYTES off disk.
+//
+//    The filter used is the VENDORED copy (`src/lib/vendor/privacy.ts`),
+//    byte-identical to `pipeline-runner/src/shipper/privacy.ts` and guarded in
+//    the parent monorepo's CI by `scripts/check-privacy-filter-drift.mjs`
+//    (wired by `a1`). Not the published `@baizor/pipeline-protocol`: this
+//    package is invoked straight out of the plugin's cached git checkout,
+//    which has no `package.json` and no install step, so any external import
+//    reachable from `cli.ts` throws at import time for every plugin user (see
+//    the vendored file's own header). The tier resolution is FAIL-CLOSED — an
+//    unrecognized `PIPELINE_PRIVACY_TIER` degrades to `metadata`, never up.
+//
+// 2. THE CURSOR BINDS (FILE IDENTITY, OFFSET) — AND THE IDENTITY IS CONTENT,
+//    NOT AN INODE. The journal rotates at 50 MB (`event.ts:364`
+//    `ROTATE_BYTES`): the live file is RENAMED aside and a fresh
+//    `events.jsonl` takes its place. A bare byte offset carried across that
+//    rename silently skips (new file shorter than the offset) or garbles (new
+//    file already longer). Re-reading is just as bad: the same logical event
+//    would be handed a DIFFERENT `seq`, and `(run_id, seq)` is the dedup key
+//    the whole ingest path rests on.
+//
+//    The identity is `sha256` of the journal's FIRST COMPLETE LINE (newline
+//    included). Rationale, and why not the two obvious alternatives:
+//
+//      - `Stats.ino` is not usable as the decider. On Windows it is frequently
+//        `0` or unstable across handles, and this project is developed on
+//        Windows and CI-tested on Windows + Linux. An identity that is
+//        constant-`0` on one platform mis-detects rotation there — and the
+//        expensive direction is the FALSE mismatch, which re-reads a journal
+//        we already shipped and re-sequences it.
+//      - `birthtimeMs` is unreliable in the other direction: on Linux libuv
+//        can only populate it via `statx` (kernel 4.11+ / supporting fs) and
+//        otherwise leaves it zeroed or ctime-derived, so it can compare equal
+//        across a genuine rotation.
+//      - The first line is a GENERATION STAMP the writer already produces for
+//        free. The journal is append-only, so once written the first line
+//        never changes; rotation starts a new file whose first line is a
+//        different event (its own `ts` at millisecond precision, plus
+//        `run_id`/`session_id`/`type`). It is computed identically on every
+//        platform and needs no change to the writer.
+//
+//    `ino` and `birthtimeMs` ARE recorded on the cursor — as diagnostics only.
+//    They are never allowed to declare a mismatch, precisely because each is
+//    unreliable on one of the two platforms this ships to.
+//
+//    Two corroborating checks close the residual gap where a rotated file
+//    could somehow reproduce the first line byte-for-byte:
+//      - `size < offset` ⇒ mismatch (an append-only file never shrinks);
+//      - the byte at `offset - 1` MUST be `\n` (the cursor only ever advances
+//        past a newline), which detects a differently-shaped file at the same
+//        offset for one byte of I/O.
+//
+// 3. TORN TRAILING LINES ARE RETRIED, NEVER SKIPPED AND NEVER PARSED. Writer
+//    and reader are separate processes; the reader routinely observes a final
+//    line mid-append. The cursor advances only to just past the LAST newline
+//    in the chunk, so an unterminated tail stays unread and is picked up whole
+//    on the next drain. A line that IS newline-terminated but unparseable is a
+//    different thing — genuinely malformed, not torn — and is counted and
+//    stepped over, because retrying it forever would wedge the queue.
+//
+// 4. EVERY RECORD IS ORG-TAGGED AT ENQUEUE. This is the F4 control: a user who
+//    queues telemetry offline under org A and then reconnects under org B must
+//    not have A's telemetry land in B's dashboard, a leak no deletion window
+//    repairs. `takeBatch()` partitions the queue against the outbox's own org
+//    so the caller cannot flush across the boundary by accident; `b10` applies
+//    the refusal at the wire.
+//
+// The queue is BOUNDED. At the bound the OLDEST records are dropped (a lost
+// tail is recoverable; a run that cannot start is not), and every drop is
+// counted durably in `state.json` and reported through `onDrop`. Silent loss
+// is unacceptable — `pipeline stats telemetry` (`b13`) reads these counters.
+//
+// Everything lives under `ensureGeneratedDir`, so the tree carries its own
+// `.gitignore` and a `git add -A` after a run cannot sweep the queue into a
+// commit.
+
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+  type Stats,
+} from 'node:fs';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
+import { ensureGeneratedDir } from './generated-dir';
+import {
+  filterEventForTier,
+  filterStatsRecordMetadata,
+  resolvePrivacyTier,
+  stripStatsFailureExcerpts,
+  type PrivacyTier,
+} from './vendor/privacy';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** `state.json` schema. Bumped when the cursor or counter shape changes; an
+ *  unrecognized version is treated as "no state" (start fresh), never guessed
+ *  at — a mis-parsed cursor is exactly the stale-offset failure this file
+ *  exists to prevent. */
+export const OUTBOX_STATE_SCHEMA = 1;
+
+/** Master telemetry opt-out (`03` F1). Same falsy parse as
+ *  `PIPELINE_UI_ENABLED` in `event.ts`. */
+export const TELEMETRY_ENV = 'PIPELINE_SYNC_LOCAL_STATS';
+
+/** Default queue bound, in records. */
+export const DEFAULT_MAX_RECORDS = 10_000;
+
+/** Default cap on per-run `seq` counters retained. Runs are finite but a
+ *  project accumulates them forever, so the map is an LRU. */
+export const DEFAULT_MAX_TRACKED_RUNS = 512;
+
+/** Drops are taken in batches rather than one-per-append so that the O(n)
+ *  queue rewrite is amortized instead of running on every enqueue once full. */
+const DROP_BATCH_FRACTION = 0.1;
+
+/** How far into the journal we look for the first newline when computing the
+ *  file-identity anchor. */
+const ANCHOR_WINDOW_BYTES = 64 * 1024;
+
+const NEWLINE = 0x0a;
+
+const OUTBOX_FILE = 'outbox.jsonl';
+const STATE_FILE = 'state.json';
+const LOCK_FILE = 'drain.lock';
+
+/** A drain that cannot take the lock is free to skip — the next poll picks the
+ *  work up. An enqueue that cannot take it would LOSE a record, so it waits. */
+const ENQUEUE_LOCK_WAIT_MS = 2_000;
+const LOCK_STALE_MS = 30_000;
+const LOCK_POLL_MS = 15;
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+export type OutboxKind = 'event' | 'stats';
+
+/** The on-disk record (`04` §4). `payload` is ALREADY filtered. */
+export interface OutboxRecord {
+  /** The org this was queued under — REQUIRED, and the F4 control. */
+  org: string;
+  run_id: string;
+  /** Per-run monotonic, starting at 1. Half of the `(run_id, seq)` dedup key. */
+  seq: number;
+  kind: OutboxKind;
+  payload: Record<string, unknown>;
+}
+
+/** (file identity, offset) — see this module's header for why the identity is
+ *  content-derived rather than an inode. */
+export interface JournalCursor {
+  /** `sha256` of the journal's first complete line, newline included. */
+  anchor: string;
+  /** Byte offset of the first UNREAD byte. Always immediately after a `\n`. */
+  offset: number;
+  /** Diagnostics only — never permitted to declare a rotation. */
+  ino: number | null;
+  /** Diagnostics only — never permitted to declare a rotation. */
+  birthtime_ms: number | null;
+}
+
+export interface OutboxCounters {
+  /** Records that reached disk. */
+  enqueued: number;
+  /** Current queue depth. */
+  queued: number;
+  /** Dropped because the queue was at its bound (oldest-first). */
+  dropped_bound: number;
+  /** Journal lines with no usable `run_id` — undedupable, so unshippable. */
+  dropped_no_run_id: number;
+  /** Newline-terminated lines that were not parseable JSON objects. */
+  dropped_malformed: number;
+  /** Enqueues abandoned because the drain lock could not be taken in time. */
+  dropped_lock_contention: number;
+  /** Drains that saw an unterminated tail and left it for the next poll. */
+  torn_line_retries: number;
+  /** Cursor identity mismatches — i.e. observed journal rotations. */
+  rotations_detected: number;
+  /** Per-run `seq` counters evicted by the LRU bound. */
+  run_counters_evicted: number;
+  last_drop_at: string | null;
+  last_drop_reason: string | null;
+}
+
+export interface DropInfo {
+  reason: 'bound' | 'no_run_id' | 'malformed' | 'lock_contention';
+  count: number;
+  /** Human-readable, and deliberately CONTENT-FREE: never the payload. */
+  detail: string;
+}
+
+export interface DrainResult {
+  /** Complete journal lines consumed this cycle. */
+  lines_read: number;
+  enqueued: number;
+  skipped_no_run_id: number;
+  skipped_malformed: number;
+  /** An unterminated final line was observed and left for the next drain. */
+  torn_tail: boolean;
+  /** The cursor's identity did not match — the journal rotated, so reading
+   *  restarted from byte 0 of the new file rather than a stale offset. */
+  restarted: boolean;
+  bytes_consumed: number;
+  /** Another process held the drain lock; nothing was read. */
+  skipped_locked: boolean;
+}
+
+export interface TelemetryOutboxOptions {
+  /** The project whose journal is tailed and whose `.pipeline/.runtime` holds
+   *  the queue. */
+  projectRoot: string;
+  /** The org slug records are tagged with. Required, and non-empty: a record
+   *  with no org cannot be flushed safely, so there is no such record. */
+  org: string;
+  /** Explicit privacy tier; falls back to `PIPELINE_PRIVACY_TIER`, then
+   *  fail-closed to `metadata`. */
+  tier?: string;
+  /** Optional salt hardening the deterministic path fingerprints (`b15`). */
+  fingerprintSalt?: string;
+  maxRecords?: number;
+  maxTrackedRuns?: number;
+  env?: Record<string, string | undefined>;
+  now?: () => number;
+  /** Where drops are reported. Called at most ONCE PER REASON PER CYCLE with
+   *  the aggregated count, never once per record; defaults to one stderr line.
+   *  Counting is independent of this sink and is always durable. */
+  onDrop?: (info: DropInfo) => void;
+}
+
+// ---------------------------------------------------------------------------
+// Paths + the opt-out gate
+// ---------------------------------------------------------------------------
+
+/** `<project>/.pipeline/.runtime` — the generated tree the journal already
+ *  lives in (`event.ts:ensureRuntimeDir`). */
+export function runtimeDir(projectRoot: string): string {
+  return join(projectRoot, '.pipeline', '.runtime');
+}
+
+/** The shared per-project journal this module tails.
+ *
+ *  DUPLICATED, not imported, from `event.ts:appendEventLine` — that function
+ *  builds the path inline and exports no constant, and this package's house
+ *  style is to copy rather than widen an unrelated module's API (see
+ *  `event.ts`'s own "duplicated here, not imported" note). The duplication is
+ *  not left to review discipline: `tests/telemetry-outbox.test.ts` drives the
+ *  REAL writer (`emitEvent`) and asserts the outbox drains what it wrote, so a
+ *  divergence fails the suite rather than silently tailing nothing. */
+export function journalPath(projectRoot: string): string {
+  return join(runtimeDir(projectRoot), 'events.jsonl');
+}
+
+/** `<project>/.pipeline/.runtime/telemetry` — queue, state and drain lock. */
+export function telemetryDir(projectRoot: string): string {
+  return join(runtimeDir(projectRoot), 'telemetry');
+}
+
+/**
+ * Master telemetry opt-out (`03` F1: "`PIPELINE_SYNC_LOCAL_STATS=0` disables
+ * telemetry outright"). Default ON; only an explicit falsy value disables,
+ * matching `pipelineUiEnabled`'s parse in `event.ts`.
+ *
+ * Enforced at ENQUEUE, which is the strongest place: opted out means nothing
+ * is queued at all, not that something queued is later declined.
+ */
+export function telemetrySyncEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const v = (env[TELEMETRY_ENV] ?? '').trim().toLowerCase();
+  return v !== '0' && v !== 'false' && v !== 'no' && v !== 'off';
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+interface OutboxState {
+  schema: number;
+  cursor: JournalCursor | null;
+  /** run_id → the NEXT `seq` to hand out. */
+  seq: Record<string, number>;
+  /** LRU order over the keys of `seq`, oldest first. */
+  seq_order: string[];
+  counters: OutboxCounters;
+}
+
+function emptyCounters(): OutboxCounters {
+  return {
+    enqueued: 0,
+    queued: 0,
+    dropped_bound: 0,
+    dropped_no_run_id: 0,
+    dropped_malformed: 0,
+    dropped_lock_contention: 0,
+    torn_line_retries: 0,
+    rotations_detected: 0,
+    run_counters_evicted: 0,
+    last_drop_at: null,
+    last_drop_reason: null,
+  };
+}
+
+function emptyState(): OutboxState {
+  return { schema: OUTBOX_STATE_SCHEMA, cursor: null, seq: {}, seq_order: [], counters: emptyCounters() };
+}
+
+// ---------------------------------------------------------------------------
+// Low-level fs helpers
+// ---------------------------------------------------------------------------
+
+function safeStat(path: string): Stats | null {
+  try {
+    return statSync(path);
+  } catch {
+    return null;
+  }
+}
+
+/** Read `[start, end)` from `path`. Returns fewer bytes if the file shrank
+ *  under us (a rotation racing this read) — callers treat a short read as data
+ *  they simply do not have yet. */
+function readRange(path: string, start: number, end: number): Buffer {
+  const len = Math.max(0, end - start);
+  if (len === 0) return Buffer.alloc(0);
+  const fd = openSync(path, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(len);
+    let got = 0;
+    while (got < len) {
+      const n = readSync(fd, buf, got, len - got, start + got);
+      if (n <= 0) break;
+      got += n;
+    }
+    return got === len ? buf : buf.subarray(0, got);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function sha256(buf: Buffer): string {
+  return createHash('sha256').update(buf).digest('hex');
+}
+
+/**
+ * The journal's file identity: `sha256` of its first COMPLETE line.
+ *
+ * Returns `null` when no complete first line exists yet (empty file, or a
+ * first line still mid-append). That is deliberately not an error and not an
+ * excuse to bind a provisional identity — with no anchor there is nothing to
+ * compare a future drain against, so the drain simply waits.
+ *
+ * When the window fills with no newline at all, the whole window lies INSIDE
+ * the unterminated first line, and an append-only file can never rewrite it —
+ * so hashing the window is stable and the anchor is well defined.
+ */
+function journalAnchor(path: string, size: number): string | null {
+  if (size <= 0) return null;
+  const window = Math.min(size, ANCHOR_WINDOW_BYTES);
+  const buf = readRange(path, 0, window);
+  if (buf.length === 0) return null;
+  const nl = buf.indexOf(NEWLINE);
+  if (nl >= 0) return sha256(buf.subarray(0, nl + 1));
+  if (buf.length >= ANCHOR_WINDOW_BYTES) return sha256(buf);
+  return null;
+}
+
+/** The cursor only ever lands immediately after a `\n`, so the byte before it
+ *  must be one. One byte of I/O that catches a file which reproduced the
+ *  anchor but not the layout. */
+function offsetFollowsNewline(path: string, offset: number): boolean {
+  if (offset <= 0) return true;
+  const b = readRange(path, offset - 1, offset);
+  return b.length === 1 && b[0] === NEWLINE;
+}
+
+/** Replace `path`'s contents atomically (temp file + rename). `renameSync`
+ *  replaces an existing destination on both NTFS and POSIX. */
+function writeFileAtomic(path: string, data: string): void {
+  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  writeFileSync(tmp, data, 'utf-8');
+  try {
+    renameSync(tmp, path);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* best effort */
+    }
+    throw e;
+  }
+}
+
+function countLines(path: string): number {
+  try {
+    const buf = readFileSync(path);
+    let n = 0;
+    for (let i = 0; i < buf.length; i++) if (buf[i] === NEWLINE) n++;
+    return n;
+  } catch {
+    return 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The drain lock
+// ---------------------------------------------------------------------------
+
+/**
+ * A SYNCHRONOUS exclusive-create lock, same primitive and same stale-recovery
+ * argument as `credential-lock.ts` (read that file's header — `open(O_CREAT |
+ * O_EXCL)` is the one operation atomic on both NTFS and POSIX). Synchronous
+ * because the whole drain path is synchronous: it runs inside a hook-adjacent
+ * process where an `await` would mean restructuring every caller.
+ *
+ * What it protects is `seq` allocation. Two processes assigning `seq` from the
+ * same counter concurrently would hand two DIFFERENT events the same
+ * `(run_id, seq)`, which the ingest path dedups — silently discarding one.
+ */
+interface SyncLock {
+  release(): void;
+}
+
+function sleepSync(ms: number): void {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      /* fallback busy-wait: only reached where SharedArrayBuffer is unavailable */
+    }
+  }
+}
+
+function tryLockSync(lockPath: string, now: () => number, waitMs: number): SyncLock | null {
+  const deadline = now() + waitMs;
+  for (;;) {
+    let fd: number | null = null;
+    try {
+      fd = openSync(lockPath, 'wx', 0o600);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') return null;
+    }
+    if (fd !== null) {
+      try {
+        writeSync(fd, JSON.stringify({ pid: process.pid, acquiredAt: now() }));
+      } catch {
+        /* diagnostic payload only — never load-bearing for exclusion */
+      } finally {
+        closeSync(fd);
+      }
+      return {
+        release: () => {
+          try {
+            unlinkSync(lockPath);
+          } catch {
+            /* already gone */
+          }
+        },
+      };
+    }
+    // Held. Steal it if the holder is long gone, else wait a little.
+    const st = safeStat(lockPath);
+    if (st && now() - st.mtimeMs > LOCK_STALE_MS) {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        /* lost the steal race — loop and try the create again */
+      }
+      continue;
+    }
+    if (now() >= deadline) return null;
+    sleepSync(LOCK_POLL_MS);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The outbox
+// ---------------------------------------------------------------------------
+
+export class TelemetryOutbox {
+  /** The resolved, fail-closed privacy tier every payload is filtered at. */
+  readonly tier: PrivacyTier;
+  /** Non-null when the configured tier was unrecognized and degraded. */
+  readonly tierWarning: string | null;
+  readonly dir: string;
+  readonly org: string;
+  readonly projectRoot: string;
+
+  private readonly outboxPath: string;
+  private readonly statePath: string;
+  private readonly lockPath: string;
+  private readonly journal: string;
+  private readonly maxRecords: number;
+  private readonly maxTrackedRuns: number;
+  private readonly salt: string;
+  private readonly env: Record<string, string | undefined>;
+  private readonly now: () => number;
+  private readonly onDrop: (info: DropInfo) => void;
+
+  /** Queue depth and the file size it was derived from. A size that no longer
+   *  matches means another process appended, so the depth is re-derived. */
+  private queued = 0;
+  private observedSize = -1;
+  /** Drops seen this cycle, reported once each by `flushDropReports`. */
+  private readonly dropAccum = new Map<DropInfo['reason'], { count: number; detail: string }>();
+
+  constructor(opts: TelemetryOutboxOptions) {
+    const org = (opts.org ?? '').trim();
+    if (!org) {
+      // A record with no org cannot be flushed without risking F4, so it is
+      // never created. Callers gate on `cloud.json` first (F7: no account ⇒
+      // the subsystem is absent, not merely inert).
+      throw new TypeError('TelemetryOutbox requires a non-empty org — an untagged record can never be flushed safely');
+    }
+    this.org = org;
+    this.projectRoot = opts.projectRoot;
+    this.env = opts.env ?? process.env;
+    this.now = opts.now ?? (() => Date.now());
+    this.salt = opts.fingerprintSalt ?? '';
+    this.maxRecords = Math.max(1, opts.maxRecords ?? DEFAULT_MAX_RECORDS);
+    this.maxTrackedRuns = Math.max(1, opts.maxTrackedRuns ?? DEFAULT_MAX_TRACKED_RUNS);
+
+    const resolved = resolvePrivacyTier(opts.tier, this.env);
+    this.tier = resolved.tier;
+    this.tierWarning = resolved.warning;
+
+    this.dir = telemetryDir(opts.projectRoot);
+    this.outboxPath = join(this.dir, OUTBOX_FILE);
+    this.statePath = join(this.dir, STATE_FILE);
+    this.lockPath = join(this.dir, LOCK_FILE);
+    this.journal = journalPath(opts.projectRoot);
+
+    // The stub goes at the `.runtime` ROOT, not on this subfolder — `*` there
+    // already covers everything beneath (see `generated-dir.ts`).
+    ensureGeneratedDir(this.dir, runtimeDir(opts.projectRoot));
+
+    this.onDrop =
+      opts.onDrop ??
+      ((info) => {
+        try {
+          process.stderr.write(
+            `[pipeline-telemetry] dropped ${info.count} record(s) (${info.reason}): ${info.detail}\n`,
+          );
+        } catch {
+          /* never fail a run over a log line */
+        }
+      });
+  }
+
+  // ── state io ──────────────────────────────────────────────────────────────
+
+  private loadState(): OutboxState {
+    let raw: string;
+    try {
+      raw = readFileSync(this.statePath, 'utf-8');
+    } catch {
+      return emptyState();
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return emptyState();
+    }
+    if (!isRecord(parsed) || parsed.schema !== OUTBOX_STATE_SCHEMA) return emptyState();
+    const state = emptyState();
+    const cursor = parsed.cursor;
+    if (
+      isRecord(cursor) &&
+      typeof cursor.anchor === 'string' &&
+      cursor.anchor.length > 0 &&
+      typeof cursor.offset === 'number' &&
+      Number.isFinite(cursor.offset) &&
+      cursor.offset >= 0
+    ) {
+      state.cursor = {
+        anchor: cursor.anchor,
+        offset: cursor.offset,
+        ino: typeof cursor.ino === 'number' ? cursor.ino : null,
+        birthtime_ms: typeof cursor.birthtime_ms === 'number' ? cursor.birthtime_ms : null,
+      };
+    }
+    if (isRecord(parsed.seq)) {
+      for (const [k, v] of Object.entries(parsed.seq)) {
+        if (typeof v === 'number' && Number.isInteger(v) && v >= 1) state.seq[k] = v;
+      }
+    }
+    if (Array.isArray(parsed.seq_order)) {
+      state.seq_order = parsed.seq_order.filter(
+        (k): k is string => typeof k === 'string' && k in state.seq,
+      );
+    }
+    // Any run present in `seq` but missing from the order list (hand-edited or
+    // truncated state) still needs a slot, else it would never be evicted.
+    for (const k of Object.keys(state.seq)) {
+      if (!state.seq_order.includes(k)) state.seq_order.push(k);
+    }
+    if (isRecord(parsed.counters)) {
+      const c = state.counters as unknown as Record<string, unknown>;
+      for (const [k, v] of Object.entries(parsed.counters)) {
+        if (k in c && typeof v === 'number' && Number.isFinite(v)) c[k] = v;
+      }
+      if (typeof parsed.counters.last_drop_at === 'string') {
+        state.counters.last_drop_at = parsed.counters.last_drop_at;
+      }
+      if (typeof parsed.counters.last_drop_reason === 'string') {
+        state.counters.last_drop_reason = parsed.counters.last_drop_reason;
+      }
+    }
+    return state;
+  }
+
+  private saveState(state: OutboxState): void {
+    state.schema = OUTBOX_STATE_SCHEMA;
+    // Re-derive rather than trust an in-memory depth: some paths (a torn first
+    // line, a nothing-new drain) return before ever touching the queue, and a
+    // persisted `queued: 0` on a queue that is not empty would misreport
+    // `pipeline stats telemetry`. One `statSync` in the common case.
+    this.syncQueueDepth();
+    state.counters.queued = this.queued;
+    try {
+      writeFileAtomic(this.statePath, `${JSON.stringify(state)}\n`);
+    } catch {
+      // Losing the state write degrades to "start fresh next time", which the
+      // cursor contract already handles. It must never fail a run (D2).
+    }
+  }
+
+  // ── queue io ──────────────────────────────────────────────────────────────
+
+  private syncQueueDepth(): void {
+    const st = safeStat(this.outboxPath);
+    const size = st ? st.size : 0;
+    if (size !== this.observedSize) {
+      this.queued = countLines(this.outboxPath);
+      this.observedSize = size;
+    }
+  }
+
+  /** Every record currently queued, oldest first. Unparseable lines (a torn
+   *  write from a killed process) are skipped rather than trusted. */
+  readAll(): OutboxRecord[] {
+    let raw: string;
+    try {
+      raw = readFileSync(this.outboxPath, 'utf-8');
+    } catch {
+      return [];
+    }
+    const out: OutboxRecord[] = [];
+    for (const line of raw.split('\n')) {
+      if (!line) continue;
+      const rec = parseRecord(line);
+      if (rec) out.push(rec);
+    }
+    return out;
+  }
+
+  /**
+   * The next batch to flush, PARTITIONED BY ORG.
+   *
+   * `blocked` is the F4 guard made structural: records queued under a
+   * different org are handed back separately so an uploader physically cannot
+   * put them on the wire for the current credential by iterating the queue.
+   * They are not deleted — reconnecting to the original org releases them.
+   */
+  takeBatch(limit = 100): { sendable: OutboxRecord[]; blocked: OutboxRecord[] } {
+    const sendable: OutboxRecord[] = [];
+    const blocked: OutboxRecord[] = [];
+    for (const rec of this.readAll()) {
+      if (rec.org === this.org) {
+        if (sendable.length < limit) sendable.push(rec);
+      } else {
+        blocked.push(rec);
+      }
+    }
+    return { sendable, blocked };
+  }
+
+  /** Remove records by `(kind, run_id, seq)`. Returns how many were removed. */
+  ack(records: OutboxRecord[]): number {
+    if (records.length === 0) return 0;
+    const keys = new Set(records.map(recordKey));
+    const all = this.readAll();
+    const kept = all.filter((r) => !keys.has(recordKey(r)));
+    if (kept.length === all.length) return 0;
+    this.rewrite(kept);
+    return all.length - kept.length;
+  }
+
+  private rewrite(records: OutboxRecord[]): void {
+    const body = records.map((r) => JSON.stringify(r)).join('\n');
+    writeFileAtomic(this.outboxPath, records.length ? `${body}\n` : '');
+    this.queued = records.length;
+    const st = safeStat(this.outboxPath);
+    this.observedSize = st ? st.size : 0;
+  }
+
+  // ── enqueue ───────────────────────────────────────────────────────────────
+
+  /**
+   * Filter one journal event, tag it, hand it a per-run `seq`, and append it.
+   *
+   * Returns the record, or `null` when telemetry is disabled, the event has no
+   * usable `run_id`, or the lock could not be taken — every `null` path that
+   * loses data is COUNTED.
+   */
+  enqueueEvent(event: Record<string, unknown>): OutboxRecord | null {
+    return this.enqueue('event', event);
+  }
+
+  /** Same, for a finalized `.stats` run record (`runs.jsonl`). */
+  enqueueStats(record: Record<string, unknown>): OutboxRecord | null {
+    return this.enqueue('stats', record);
+  }
+
+  private enqueue(kind: OutboxKind, payload: Record<string, unknown>): OutboxRecord | null {
+    if (!telemetrySyncEnabled(this.env)) return null;
+    const lock = tryLockSync(this.lockPath, this.now, ENQUEUE_LOCK_WAIT_MS);
+    if (!lock) {
+      const state = this.loadState();
+      state.counters.dropped_lock_contention += 1;
+      this.noteDrop(state, { reason: 'lock_contention', count: 1, detail: `kind=${kind}` });
+      this.saveState(state);
+      this.flushDropReports();
+      return null;
+    }
+    try {
+      const state = this.loadState();
+      this.syncQueueDepth();
+      const rec = this.appendFiltered(state, kind, payload);
+      this.saveState(state);
+      return rec;
+    } finally {
+      lock.release();
+      this.flushDropReports();
+    }
+  }
+
+  /** The single place a record is filtered, sequenced and written. Both the
+   *  public `enqueue*` methods and `drainJournal` funnel through here, so the
+   *  "filtered before it touches disk" property has exactly ONE code path. */
+  private appendFiltered(
+    state: OutboxState,
+    kind: OutboxKind,
+    payload: Record<string, unknown>,
+  ): OutboxRecord | null {
+    const runId = readRunId(payload);
+    if (!runId) {
+      state.counters.dropped_no_run_id += 1;
+      this.noteDrop(state, {
+        reason: 'no_run_id',
+        count: 1,
+        detail: `kind=${kind} — a record with no run_id cannot be dedup-keyed`,
+      });
+      return null;
+    }
+    const filtered = this.filterPayload(kind, payload);
+    const seq = this.nextSeq(state, runId);
+    const record: OutboxRecord = { org: this.org, run_id: runId, seq, kind, payload: filtered };
+    const line = `${JSON.stringify(record)}\n`;
+    try {
+      appendFileSync(this.outboxPath, line, 'utf-8');
+    } catch {
+      // The append failed (read-only checkout, disk full). The seq is already
+      // consumed — a GAP in the sequence, which is safe: `(run_id, seq)` is a
+      // dedup key, never a completeness proof. Re-using it would not be.
+      return null;
+    }
+    this.queued += 1;
+    this.observedSize = this.observedSize < 0 ? -1 : this.observedSize + Buffer.byteLength(line);
+    state.counters.enqueued += 1;
+    this.enforceBound(state);
+    return record;
+  }
+
+  /**
+   * THE trust boundary. Runs before the record is serialized, so no
+   * unfiltered byte ever reaches the queue file.
+   *
+   * - `event`: the whole envelope + per-type `data` allowlist
+   *   (`filterEventForTier`). Unknown type ⇒ `data: {}`; unknown field within a
+   *   known type ⇒ dropped; absolute paths ⇒ fingerprints.
+   * - `stats`: `RunFailureDetail.error` excerpts are stripped at EVERY tier
+   *   (design D16 / G-sec-2), then the nested metadata allowlist applies at
+   *   the metadata tier.
+   */
+  private filterPayload(kind: OutboxKind, payload: Record<string, unknown>): Record<string, unknown> {
+    if (kind === 'stats') {
+      const stripped = stripStatsFailureExcerpts(payload);
+      return this.tier === 'metadata'
+        ? filterStatsRecordMetadata(stripped, { fingerprintSalt: this.salt })
+        : stripped;
+    }
+    return filterEventForTier(payload, this.tier, { fingerprintSalt: this.salt });
+  }
+
+  /** Per-run monotonic `seq`, demultiplexed out of the interleaved journal and
+   *  PERSISTED — a restart that reset a run's counter to 1 would re-issue
+   *  `(run_id, seq)` pairs the cloud has already dedup'd against. */
+  private nextSeq(state: OutboxState, runId: string): number {
+    const next = state.seq[runId] ?? 1;
+    state.seq[runId] = next + 1;
+    const at = state.seq_order.indexOf(runId);
+    if (at >= 0) state.seq_order.splice(at, 1);
+    state.seq_order.push(runId);
+    while (state.seq_order.length > this.maxTrackedRuns) {
+      const evicted = state.seq_order.shift();
+      if (evicted === undefined) break;
+      delete state.seq[evicted];
+      state.counters.run_counters_evicted += 1;
+    }
+    return next;
+  }
+
+  /** Enforce the bound by dropping the OLDEST records — a lost tail is
+   *  recoverable, a wedged run is not (`03` F3). Drops are taken in batches so
+   *  the rewrite is amortized, and are counted plus reported, never silent. */
+  private enforceBound(state: OutboxState): void {
+    this.syncQueueDepth();
+    if (this.queued <= this.maxRecords) return;
+    const headroom = Math.max(1, Math.floor(this.maxRecords * DROP_BATCH_FRACTION));
+    const target = Math.max(0, this.maxRecords - headroom);
+    const all = this.readAll();
+    const dropCount = Math.max(0, all.length - target);
+    if (dropCount === 0) return;
+    this.rewrite(all.slice(dropCount));
+    state.counters.dropped_bound += dropCount;
+    this.noteDrop(state, {
+      reason: 'bound',
+      count: dropCount,
+      detail: `outbox bound ${this.maxRecords} reached — dropped the ${dropCount} oldest record(s)`,
+    });
+  }
+
+  /**
+   * Record a drop: durably counted here, REPORTED once per cycle by
+   * {@link flushDropReports}.
+   *
+   * Aggregated deliberately. `session.opened` legitimately carries a null
+   * `run_id` and a project journal is full of such lines, so a per-record
+   * report would turn a routine, expected exclusion into a stream of log
+   * lines — the fastest way to make a drop report something people stop
+   * reading. The COUNT is what is never allowed to be silent, and it is
+   * written to `state.json` on every path.
+   */
+  private noteDrop(state: OutboxState, info: DropInfo): void {
+    state.counters.last_drop_at = new Date(this.now()).toISOString();
+    state.counters.last_drop_reason = info.reason;
+    const prior = this.dropAccum.get(info.reason);
+    if (prior) {
+      prior.count += info.count;
+    } else {
+      this.dropAccum.set(info.reason, { count: info.count, detail: info.detail });
+    }
+  }
+
+  /** Emit at most one report per reason per enqueue/drain cycle. */
+  private flushDropReports(): void {
+    for (const [reason, acc] of this.dropAccum) {
+      try {
+        this.onDrop({ reason, count: acc.count, detail: acc.detail });
+      } catch {
+        /* a reporting sink must never fail the caller */
+      }
+    }
+    this.dropAccum.clear();
+  }
+
+  // ── drain ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Tail the project journal from the cursor and enqueue everything new.
+   *
+   * The whole rotation/torn-line/demux contract lives here; see the module
+   * header for why the identity is the first line's hash and not an inode.
+   */
+  drainJournal(): DrainResult {
+    const result: DrainResult = {
+      lines_read: 0,
+      enqueued: 0,
+      skipped_no_run_id: 0,
+      skipped_malformed: 0,
+      torn_tail: false,
+      restarted: false,
+      bytes_consumed: 0,
+      skipped_locked: false,
+    };
+    if (!telemetrySyncEnabled(this.env)) return result;
+    if (!existsSync(this.journal)) return result;
+
+    // waitMs 0: a drain that loses the lock has lost nothing — the next poll
+    // reads the same bytes. Only enqueue, which would lose a record, waits.
+    const lock = tryLockSync(this.lockPath, this.now, 0);
+    if (!lock) {
+      result.skipped_locked = true;
+      return result;
+    }
+    // Hoisted so the catch below can still persist a cursor that advanced
+    // part-way through the loop.
+    let state: OutboxState | null = null;
+    try {
+      const st = safeStat(this.journal);
+      if (!st || !st.isFile()) return result;
+      state = this.loadState();
+
+      const anchor = journalAnchor(this.journal, st.size);
+      if (anchor === null) {
+        // No complete first line yet — the file is empty or its very first
+        // line is mid-append. Binding a provisional identity here would be a
+        // guess; waiting costs one poll interval.
+        result.torn_tail = st.size > 0;
+        if (result.torn_tail) state.counters.torn_line_retries += 1;
+        this.saveState(state);
+        return result;
+      }
+
+      const prior = state.cursor;
+      const mismatched =
+        prior === null ||
+        prior.anchor !== anchor ||
+        st.size < prior.offset ||
+        !offsetFollowsNewline(this.journal, prior.offset);
+      let cursor: JournalCursor;
+      if (mismatched) {
+        if (prior !== null) {
+          state.counters.rotations_detected += 1;
+          result.restarted = true;
+        }
+        cursor = {
+          anchor,
+          offset: 0,
+          ino: Number.isFinite(st.ino) && st.ino > 0 ? st.ino : null,
+          birthtime_ms: Number.isFinite(st.birthtimeMs) && st.birthtimeMs > 0 ? st.birthtimeMs : null,
+        };
+      } else {
+        cursor = prior;
+      }
+      state.cursor = cursor;
+
+      if (st.size <= cursor.offset) {
+        this.saveState(state);
+        return result;
+      }
+
+      const chunk = readRange(this.journal, cursor.offset, st.size);
+      const lastNl = chunk.lastIndexOf(NEWLINE);
+      if (lastNl < 0) {
+        // Everything new is one unterminated line. Do not parse it, do not
+        // skip it, do not advance — retry it whole next drain.
+        result.torn_tail = true;
+        state.counters.torn_line_retries += 1;
+        this.saveState(state);
+        return result;
+      }
+      const complete = chunk.subarray(0, lastNl + 1);
+      if (lastNl + 1 < chunk.length) {
+        result.torn_tail = true;
+        state.counters.torn_line_retries += 1;
+      }
+
+      this.syncQueueDepth();
+      // Line boundaries are found on the BUFFER, and the cursor advances by
+      // the exact byte count of each line as it is consumed. Two reasons:
+      // decoding first and measuring the decoded string would desync the
+      // offset the moment a byte is not valid UTF-8 (one replacement char is
+      // three bytes where the original was one), and a per-line advance means
+      // an exception part-way through leaves the cursor at the last line
+      // actually processed instead of re-reading — and re-SEQUENCING — the
+      // ones already queued.
+      let start = 0;
+      for (;;) {
+        const nl = complete.indexOf(NEWLINE, start);
+        if (nl < 0) break;
+        const lineBuf = complete.subarray(start, nl);
+        const advance = nl + 1 - start;
+        start = nl + 1;
+        cursor.offset += advance;
+        result.bytes_consumed += advance;
+
+        const line = lineBuf.toString('utf-8');
+        if (!line.trim()) continue;
+        result.lines_read += 1;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          parsed = undefined;
+        }
+        if (!isRecord(parsed)) {
+          // Newline-terminated but unparseable: genuinely malformed, not torn.
+          // Counted and stepped over — retrying it forever would wedge the
+          // queue behind one bad byte.
+          result.skipped_malformed += 1;
+          state.counters.dropped_malformed += 1;
+          this.noteDrop(state, {
+            reason: 'malformed',
+            count: 1,
+            detail: `${result.skipped_malformed} journal line(s) were not JSON objects`,
+          });
+          continue;
+        }
+        const before = state.counters.dropped_no_run_id;
+        const rec = this.appendFiltered(state, 'event', parsed);
+        if (rec) result.enqueued += 1;
+        else if (state.counters.dropped_no_run_id > before) result.skipped_no_run_id += 1;
+      }
+
+      this.saveState(state);
+      return result;
+    } catch {
+      // D2: the telemetry path NEVER throws into the run. Persist whatever the
+      // cursor reached so the lines already queued are not re-read (and so
+      // re-sequenced) on the next poll; if even that fails, the identity check
+      // makes a fresh start the worst case, never a stale seek.
+      try {
+        if (state) this.saveState(state);
+      } catch {
+        /* best effort */
+      }
+      return result;
+    } finally {
+      lock.release();
+      this.flushDropReports();
+    }
+  }
+
+  // ── introspection ─────────────────────────────────────────────────────────
+
+  /** Durable counters, read from disk so another process (`pipeline stats
+   *  telemetry`) sees the same numbers the daemon wrote. */
+  counters(): OutboxCounters {
+    const state = this.loadState();
+    this.syncQueueDepth();
+    return { ...state.counters, queued: this.queued };
+  }
+
+  /** The persisted cursor, or `null` before the first successful bind. */
+  cursor(): JournalCursor | null {
+    return this.loadState().cursor;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** The envelope `run_id`, else a nested `data.run_id` (the `awaiting_input` /
+ *  `manager.stopped` shapes carry it there too). Empty ⇒ unusable. */
+function readRunId(payload: Record<string, unknown>): string | null {
+  const top = payload.run_id;
+  if (typeof top === 'string' && top.trim()) return top.trim();
+  const data = payload.data;
+  if (isRecord(data) && typeof data.run_id === 'string' && data.run_id.trim()) {
+    return data.run_id.trim();
+  }
+  return null;
+}
+
+function recordKey(r: OutboxRecord): string {
+  return JSON.stringify([r.kind, r.run_id, r.seq]);
+}
+
+function parseRecord(line: string): OutboxRecord | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  const { org, run_id, seq, kind, payload } = parsed;
+  if (typeof org !== 'string' || !org) return null;
+  if (typeof run_id !== 'string' || !run_id) return null;
+  if (typeof seq !== 'number' || !Number.isInteger(seq)) return null;
+  if (kind !== 'event' && kind !== 'stats') return null;
+  if (!isRecord(payload)) return null;
+  return { org, run_id, seq, kind, payload };
+}
