@@ -84,9 +84,15 @@
 //
 // The executor spawn goes through an injectable ExecutorRunner seam. The
 // default runner shells out to `claude -p --agent pipeline:step-executor
-// --model {model} --plugin-dir {plugin_dir} --output-format json
-// --json-schema {schema}` (prompt ALWAYS via stdin; a `--flag {token}` pair is
-// dropped when its token resolves to nothing). `--plugin-dir` is what keeps
+// --model {model} --plugin-dir {plugin_dir} --output-format stream-json
+// --verbose --json-schema {schema}` (prompt ALWAYS via stdin; a `--flag
+// {token}` pair is dropped when its token resolves to nothing). `stream-json`
+// makes each tool call observable while the step runs (lib/stream-json.ts
+// parses the frames as they arrive and drive emits a `step.tool` progress
+// event per call); `--verbose` is REQUIRED with it — claude 2.1.222 refuses
+// `-p --output-format stream-json` without it before any API call. The
+// terminal `result` frame is the same envelope `--output-format json` printed,
+// and remains the ONLY token/cost source. `--plugin-dir` is what keeps
 // `--agent pipeline:step-executor` resolvable once Claude Code's `-p` mode
 // defaults to `--bare` (execution-modes wave 5.2) — bare mode skips
 // auto-discovery of plugins entirely, so the agent name would otherwise
@@ -147,12 +153,12 @@ import {
   addUsage,
   emptyUsage,
   loadUsageTotals,
-  parseEnvelope,
   parseResultObject,
   detectProviderLimit,
   type ClaudeEnvelope,
   type ProviderLimit,
 } from '../lib/envelope';
+import { ClaudeStreamParser, parseStream, type StreamSummary, type StreamToolCall } from '../lib/stream-json';
 import {
   RECORD_OUTCOMES as RECORD_OUTCOME_LIST,
   extractQuestion,
@@ -221,10 +227,26 @@ export interface ExecutorExit {
   code: number | null;
   /** Spawn-failure detail (code === null). */
   error?: string;
-  /** Captured stdout — the claude JSON envelope when the template passes
-   *  --output-format json; absent/garbage for custom templates (fine: the
-   *  caller falls back to the record file). */
+  /** Captured stdout — newline-delimited stream-json frames under the default
+   *  template; absent/garbage for custom templates (fine: the caller falls
+   *  back to the record file). */
   stdout?: string;
+  /** The stream-json summary the default subprocess runner built WHILE the
+   *  child was running (ux-v2 b6). Absent for injected fakes and any runner
+   *  that only captured text — `envelopeOf` then replays `stdout` through the
+   *  same parser, so both paths obey one contract. */
+  stream?: StreamSummary;
+}
+
+/** The step/self-improve envelope for one executor exit. Prefers the summary
+ *  the streaming parser already built (production: frames were consumed as
+ *  they arrived); falls back to replaying captured stdout through the SAME
+ *  parser, which also absorbs a custom template's buffered
+ *  `--output-format json` object. Never throws; null = no terminal `result`,
+ *  which is not by itself an error (SIGTERM/exit 143). */
+export function envelopeOf(exit: ExecutorExit): ClaudeEnvelope | null {
+  if (exit.stream !== undefined) return exit.stream.envelope;
+  return typeof exit.stdout === 'string' ? parseStream(exit.stdout).envelope : null;
 }
 
 /** The executor seam: spawn ONE step-executor and resolve when it exits. Tests
@@ -254,6 +276,16 @@ export interface DriveDeps {
 /** Default executor command. EXPERIMENTAL — the exact claude flags may need
  *  per-machine adjustment; override the whole template with --executor-cmd or
  *  PIPELINE_DRIVE_EXECUTOR_CMD. The prompt is always delivered on stdin.
+ *  `--output-format stream-json --verbose` (ux-v2 b6) is the live-progress
+ *  pair: one JSON frame per line as the step runs rather than one object at
+ *  exit, and `--verbose` is not optional — claude 2.1.222 rejects
+ *  `-p --output-format stream-json` without it at startup, before any API
+ *  call. `--json-schema` IS compatible with it: the terminal `result` frame
+ *  still carries `structured_output` (both measured for real, ux-v2 b5 probes
+ *  1-2). Schemas must be JSON Schema draft-07 — an explicit draft-2020-12
+ *  `$schema` is rejected at startup (b5 probe 3); lib/step-schema.ts and
+ *  lib/improver-schema.ts declare no `$schema` at all, which is the
+ *  implicit-draft-07 case b5 exercised end-to-end. Do not add a 2020-12 one.
  *  `{schema}` expands to the compact step-record JSON Schema (the harness
  *  validates the final response and returns it in `structured_output` — on
  *  claude versions where `-p --agent` supports it; 2.1.214 silently ignores
@@ -275,7 +307,7 @@ export interface DriveDeps {
  *  the plugin) drops the `--plugin-dir {plugin_dir}` pair entirely — same
  *  drop-on-no-value rule as `{effort}`, not an empty string. */
 export const DEFAULT_EXECUTOR_TEMPLATE =
-  'claude -p --agent pipeline:step-executor --model {model} --effort {effort} --permission-mode {permissions} --session-id {session} --add-dir {record_dir} --plugin-dir {plugin_dir} --output-format json --json-schema {schema}';
+  'claude -p --agent pipeline:step-executor --model {model} --effort {effort} --permission-mode {permissions} --session-id {session} --add-dir {record_dir} --plugin-dir {plugin_dir} --output-format stream-json --verbose --json-schema {schema}';
 
 export interface ExecutorArgvOpts {
   session?: { id: string; resume: boolean };
@@ -388,11 +420,33 @@ export function pluginDirToken(env: NodeJS.ProcessEnv = process.env): string | n
   return typeof v === 'string' && v.trim() !== '' ? v : null;
 }
 
+/** Cap on the raw stdout a spawn retains (the TAIL). Diagnostics only — the
+ *  streaming parser holds everything that matters, so this bound cannot cost a
+ *  record: the terminal `result` is the LAST thing a stream prints, and the
+ *  buffered-envelope fallback scans from the end too. */
+const MAX_CAPTURED_STDOUT = 1024 * 1024;
+
 /** The production ExecutorRunner: spawn the templated command, write the prompt
- *  to stdin, capture stdout (the JSON envelope) while relaying stdout+stderr to
- *  the drive stderr sink, and resolve with the exit code + captured stdout.
+ *  to stdin, and PARSE STDOUT AS IT ARRIVES (ux-v2 b6) — the default template
+ *  emits `--output-format stream-json --verbose`, one JSON frame per line, so
+ *  each tool call is observable while the step is still running instead of
+ *  only after it exits. Resolves with the exit code, the captured text (custom
+ *  templates / debugging) and the stream summary the parser built live.
+ *
+ *  What reaches the drive stderr sink changed with the format: relaying every
+ *  frame verbatim would bury the run's own progress lines under the model's
+ *  full transcript, so `onToolCall` surfaces ONE `step.tool` progress event per
+ *  tool call (subagent-attributed) and only non-JSON chatter — a wrapper
+ *  script's own output, the one thing the parser cannot interpret — is passed
+ *  through untouched. The child's stderr is relayed verbatim as before.
+ *
  *  Never throws — spawn failures resolve as {code:null, error}. */
-function subprocessExecutor(template: string, schema: string | null, err: (s: string) => void): ExecutorRunner {
+function subprocessExecutor(
+  template: string,
+  schema: string | null,
+  err: (s: string) => void,
+  onToolCall?: (req: ExecutorRequest, call: StreamToolCall) => void,
+): ExecutorRunner {
   const pluginDir = pluginDirToken();
   return (req) =>
     new Promise<ExecutorExit>((done) => {
@@ -413,6 +467,12 @@ function subprocessExecutor(template: string, schema: string | null, err: (s: st
       }
       let settled = false;
       let outBuf = '';
+      // Fed chunk-by-chunk below; rebuilt if the Windows shell retry fires so
+      // a half-read stream can never leak into the retry's summary.
+      let stream = new ClaudeStreamParser({
+        onToolCall: (call) => onToolCall?.(req, call),
+        onNonJson: (line) => err(line + '\n'),
+      });
       const finish = (r: ExecutorExit) => {
         if (!settled) {
           settled = true;
@@ -444,8 +504,16 @@ function subprocessExecutor(template: string, schema: string | null, err: (s: st
               env,
             });
         child.stdout?.on('data', (d: unknown) => {
-          outBuf += String(d);
-          err(String(d));
+          const text = String(d);
+          outBuf += text;
+          // stream-json is UNBOUNDED where one buffered envelope was not — a
+          // long step emits a frame per turn, per tool call and per thinking
+          // tick. Correctness no longer depends on this buffer (the parser
+          // below already consumed every frame), so keep only a TAIL for
+          // diagnostics and for the injected-fake path that re-reads `stdout`.
+          if (outBuf.length > MAX_CAPTURED_STDOUT) outBuf = outBuf.slice(-MAX_CAPTURED_STDOUT);
+          // Live: frames are discriminated here, mid-run, not after the exit.
+          stream.push(text);
         });
         child.stderr?.on('data', (d: unknown) => err(String(d)));
         child.on('error', (e: unknown) => {
@@ -454,6 +522,10 @@ function subprocessExecutor(template: string, schema: string | null, err: (s: st
           // spawn stays the default (no extra cmd.exe per step).
           if (!useShell && process.platform === 'win32') {
             outBuf = '';
+            stream = new ClaudeStreamParser({
+              onToolCall: (call) => onToolCall?.(req, call),
+              onNonJson: (line) => err(line + '\n'),
+            });
             launch(true);
             return;
           }
@@ -462,7 +534,12 @@ function subprocessExecutor(template: string, schema: string | null, err: (s: st
         child.on('close', (code: number | null) => {
           // A failed direct spawn also emits close(-1/null) after error — only
           // settle from the attempt that actually ran (finish() dedupes anyway).
-          if (child.pid !== undefined || useShell) finish({ code, stdout: outBuf });
+          if (child.pid !== undefined || useShell) {
+            // A stream cut short by SIGTERM (exit 143) simply has no terminal
+            // `result` frame — end() closes it without inventing an error.
+            stream.end();
+            finish({ code, stdout: outBuf, stream: stream.summary() });
+          }
         });
         child.stdin?.on('error', () => {}); // a dead child mustn't crash the driver on EPIPE
         if (child.pid !== undefined) {
@@ -665,12 +742,12 @@ export function selfImproveEnabled(env: NodeJS.ProcessEnv = process.env): boolea
  *  produce unstructured output — drive falls back to applied:false with a
  *  warning). */
 export const DEFAULT_IMPROVER_TEMPLATE =
-  'claude -p --agent pipeline:pipeline-improver --permission-mode acceptEdits --session-id {session} --plugin-dir {plugin_dir} --output-format json --json-schema {schema}';
+  'claude -p --agent pipeline:pipeline-improver --permission-mode acceptEdits --session-id {session} --plugin-dir {plugin_dir} --output-format stream-json --verbose --json-schema {schema}';
 
 /** Default script-creator command — the improver template's twin
  *  (PIPELINE_DRIVE_SCRIPT_CREATOR_CMD overrides). */
 export const DEFAULT_SCRIPT_CREATOR_TEMPLATE =
-  'claude -p --agent pipeline:pipeline-script-creator --permission-mode acceptEdits --session-id {session} --plugin-dir {plugin_dir} --output-format json --json-schema {schema}';
+  'claude -p --agent pipeline:pipeline-script-creator --permission-mode acceptEdits --session-id {session} --plugin-dir {plugin_dir} --output-format stream-json --verbose --json-schema {schema}';
 
 /** Feedback categories the retrospective feeds to the batch improver: the
  *  three general doc-actionable categories plus 'script-failure' (written only
@@ -1075,10 +1152,6 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
   process.env.PIPELINE_STATS_RUNNER = 'headless';
   // NOTE: the merge cwd is NOT process.cwd() — runMerge resolves the project
   // root enclosing --root itself (B3) so merges never land in a random cwd.
-  const template = a.executorCmd ?? process.env.PIPELINE_DRIVE_EXECUTOR_CMD ?? DEFAULT_EXECUTOR_TEMPLATE;
-  const executor = deps.executor ?? subprocessExecutor(template, stepRecordSchemaJson(), err);
-  const git = deps.git ?? realGit;
-
   const progress = (event: string, fields: Record<string, unknown> = {}) => {
     if (a.json) {
       err(JSON.stringify({ event, ...fields }) + '\n');
@@ -1089,6 +1162,25 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
       err(`[drive] ${event}${kv ? ' ' + kv : ''}\n`);
     }
   };
+
+  /** The live half of the stream-json swap (ux-v2 b6): one progress line per
+   *  tool call, emitted WHILE the spawn runs. `depth` is the measured
+   *  `parent_tool_use_id` chain length — 0 for the step-executor's own calls,
+   *  ≥1 for a subagent's (forwarding is not depth-1-only; a depth-2 call was
+   *  observed on claude 2.1.222). It rides the normal progress sink, so
+   *  `--json` keeps emitting well-formed event objects. */
+  const noteToolCall = (req: ExecutorRequest, call: StreamToolCall): void => {
+    progress('step.tool', {
+      step_id: req.step_id,
+      tool: call.tool,
+      depth: call.depth,
+      ...(call.parent_tool_use_id !== null ? { parent_tool_use_id: call.parent_tool_use_id } : {}),
+    });
+  };
+
+  const template = a.executorCmd ?? process.env.PIPELINE_DRIVE_EXECUTOR_CMD ?? DEFAULT_EXECUTOR_TEMPLATE;
+  const executor = deps.executor ?? subprocessExecutor(template, stepRecordSchemaJson(), err, noteToolCall);
+  const git = deps.git ?? realGit;
 
   // Track provider-limit errors for the final JSON (06.7 / D11). Any step may
   // hit a limit; the first one is captured so the caller can implement retry
@@ -1214,8 +1306,13 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     }
     const fold = finalized && statsEnabled() ? foldStepSessionTranscripts(readStepSessionRefs(sessionsDir)) : null;
     // Token base: envelope totals when any accumulated (they carry cost);
-    // else the transcript-folded totals (custom executor template without
-    // --output-format json, or every attempt crashed pre-envelope). All-zero
+    // else the transcript-folded totals (custom executor template that emits
+    // no result envelope, or every attempt crashed pre-envelope). The two are
+    // not redundant and the stream-json swap did not merge them (ux-v2 b6):
+    // the STREAM is for liveness, the FOLD is for accurate tokens, and the
+    // envelope side takes usage from the terminal `result` frame ONLY —
+    // accumulating the per-turn `assistant` usage the stream also carries
+    // would double every number here. All-zero
     // from both sources ⇒ leave the record pending — measured-as-zero would
     // be indistinguishable from a real zero and drag the SUMMARY averages.
     const hasEnvelopeUsage =
@@ -1245,13 +1342,19 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
   const selfImprove = selfImproveEnabled();
   const improverRunner =
     deps.improver ??
-    subprocessExecutor(process.env.PIPELINE_DRIVE_IMPROVER_CMD ?? DEFAULT_IMPROVER_TEMPLATE, improverSchemaJson(), err);
+    subprocessExecutor(
+      process.env.PIPELINE_DRIVE_IMPROVER_CMD ?? DEFAULT_IMPROVER_TEMPLATE,
+      improverSchemaJson(),
+      err,
+      noteToolCall,
+    );
   const scriptCreatorRunner =
     deps.scriptCreator ??
     subprocessExecutor(
       process.env.PIPELINE_DRIVE_SCRIPT_CREATOR_CMD ?? DEFAULT_SCRIPT_CREATOR_TEMPLATE,
       scriptCreatorSchemaJson(),
       err,
+      noteToolCall,
     );
 
   /** Worktree-scoped runs (P2/b3): the execution pipeline root invokeNext
@@ -1446,7 +1549,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         session: { id: sess.session_id, resume },
         permission_mode: null,
       });
-      const envelope = typeof exit.stdout === 'string' ? parseEnvelope(exit.stdout) : null;
+      const envelope = envelopeOf(exit);
       noteUsage(envelope);
       if (!detectedLimit && envelope) {
         const limit = detectProviderLimit(envelope);
@@ -1871,7 +1974,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         session: { id: sess.session_id, resume },
         permission_mode: permissionMode,
       });
-      const envelope = typeof exit.stdout === 'string' ? parseEnvelope(exit.stdout) : null;
+      const envelope = envelopeOf(exit);
       noteUsage(envelope);
       // Detect provider-limit errors (06.7) — capture the first one encountered
       // for the final JSON so the caller can implement retry policy.

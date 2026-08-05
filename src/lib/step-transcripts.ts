@@ -110,8 +110,8 @@ export interface StepTranscriptFold {
   tools_failed: number;
   agents_spawned: number;
   /** Transcript-folded token totals — the fallback token source when a run
-   *  accumulated no envelope usage (custom executor template without
-   *  --output-format json, or every attempt crashed pre-envelope). */
+   *  accumulated no envelope usage (a custom executor template that emits no
+   *  terminal `result` frame, or every attempt crashed pre-envelope). */
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens: number;

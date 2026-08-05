@@ -199,7 +199,8 @@ test('buildExecutorArgv: default template substitutes {model}+{schema}; drops a 
     '--model',
     'sonnet',
     '--output-format',
-    'json',
+    'stream-json',
+    '--verbose',
     '--json-schema',
     schema,
   ]);
@@ -210,11 +211,15 @@ test('buildExecutorArgv: default template substitutes {model}+{schema}; drops a 
     '--agent',
     'pipeline:step-executor',
     '--output-format',
-    'json',
+    'stream-json',
+    '--verbose',
     '--json-schema',
     schema,
   ]);
-  // No schema (custom runner without envelope support) → the --json-schema pair drops.
+  // No schema (custom runner without envelope support) → the --json-schema
+  // pair drops, and takes ONLY its own flag with it: `--verbose` is a bare
+  // flag, not the schema's, and must survive — without it claude refuses
+  // `-p --output-format stream-json` at startup (measured on 2.1.222).
   expect(buildExecutorArgv(DEFAULT_EXECUTOR_TEMPLATE, 'sonnet', null)).toEqual([
     'claude',
     '-p',
@@ -223,7 +228,8 @@ test('buildExecutorArgv: default template substitutes {model}+{schema}; drops a 
     '--model',
     'sonnet',
     '--output-format',
-    'json',
+    'stream-json',
+    '--verbose',
   ]);
   // A custom template whose {model} token has no preceding flag: only the token drops.
   expect(buildExecutorArgv('bun fake.ts {model}', null)).toEqual(['bun', 'fake.ts']);
@@ -278,7 +284,8 @@ test('buildExecutorArgv: {session}/{permissions} tokens — pin, resume-swap, dr
     '--session-id',
     'u-1',
     '--output-format',
-    'json',
+    'stream-json',
+    '--verbose',
     '--json-schema',
     schema,
   ]);

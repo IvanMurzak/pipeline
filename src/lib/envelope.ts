@@ -1,13 +1,21 @@
-// Parser for the `claude -p --output-format json` result envelope.
+// The `claude -p` result envelope — its SHAPE, and the buffered reader for it.
 //
-// With `--output-format json` a headless claude process prints exactly ONE
-// JSON object on stdout when it exits — the "envelope": result text, session
-// id, cost/usage, error flags, and (when `--json-schema` was passed) the
-// schema-validated `structured_output` object. `pipeline drive` captures the
-// executor's stdout and feeds it here; everything in this module is pure and
-// defensive — any non-envelope stdout (custom --executor-cmd templates print
-// whatever they like) parses to null and the caller falls back to the
-// agent-written step record file.
+// The envelope is the terminal `type:"result"` object: result text, session id,
+// cost/usage, error flags, and (when `--json-schema` was passed) the
+// schema-validated `structured_output`. It is emitted the same way under both
+// output formats — as the ONLY object under `--output-format json`, and as the
+// LAST newline-delimited object under `--output-format stream-json`.
+//
+// `pipeline drive` and the UI's AI-fix job now read the stream incrementally
+// through lib/stream-json.ts (live tool-call granularity) and build the
+// envelope from the terminal frame via `envelopeFromResultFrame` below.
+// `parseEnvelope` — the whole-of-stdout reader — remains as the fallback for
+// custom `--executor-cmd` templates that still print one buffered
+// `--output-format json` object, possibly pretty-printed across lines.
+//
+// Everything in this module is pure and defensive: any non-envelope stdout
+// (custom templates print whatever they like) parses to null and the caller
+// falls back to the agent-written step record file.
 //
 // Field reference (verified against Claude Code 2.1.205):
 //   type:"result" subtype:"success"|"error_*" is_error result session_id
@@ -119,10 +127,22 @@ function isResultEnvelope(o: Record<string, unknown> | null): o is Record<string
 }
 
 /**
- * Extract the result envelope from a headless executor's captured stdout.
- * Tolerates leading noise (a wrapper script echoing before exec'ing claude):
- * tries the whole text first, then scans lines from the END for the last one
- * that parses to a `type:"result"` object. Returns null when there is none.
+ * Build the envelope from ONE already-parsed frame — the seam the streaming
+ * parser (lib/stream-json.ts) uses on the terminal `type:"result"` line, so
+ * both output formats produce a byte-identical envelope from identical fields.
+ * Null when the frame is not a `result`.
+ */
+export function envelopeFromResultFrame(frame: Record<string, unknown>): ClaudeEnvelope | null {
+  return isResultEnvelope(frame) ? toEnvelope(frame) : null;
+}
+
+/**
+ * Extract the result envelope from a headless executor's captured stdout — the
+ * BUFFERED reader, kept as lib/stream-json.ts's end-of-stream fallback for
+ * custom templates that print one `--output-format json` object rather than a
+ * stream. Tolerates leading noise (a wrapper script echoing before exec'ing
+ * claude): tries the whole text first, then scans lines from the END for the
+ * last one that parses to a `type:"result"` object. Null when there is none.
  */
 export function parseEnvelope(stdout: string): ClaudeEnvelope | null {
   const text = stdout.trim();
