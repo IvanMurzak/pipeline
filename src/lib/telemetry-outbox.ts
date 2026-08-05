@@ -96,6 +96,17 @@
 // counted durably in `state.json` and reported through `onDrop`. Silent loss
 // is unacceptable — `pipeline stats telemetry` (`b13`) reads these counters.
 //
+// 5. A PERMANENTLY-REJECTED RECORD IS SET ASIDE, NOT DELETED (`b10`). The
+//    uploader's 4xx rule is "quarantine — never hot-loop on a permanently
+//    malformed record". Quarantining lives HERE rather than in the uploader
+//    because the queue files and their accounting are this module's: a record
+//    is appended to `quarantine.jsonl` FIRST and only then removed from
+//    `outbox.jsonl`, so a crash mid-move duplicates (harmless — the wire is
+//    idempotent on `(run_id, seq)` and quarantine is never re-sent) and never
+//    loses. The count lands in the SAME `state.json` counters and is reported
+//    through the SAME `onDrop` sink as every other loss, so there is one place
+//    to look rather than two.
+//
 // Everything lives under `ensureGeneratedDir`, so the tree carries its own
 // `.gitignore` and a `git add -A` after a run cannot sweep the queue into a
 // commit.
@@ -129,10 +140,18 @@ import {
 // Constants
 // ---------------------------------------------------------------------------
 
-/** `state.json` schema. Bumped when the cursor or counter shape changes; an
- *  unrecognized version is treated as "no state" (start fresh), never guessed
- *  at — a mis-parsed cursor is exactly the stale-offset failure this file
- *  exists to prevent. */
+/** `state.json` schema. Bumped when the cursor or counter shape changes in a
+ *  way that makes an OLD state file misread; an unrecognized version is
+ *  treated as "no state" (start fresh), never guessed at — a mis-parsed cursor
+ *  is exactly the stale-offset failure this file exists to prevent.
+ *
+ *  ADDITIVE counters do NOT bump it, and `b10`'s `quarantined` /
+ *  `quarantine_depth` deliberately did not. `loadState` copies only keys the
+ *  in-memory shape already has (`if (k in c)`), so an old file missing them
+ *  reads as `0` and a new file is ignored field-by-field by an older binary —
+ *  both directions are safe. Bumping would have been actively harmful: every
+ *  existing state file would be discarded, the cursor with it, and the whole
+ *  journal re-read and RE-SEQUENCED. */
 export const OUTBOX_STATE_SCHEMA = 1;
 
 /** Master telemetry opt-out (`03` F1). Same falsy parse as
@@ -159,6 +178,10 @@ const NEWLINE = 0x0a;
 const OUTBOX_FILE = 'outbox.jsonl';
 const STATE_FILE = 'state.json';
 const LOCK_FILE = 'drain.lock';
+/** Records the server permanently rejected (`b10`'s 4xx rule). Set aside for
+ *  inspection by `pipeline stats telemetry`; never re-sent, never deleted by
+ *  this module except at the bound. */
+const QUARANTINE_FILE = 'quarantine.jsonl';
 
 /** A drain that cannot take the lock is free to skip — the next poll picks the
  *  work up. An enqueue that cannot take it would LOSE a record, so it waits. */
@@ -215,12 +238,18 @@ export interface OutboxCounters {
   rotations_detected: number;
   /** Per-run `seq` counters evicted by the LRU bound. */
   run_counters_evicted: number;
+  /** Records moved to `quarantine.jsonl` after a permanent server rejection
+   *  (`b10`, 4xx). NOT a loss — the records are still on disk — but counted
+   *  here so one command reports every record that left the send path. */
+  quarantined: number;
+  /** Current depth of `quarantine.jsonl`. */
+  quarantine_depth: number;
   last_drop_at: string | null;
   last_drop_reason: string | null;
 }
 
 export interface DropInfo {
-  reason: 'bound' | 'no_run_id' | 'malformed' | 'lock_contention';
+  reason: 'bound' | 'no_run_id' | 'malformed' | 'lock_contention' | 'quarantine';
   count: number;
   /** Human-readable, and deliberately CONTENT-FREE: never the payload. */
   detail: string;
@@ -332,6 +361,8 @@ function emptyCounters(): OutboxCounters {
     torn_line_retries: 0,
     rotations_detected: 0,
     run_counters_evicted: 0,
+    quarantined: 0,
+    quarantine_depth: 0,
     last_drop_at: null,
     last_drop_reason: null,
   };
@@ -523,9 +554,17 @@ export class TelemetryOutbox {
   readonly org: string;
   readonly projectRoot: string;
 
+  /** The deterministic path-fingerprint salt this outbox filtered with (`b15`).
+   *  PUBLIC so `b10`'s wire-side re-filter uses the SAME salt — a different one
+   *  would re-fingerprint an already-fingerprinted path into a value nothing
+   *  else correlates with. Not a secret: `07` T16 records that the default salt
+   *  is public. */
+  readonly fingerprintSalt: string;
+
   private readonly outboxPath: string;
   private readonly statePath: string;
   private readonly lockPath: string;
+  private readonly quarantinePath: string;
   private readonly journal: string;
   private readonly maxRecords: number;
   private readonly maxTrackedRuns: number;
@@ -554,6 +593,7 @@ export class TelemetryOutbox {
     this.env = opts.env ?? process.env;
     this.now = opts.now ?? (() => Date.now());
     this.salt = opts.fingerprintSalt ?? '';
+    this.fingerprintSalt = this.salt;
     this.maxRecords = Math.max(1, opts.maxRecords ?? DEFAULT_MAX_RECORDS);
     this.maxTrackedRuns = Math.max(1, opts.maxTrackedRuns ?? DEFAULT_MAX_TRACKED_RUNS);
 
@@ -565,6 +605,7 @@ export class TelemetryOutbox {
     this.outboxPath = join(this.dir, OUTBOX_FILE);
     this.statePath = join(this.dir, STATE_FILE);
     this.lockPath = join(this.dir, LOCK_FILE);
+    this.quarantinePath = join(this.dir, QUARANTINE_FILE);
     this.journal = journalPath(opts.projectRoot);
 
     // The stub goes at the `.runtime` ROOT, not on this subfolder — `*` there
@@ -677,19 +718,13 @@ export class TelemetryOutbox {
   /** Every record currently queued, oldest first. Unparseable lines (a torn
    *  write from a killed process) are skipped rather than trusted. */
   readAll(): OutboxRecord[] {
-    let raw: string;
-    try {
-      raw = readFileSync(this.outboxPath, 'utf-8');
-    } catch {
-      return [];
-    }
-    const out: OutboxRecord[] = [];
-    for (const line of raw.split('\n')) {
-      if (!line) continue;
-      const rec = parseRecord(line);
-      if (rec) out.push(rec);
-    }
-    return out;
+    return readRecordFile(this.outboxPath);
+  }
+
+  /** Every record the server permanently rejected, oldest first. Read-only:
+   *  quarantine is an inspection surface (`b13`), never a send queue. */
+  readQuarantine(): OutboxRecord[] {
+    return readRecordFile(this.quarantinePath);
   }
 
   /**
@@ -730,6 +765,94 @@ export class TelemetryOutbox {
     this.queued = records.length;
     const st = safeStat(this.outboxPath);
     this.observedSize = st ? st.size : 0;
+  }
+
+  /**
+   * Move `records` out of the send queue and into `quarantine.jsonl` — `b10`'s
+   * 4xx outcome. Returns how many were moved.
+   *
+   * WRITE-BEFORE-REMOVE, deliberately. The quarantine append is durable before
+   * `ack` deletes anything, so the only crash window duplicates a record
+   * (present in both files) instead of losing it. A duplicate costs nothing:
+   * quarantine is never re-sent, and the wire is idempotent on `(run_id, seq)`
+   * anyway. The reverse order would trade a guaranteed-safe duplicate for a
+   * silent permanent loss, which `04` §4 forbids.
+   *
+   * Takes the drain lock so this read-modify-write of `outbox.jsonl` cannot
+   * interleave with a concurrent `enqueue` and lose that process's append.
+   * Failing to take it moves NOTHING and is counted — the records stay queued
+   * and the next flush retries, which cannot hot-loop because the uploader's
+   * own retry schedule is persistent.
+   */
+  quarantine(records: OutboxRecord[]): number {
+    if (records.length === 0) return 0;
+    const lock = tryLockSync(this.lockPath, this.now, ENQUEUE_LOCK_WAIT_MS);
+    if (!lock) {
+      const state = this.loadState();
+      state.counters.dropped_lock_contention += 1;
+      this.noteDrop(state, {
+        reason: 'lock_contention',
+        count: 1,
+        detail: `quarantine of ${records.length} record(s) deferred — the drain lock was held`,
+      });
+      this.saveState(state);
+      this.flushDropReports();
+      return 0;
+    }
+    try {
+      const state = this.loadState();
+      // Only records actually still queued are moved — quarantining something
+      // already gone would inflate the counter and write a phantom line.
+      const queuedKeys = new Set(this.readAll().map(recordKey));
+      const moving = records.filter((r) => queuedKeys.has(recordKey(r)));
+      if (moving.length === 0) return 0;
+      try {
+        appendFileSync(this.quarantinePath, moving.map((r) => `${JSON.stringify(r)}\n`).join(''), 'utf-8');
+      } catch {
+        // The set-aside file could not be written (read-only checkout, disk
+        // full). Removing the records now would lose them, so nothing moves.
+        return 0;
+      }
+      const removed = this.ack(moving);
+      state.counters.quarantined += removed;
+      this.noteDrop(state, {
+        reason: 'quarantine',
+        count: removed,
+        detail: `${removed} record(s) permanently rejected by the server — set aside in ${QUARANTINE_FILE}, not deleted`,
+      });
+      this.enforceQuarantineBound(state);
+      this.saveState(state);
+      return removed;
+    } catch {
+      // D2: never throw into the run.
+      return 0;
+    } finally {
+      lock.release();
+      this.flushDropReports();
+    }
+  }
+
+  /** The quarantine file is bounded by the same record bound as the queue, so
+   *  a server rejecting everything cannot grow a file without limit. Oldest
+   *  first, counted under `bound` like every other capacity drop. */
+  private enforceQuarantineBound(state: OutboxState): void {
+    const all = readRecordFile(this.quarantinePath);
+    state.counters.quarantine_depth = all.length;
+    if (all.length <= this.maxRecords) return;
+    const dropCount = all.length - this.maxRecords;
+    const kept = all.slice(dropCount);
+    try {
+      writeFileAtomic(this.quarantinePath, kept.length ? `${kept.map((r) => JSON.stringify(r)).join('\n')}\n` : '');
+    } catch {
+      return;
+    }
+    state.counters.quarantine_depth = kept.length;
+    state.counters.dropped_bound += dropCount;
+    this.noteDrop(state, {
+      reason: 'bound',
+      count: dropCount,
+      detail: `${QUARANTINE_FILE} bound ${this.maxRecords} reached — dropped the ${dropCount} oldest quarantined record(s)`,
+    });
   }
 
   // ── enqueue ───────────────────────────────────────────────────────────────
@@ -1068,7 +1191,14 @@ export class TelemetryOutbox {
   counters(): OutboxCounters {
     const state = this.loadState();
     this.syncQueueDepth();
-    return { ...state.counters, queued: this.queued };
+    // Both depths are re-derived from the files rather than trusted from
+    // `state.json` — another process may have moved records since it was
+    // written, and a depth that disagrees with the file is a lie.
+    return {
+      ...state.counters,
+      queued: this.queued,
+      quarantine_depth: countLines(this.quarantinePath),
+    };
   }
 
   /** The persisted cursor, or `null` before the first successful bind. */
@@ -1097,8 +1227,41 @@ function readRunId(payload: Record<string, unknown>): string | null {
   return null;
 }
 
+/**
+ * A record's identity within the queue files.
+ *
+ * `org` is part of it, and that is load-bearing rather than tidy. Without it,
+ * two records sharing `(kind, run_id, seq)` but queued under DIFFERENT orgs are
+ * indistinguishable — so acking (or quarantining) the current org's record
+ * would silently delete the other org's, which the flush had just correctly
+ * refused to send. `b10`'s "the refusal survives a run_id collision" test is
+ * exactly that case, and it fails with `org` removed from this key.
+ *
+ * The collision is reachable: `state.json` holds ONE `seq` map for the project,
+ * not one per org, so a state file that is reset (schema mismatch, hand-delete,
+ * fresh clone) while records from a previous org are still queued re-issues
+ * `seq` from 1 under the new org.
+ */
 function recordKey(r: OutboxRecord): string {
-  return JSON.stringify([r.kind, r.run_id, r.seq]);
+  return JSON.stringify([r.org, r.kind, r.run_id, r.seq]);
+}
+
+/** Read a `.jsonl` record file, oldest first. Unparseable lines (a torn write
+ *  from a killed process, or a hand-edit) are skipped rather than trusted. */
+function readRecordFile(path: string): OutboxRecord[] {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf-8');
+  } catch {
+    return [];
+  }
+  const out: OutboxRecord[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    const rec = parseRecord(line);
+    if (rec) out.push(rec);
+  }
+  return out;
 }
 
 function parseRecord(line: string): OutboxRecord | null {
