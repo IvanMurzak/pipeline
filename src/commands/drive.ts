@@ -497,11 +497,23 @@ function subprocessExecutor(
         // JSON's quotes inside cmd.exe.
         // Executor retry environment (08.4): set defaults that may be overridden
         // via template/env (only override absent values).
-        const env = {
+        const env: NodeJS.ProcessEnv = {
           ...process.env,
           CLAUDE_CODE_RETRY_WATCHDOG: process.env.CLAUDE_CODE_RETRY_WATCHDOG ?? '1',
           CLAUDE_CODE_MAX_RETRIES: process.env.CLAUDE_CODE_MAX_RETRIES ?? '15',
         };
+        // ux-v2 b8 / T18: `CLAUDE_CODE_FORWARD_SUBAGENT_TEXT` enables the same
+        // subagent-text/thinking forwarding as `--forward-subagent-text` —
+        // NEITHER of which this template ever passes — and a child inherits it
+        // from whatever shell launched `pipeline drive` (CI images export
+        // things). Not setting the flag is therefore not sufficient: the
+        // variable must be deleted from the CHILD's environment explicitly, not
+        // merely left unset in this process (`...process.env` above would
+        // otherwise carry it straight through). This covers all three
+        // spawn-templated sessions this function runs (step-executor, improver,
+        // script-creator) and both the direct and shell-retry launch paths
+        // below, since `env` is built once and reused by both.
+        delete env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT;
         const child = useShell
           ? spawn(argv.map(quoteForShell).join(' '), {
               stdio: ['pipe', 'pipe', 'pipe'],

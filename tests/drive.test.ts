@@ -1601,3 +1601,60 @@ process.exit(0);
   expect(captured.CLAUDE_CODE_RETRY_WATCHDOG).toBe('1');
   expect(captured.CLAUDE_CODE_MAX_RETRIES).toBe('15');
 }, 30000);
+
+// ux-v2 b8 / T18: CLAUDE_CODE_FORWARD_SUBAGENT_TEXT enables the same
+// subagent-text/thinking forwarding as --forward-subagent-text (never passed
+// by any template) and a child inherits it from whatever shell launched
+// `pipeline drive`. Not setting the flag is therefore not sufficient — the
+// variable must be explicitly deleted from the CHILD's environment. This
+// proves it end-to-end: the PARENT shell (this test process, via `drive()`'s
+// `{...process.env}`) exports the var, and the executor two levels down
+// (spawned by `subprocessExecutor`) must never see it.
+test('drive: executor env deletes CLAUDE_CODE_FORWARD_SUBAGENT_TEXT even when the parent shell exports it (SG11, T18)', () => {
+  const root = scaffold(1);
+  const plan = computePlan(root);
+  const capEnv = `// FakeExecutorRunner: captures whether CLAUDE_CODE_FORWARD_SUBAGENT_TEXT reached this process.
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
+const prompt = await Bun.stdin.text();
+const m = /^step_record_file = (.+)$/m.exec(prompt);
+if (!m) process.exit(9);
+const recordFile = m[1].trim();
+const rm = /^pipeline_root = (.+)$/m.exec(prompt);
+const root = rm ? rm[1].trim() : dirname(dirname(dirname(dirname(recordFile))));
+const canned = join(root, 'canned');
+mkdirSync(canned, { recursive: true });
+
+writeFileSync(join(canned, 'executor-env.json'), JSON.stringify({
+  hasForwardSubagentText: 'CLAUDE_CODE_FORWARD_SUBAGENT_TEXT' in process.env,
+  value: process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT ?? null,
+}), 'utf8');
+
+writeFileSync(recordFile, JSON.stringify({ outcome: 'completed' }), 'utf8');
+process.exit(0);
+`;
+  writeFileSync(join(root, 'capture-forward-env.ts'), capEnv, 'utf8');
+  const template = `bun ${join(root, 'capture-forward-env.ts')}`;
+
+  // Simulate "the parent shell exporting it": set it on THIS test process,
+  // which is what `drive()`'s `{...process.env}` inherits into the `pipeline
+  // drive` subprocess it spawns. Restored afterwards so no other test
+  // observes it.
+  const prior = process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT;
+  process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT = '1';
+  try {
+    const r = drive(root, 'forwardtext', ['--start', plan.steps[0].path], { template });
+    expect(r.status).toBe(0);
+    const captured = JSON.parse(readFileSync(join(root, 'canned', 'executor-env.json'), 'utf8'));
+    // The var reached the outer `pipeline drive` process (sanity check the
+    // simulated "parent shell export" actually worked)...
+    expect('CLAUDE_CODE_FORWARD_SUBAGENT_TEXT' in { ...process.env }).toBe(true);
+    // ...but the executor two levels down never sees it.
+    expect(captured.hasForwardSubagentText).toBe(false);
+    expect(captured.value).toBe(null);
+  } finally {
+    if (prior === undefined) delete process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT;
+    else process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT = prior;
+  }
+}, 30000);
