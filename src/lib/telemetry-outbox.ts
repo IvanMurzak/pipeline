@@ -748,9 +748,57 @@ export class TelemetryOutbox {
     return { sendable, blocked };
   }
 
-  /** Remove records by `(kind, run_id, seq)`. Returns how many were removed. */
+  /**
+   * Remove records by `(kind, run_id, seq)`. Returns how many were removed.
+   *
+   * Takes the drain lock (ux-v2 `b12`) — `enqueue`/`drainJournal`/`quarantine`
+   * already did; `ack` was the one read-modify-write of `outbox.jsonl` that
+   * did not, which was harmless only as long as nothing but the single,
+   * self-serialized daemon ever called it. `b12` makes that assumption false:
+   * a long-lived `pipeline drive` process now ALSO drains this project's
+   * journal in-process, concurrently with whatever daemon may be flushing the
+   * SAME project. An unlocked `ack()` could then race a concurrent
+   * `enqueue`'s append: read an N-record snapshot before the append, then
+   * `rewrite()` — a full-file replace — after it, silently dropping the
+   * just-appended record. Losing the lock race here costs nothing, same as
+   * every other locked path in this module: the records stay queued, this
+   * flush under-reports `records_sent` for them, and the next flush re-sends
+   * — a harmless duplicate the server's `(run_id, seq)` dedup absorbs.
+   *
+   * `quarantine()` below calls `ackLocked` (not this method) for its own
+   * removal step — it already holds this SAME lock, and `wx`-exclusive-create
+   * locks are not reentrant; a second acquisition attempt from within the
+   * first would simply wait out `ENQUEUE_LOCK_WAIT_MS` and lose the race
+   * against itself every time.
+   */
   ack(records: OutboxRecord[]): number {
     if (records.length === 0) return 0;
+    const lock = tryLockSync(this.lockPath, this.now, ENQUEUE_LOCK_WAIT_MS);
+    if (!lock) {
+      const state = this.loadState();
+      state.counters.dropped_lock_contention += 1;
+      this.noteDrop(state, {
+        reason: 'lock_contention',
+        count: 1,
+        detail: `ack of ${records.length} record(s) deferred — the drain lock was held`,
+      });
+      this.saveState(state);
+      this.flushDropReports();
+      return 0;
+    }
+    try {
+      return this.ackLocked(records);
+    } finally {
+      lock.release();
+      this.flushDropReports();
+    }
+  }
+
+  /** The read-filter-rewrite core of `ack()`, WITHOUT taking the lock —
+   *  callable only by a caller that already holds `this.lockPath` (currently
+   *  just `quarantine()`, whose write-then-remove sequence must be one
+   *  atomic critical section, not two separately-locked halves). */
+  private ackLocked(records: OutboxRecord[]): number {
     const keys = new Set(records.map(recordKey));
     const all = this.readAll();
     const kept = all.filter((r) => !keys.has(recordKey(r)));
@@ -813,7 +861,7 @@ export class TelemetryOutbox {
         // full). Removing the records now would lose them, so nothing moves.
         return 0;
       }
-      const removed = this.ack(moving);
+      const removed = this.ackLocked(moving);
       state.counters.quarantined += removed;
       this.noteDrop(state, {
         reason: 'quarantine',

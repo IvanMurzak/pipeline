@@ -484,6 +484,41 @@ export function uploadStatePath(projectRoot: string): string {
   return join(telemetryDir(projectRoot), UPLOAD_STATE_FILE);
 }
 
+/**
+ * Best-effort, LOCAL-ONLY signal that the last flush attempt failed and
+ * scheduled a retry — i.e. there is PERSISTED evidence we could not reach the
+ * control plane recently, without this call making a network request itself
+ * (`03` D7/D8: composing the run link must never round-trip to the server).
+ *
+ * Reads `upload.json`'s `next_attempt_at` — written by `scheduleBackoff`
+ * above on ANY retryable failure (5xx, network error, or a KEPT 4xx) — the
+ * same way `TelemetryUploader.loadState()` does. A missing, corrupt, or
+ * absent file reads as "no known backoff", the permissive direction: a
+ * project with no flush history yet (nothing has ever tried and failed) is
+ * assumed reachable rather than falsely flagged offline. Used by `pipeline
+ * drive` (ux-v2 `b12`) to decide whether the printed run link gets the
+ * "offline, will sync when connected" suffix (`03` F3 / `08` J3).
+ *
+ * Never throws.
+ */
+export function hasPendingUploadBackoff(
+  projectRoot: string,
+  now: () => number = () => Date.now(),
+): boolean {
+  try {
+    const path = uploadStatePath(projectRoot);
+    if (!existsSync(path)) return false;
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as {
+      schema?: unknown;
+      next_attempt_at?: unknown;
+    };
+    if (parsed.schema !== UPLOAD_STATE_SCHEMA) return false;
+    return typeof parsed.next_attempt_at === 'number' && parsed.next_attempt_at > now();
+  } catch {
+    return false;
+  }
+}
+
 /** Exponential backoff with ±25 % jitter, capped. */
 export function backoffDelayMs(
   attempt: number,

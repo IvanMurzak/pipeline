@@ -93,7 +93,9 @@ import {
 } from '../lib/next';
 import { MANIFEST_FILENAME } from '../lib/manifest';
 import { MANIFEST_BASENAME } from '../lib/migrate';
-import { emitEvent } from '../lib/event';
+import { emitEvent, resolveProjectRoot } from '../lib/event';
+import { telemetrySyncEnabled } from '../lib/telemetry-outbox';
+import { tailProjectJournal } from '../lib/telemetry-tail';
 import { statsAppend, statsEnabled, statsFinalizeRun } from '../lib/stats';
 import { backfillProject, findStatsProjectRoot } from '../lib/stats-backfill';
 import { resolveHookScript, runHook, parseHookJson, tail } from '../lib/hooks';
@@ -2624,7 +2626,25 @@ export function invokeNext(a: InvokeNextArgs): InvokeNextResult {
       code: 1,
     };
   }
-  return invokeComposed(a, 0);
+  const result = invokeComposed(a, 0);
+  // Step-boundary flush (ux-v2 b12): LOCAL-ONLY journal tail (never a network
+  // upload — see lib/telemetry-tail.ts's header) after every external call.
+  // Placed HERE, wrapping the top-level entry rather than inside
+  // invokeComposed/invokeNextCore, so a composed run's internal
+  // parent/child/script-chain recursion tails ONCE per external call, not
+  // once per internal step. Applies uniformly to BOTH callers this function
+  // has: the `pipeline next` CLI (the pipeline-manager-driven path) and
+  // `pipeline drive`'s own in-process loop, which calls invokeNext directly
+  // per step — drive.ts does not duplicate this call for that reason.
+  // Gated on PIPELINE_SYNC_LOCAL_STATS first so a project running with
+  // telemetry off skips even the resolveProjectRoot walk; tailProjectJournal
+  // itself re-gates on a connected project (`03` F7), so an unconnected
+  // project pays only one more existsSync. Best-effort — never affects the
+  // action or exit code (same contract as this file's other auto-emissions).
+  if (telemetrySyncEnabled(process.env)) {
+    tailProjectJournal(resolveProjectRoot(process.cwd()).project_root);
+  }
+  return result;
 }
 
 /** Remaining call budget for a nested (child/pop) invocation: the outer

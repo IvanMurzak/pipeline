@@ -171,8 +171,14 @@ import {
   parseScriptCreatorOutput,
   scriptCreatorSchemaJson,
 } from '../lib/improver-schema';
-import { emitEvent, emitEventJson, registerDriveSessionBinding } from '../lib/event';
+import { emitEvent, emitEventJson, registerDriveSessionBinding, resolveProjectRoot } from '../lib/event';
 import { newId } from '../lib/ids';
+import { cloudJsonPath, readCloudBinding, realFs as realCloudFs } from '../lib/cloud-config';
+import { appOriginFor } from '../lib/department-serve';
+import { telemetrySyncEnabled } from '../lib/telemetry-outbox';
+import { hasPendingUploadBackoff } from '../lib/telemetry-upload';
+import { tailProjectJournal } from '../lib/telemetry-tail';
+import { ensureTelemetryDaemonRunning } from './telemetry-daemon';
 
 // Re-exported for record consumers that historically imported from here.
 export { extractQuestion, type StepQuestion };
@@ -189,6 +195,66 @@ import { parseFrontmatter } from '../lib/frontmatter';
 
 // Re-exported: StepSession historically lived here (launcher/tests import it).
 export type { StepSession };
+
+// ---------------------------------------------------------------------------
+// The dashboard link (ux-v2 b12)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compose the run's dashboard URL — ENTIRELY locally: org slug from
+ * `cloud.json`'s `server`/`org`, run UUID already minted by the caller
+ * (`newId()`, `b1`). No server round trip (`03` D7/D8) — since D7 withdrew
+ * the derived short code, there is nothing about this URL that can later
+ * fail to resolve; it is correct the moment it is printed.
+ *
+ * The host is the control-plane API's own origin (`appOriginFor`,
+ * `lib/department-serve.ts`), NOT the bare `server` string reduced to its
+ * apex. That module's own header documents why, with production evidence:
+ * the dashboard SPA is served from the SAME origin as `/api/v1` (e.g.
+ * `https://api.ai-pipeline.dev`); the apex is the MARKETING site and has no
+ * run-detail route, so a link built by stripping the `api.` label 404s.
+ * Reusing that exact, already-verified function — rather than re-deriving
+ * the same host a third time — is deliberate.
+ */
+export function composeRunLink(server: string, org: string, runId: string): string {
+  return `${appOriginFor(server)}/${org}/runs/${runId}`;
+}
+
+/**
+ * Best-effort, telemetry-gated run-start work: print the dashboard link (F2/
+ * J2, within the first two printed lines, before step 1) and — for the SAME
+ * project — ensure a background uploader exists and tail whatever the run
+ * has journaled so far into the durable outbox. Everything here is LOCAL
+ * ONLY (an existsSync, a JSON read, at most one detached spawn); the actual
+ * network flush stays the daemon's job — see `lib/telemetry-tail.ts`'s
+ * header for why, and `telemetry-upload.ts`'s own header for the rule this
+ * keeps ("not inline in drive").
+ *
+ * F7 (`03`): with NO `.pipeline/cloud.json` at all, this prints nothing and
+ * spawns nothing — checked by the caller BEFORE this is invoked, so an
+ * unconnected project pays only that one `existsSync`, never this function's
+ * body. `PIPELINE_SYNC_LOCAL_STATS=0` is the same "absent" gate — see
+ * `runDrive`'s call site, which checks both before resolving anything else.
+ */
+function driveRunStartTelemetry(
+  telemetryProjectRoot: string,
+  runId: string,
+  progress: (event: string, fields?: Record<string, unknown>) => void,
+): void {
+  try {
+    const bindingPath = cloudJsonPath(telemetryProjectRoot);
+    const binding = readCloudBinding(realCloudFs, bindingPath);
+    if (binding && binding.org) {
+      const link = composeRunLink(binding.server, binding.org, runId);
+      const offline = hasPendingUploadBackoff(telemetryProjectRoot);
+      progress('run.link', { url: link, ...(offline ? { offline: true } : {}) });
+    }
+  } catch {
+    /* best-effort — a link failure never blocks the run */
+  }
+  ensureTelemetryDaemonRunning(telemetryProjectRoot);
+  tailProjectJournal(telemetryProjectRoot);
+}
 
 // ---------------------------------------------------------------------------
 // Injectable seams
@@ -1213,6 +1279,21 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
 
   progress('run.started', { run_id: runId, pipeline_root: rootAbs, experimental: true });
 
+  // The dashboard link (ux-v2 b12) — line 2, before step 1 (`08` J2). Gated
+  // FIRST on PIPELINE_SYNC_LOCAL_STATS (so the disabled baseline this
+  // feature's ≤15ms budget is measured against pays nothing beyond this one
+  // env read) and THEN on a connected project (`03` F7: no `.pipeline/
+  // cloud.json` at all ⇒ no line, nothing spawned, nothing queued — the
+  // telemetry subsystem is ABSENT here, matching `hooks/analytics_relay.ts`'s
+  // OWN "no cloud account" gate exactly, so drive agrees with the hook about
+  // what "has a cloud account" means rather than inventing a second notion).
+  const telemetrySyncOn = telemetrySyncEnabled(process.env);
+  const telemetryProjectRoot = telemetrySyncOn ? resolveProjectRoot(process.cwd()).project_root : null;
+  const driveTelemetryEnabled = telemetryProjectRoot !== null && existsSync(cloudJsonPath(telemetryProjectRoot));
+  if (driveTelemetryEnabled) {
+    driveRunStartTelemetry(telemetryProjectRoot!, runId, progress);
+  }
+
   // Run-start setup — mirrors the pipeline-manager's "Set up the Tier-2 feedback
   // directory" section: the .feedback/<run_id>/ folder + its self-contained
   // .gitignore stub, and the .runtime/<run_id>/records/ folder the executors
@@ -1334,6 +1415,16 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     }
   };
   const finalJson = (obj: Record<string, unknown>, code: number): number => {
+    // Run-exit telemetry (ux-v2 b12): funnels through here because EVERY
+    // terminal return of runDrive (done/halt/blocked/awaiting-input) calls
+    // finalJson exactly once. Final chance to get this run's last journaled
+    // events (run.completed/halted/…) into the durable outbox, and to
+    // re-spawn the uploader if a very long run outlived its own 30-minute
+    // wall-clock cap — both LOCAL ONLY, same as the run-start call.
+    if (driveTelemetryEnabled) {
+      ensureTelemetryDaemonRunning(telemetryProjectRoot!);
+      tailProjectJournal(telemetryProjectRoot!);
+    }
     out(JSON.stringify({ ...obj, run_id: runId, pipeline_root: rootAbs }, null, 2) + '\n');
     return code;
   };
