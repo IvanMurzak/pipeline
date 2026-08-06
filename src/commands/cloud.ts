@@ -1858,6 +1858,103 @@ async function authenticateAsHuman(deps: CloudDeps, opts: ApiAuthOptions, server
 }
 
 // ---------------------------------------------------------------------------
+// The SILENT ladder (task j2, OPTOUT-1 CLI half) — never opens a browser or
+// a device code, in EITHER --json or plain-text mode
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a live credential + org WITHOUT ever running the interactive half
+ * of the 04§4 ladder (`tryBrowserFlow` / `runDeviceFlow`) — used by `pipeline
+ * cloud optout` (task j2), whose own Goal states the point plainly: "read and
+ * set the fleet-telemetry opt-out without opening a browser". That is a
+ * STRONGER promise than D27's "`--json` implies non-interactive": D27 only
+ * declines OPTIONAL side effects — `cloud connect`/`department serve` still
+ * open a browser (or run the device flow) under `--json` when nothing is
+ * stored, because authenticating IS their job, not a side effect of it. For
+ * `optout`, authentication is a PREREQUISITE the user is expected to have
+ * already satisfied via `cloud connect`; this function throws a `CloudError`
+ * naming that command rather than starting a fresh sign-in on its behalf, in
+ * BOTH modes — not only under `--json`.
+ *
+ * Mirrors `commands/department.ts`'s `trySilentAuth` (task a10 — the exact
+ * same problem: a routine, possibly-scripted call must never pop a browser),
+ * duplicated rather than imported (this file's own module doc already
+ * establishes that `commands/` files don't share internals with each other;
+ * `department.ts` imports the reverse direction — TYPES plus one env-var name
+ * — from THIS file, for the same reason). It differs from `trySilentAuth` in
+ * SHAPE, not intent: `department status` degrades to an "offline" view on
+ * failure (a diagnostic renders what it can, nothing here is destructive);
+ * `optout` has no such fallback — there is nothing to read or set without a
+ * credential — so this THROWS, and the caller maps it to exit 1 exactly like
+ * every other authenticated failure in this file (`runCloud`'s own catch,
+ * `runDepartmentRetire`'s in the sibling module).
+ *
+ * Reuses the two rungs that are ALREADY silent by construction:
+ * `authenticateWithMachineCredential` (a single `client_credentials` POST, no
+ * human in it — literally the same call `cloud connect --machine-token`
+ * makes, side effects included: it persists the exchanged credential) for a
+ * machine token, and `ensureFreshCredential` (a5's silent, single-flight
+ * refresh) for a human one. Unlike `connect`'s own human branch
+ * (`authenticateAsHuman`), a refresh failure here does NOT fall through to
+ * `obtainAndPersistToken` — that fallback IS the interactive flow this
+ * function exists to never reach.
+ */
+export async function resolveSilentApiAuth(deps: CloudDeps, opts: ApiAuthOptions): Promise<ApiAuth> {
+  const server = normalizeServerUrl(opts.server ?? deps.env[SERVER_ENV] ?? DEFAULT_SERVER);
+  if (opts.machineToken !== undefined) {
+    return await authenticateWithMachineCredential(deps, opts, server, opts.machineToken);
+  }
+  return await authenticateAsHumanSilently(deps, opts, server);
+}
+
+/** The human rung of {@link resolveSilentApiAuth}. Never persists org
+ *  enrichment the way `authenticateAsHuman` does (no `org_slug` write-back
+ *  to the credential store) — a read/set of one preference is not the moment
+ *  to adopt a project-wide side effect a plain `cloud connect` never asked
+ *  for; `department status`'s own silent rung makes the same choice. */
+async function authenticateAsHumanSilently(deps: CloudDeps, opts: ApiAuthOptions, server: string): Promise<ApiAuth> {
+  const cred = await ensureFreshCredential(refreshDepsFrom(deps), server);
+  const credPath = credentialFilePath({ platform: deps.platform, env: deps.env, homedir: deps.homedir });
+
+  if (cred.principal === 'machine') {
+    // x50: a credential `cloud connect --machine-token` recorded earlier — no
+    // PIPELINE_MACHINE_TOKEN was presented THIS call, but the store still
+    // holds the org slug from when it was, exactly like `department
+    // status`'s own machine-principal branch reads it.
+    const orgSlug = opts.org ?? cred.org_slug;
+    if (orgSlug === undefined) {
+      throw new CloudError(
+        'a machine credential has no discoverable organization — pass --org <slug> (the org it was issued for)',
+      );
+    }
+    return { server, accessToken: cred.access_token, orgSlug, credentialPath: credPath, now: deps.now() };
+  }
+
+  let me: MeResponse;
+  try {
+    me = await fetchMe(deps, server, cred.access_token);
+  } catch (e) {
+    if (!(e instanceof CloudError)) throw e;
+    // fetchMe's own 401 message names `--reauth` — a flag THIS command does
+    // not have. Relay the FACT (the stored credential is dead), not that
+    // spelling, and name the command that actually carries the flag.
+    throw new CloudError('the stored credential was rejected by the server — run `pipeline cloud connect --reauth`');
+  }
+  const org = selectOrg(me.orgs, opts.org, me.selectedOrgId);
+  if ('error' in org) throw new CloudError(org.error);
+
+  return {
+    server,
+    accessToken: cred.access_token,
+    orgSlug: org.slug,
+    orgId: org.id,
+    ...(me.user?.email ? { userEmail: me.user.email } : {}),
+    credentialPath: credPath,
+    now: deps.now(),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // connect — the ladder above, plus the project binding it exists to write
 // ---------------------------------------------------------------------------
 
@@ -1881,6 +1978,247 @@ async function connect(deps: CloudDeps, opts: ConnectOptions, machineToken: stri
 }
 
 // ---------------------------------------------------------------------------
+// optout — task j2 (OPTOUT-1, CLI half): read/set the org's aggregate-
+// telemetry opt-out. The server half is out of scope and unchanged; read
+// only, as the contract: cloud/apps/api/src/modules/aggregate-telemetry/
+// routes.ts:159 (GET, any org role), :165 (PUT, ADMIN+, `{optedOut:bool}`).
+// ---------------------------------------------------------------------------
+
+/**
+ * The wire path — a WIRE identifier, and it still says `fleet-telemetry` on
+ * purpose. `08-terminology.md`'s D31 renamed the CONCEPT to
+ * "aggregate-telemetry" everywhere (the server module folder is literally
+ * `modules/aggregate-telemetry/`), except these two routes: task c12 left
+ * them as-is deliberately, filing the rename as tier 3 (`c13`, unscheduled) —
+ * see `routes.ts`'s own "⚠ These two paths still say fleet-telemetry
+ * DELIBERATELY" comment. This file follows the SAME split: this constant is
+ * the literal path; every user-facing string below says "aggregate
+ * telemetry", never "fleet" — D10/D31's banned word never reaches a person.
+ */
+const OPTOUT_PATH = '/api/v1/fleet-telemetry/optout';
+
+interface OptOutState {
+  optedOut: boolean;
+  optedOutAt: string | null;
+}
+
+function optOutHeaders(auth: ApiAuth, hasBody: boolean): Record<string, string> {
+  const headers: Record<string, string> = { accept: 'application/json', authorization: `Bearer ${auth.accessToken}` };
+  if (hasBody) headers['content-type'] = 'application/json';
+  // x50/D12: rides as X-Org-Id — a device-grant token REQUIRES it (its own
+  // claims carry no org); an org-bound token merely agrees with it. Absent on
+  // the machine-credential rung, whose token carries its own `org_id` claim
+  // (see `ApiAuth.orgId`'s own doc comment).
+  if (auth.orgId) headers['x-org-id'] = auth.orgId;
+  return headers;
+}
+
+/**
+ * Parse the `{optedOut, optedOutAt}` shape both verbs return
+ * (`aggregate-telemetry/routes.ts`'s `getOptOut`/`setOptOut`/`clearOptOut`
+ * all funnel through the same `OptOutState`), or throw a `CloudError` that
+ * renders the server's OWN reason honestly rather than inventing one:
+ *   - 403 on the read verb means "no org selected" (`requireOrg`) — rare,
+ *     since `resolveSilentApiAuth` already picked one.
+ *   - 403 on the write verb is the DoD's named case: `requireRole(c,
+ *     "admin")` refused a sub-admin role, and its own message already NAMES
+ *     the caller's actual role (`http/rbac.ts`'s `forbidden`:
+ *     `"this action requires the admin role (your role: ${auth.role})"`) —
+ *     relayed VERBATIM, not paraphrased, plus one line naming the read-only
+ *     escape hatch so the refusal is not also a dead end.
+ */
+async function parseOptOutResponse(res: HttpResponse, verb: 'read' | 'set'): Promise<OptOutState> {
+  if (res.status === 200) {
+    const body = (await res.json()) as { optedOut?: unknown; optedOutAt?: unknown };
+    if (typeof body?.optedOut !== 'boolean') {
+      throw new CloudError('the server returned an unreadable opt-out response');
+    }
+    return { optedOut: body.optedOut, optedOutAt: typeof body.optedOutAt === 'string' ? body.optedOutAt : null };
+  }
+  if (res.status === 401) {
+    throw new CloudError('the credential was rejected by the server — run `pipeline cloud connect --reauth`');
+  }
+  if (res.status === 403) {
+    const reason = (await errorCode(res)) ?? 'forbidden';
+    const hint = verb === 'set' ? ' — `pipeline cloud optout` (no --set) still works for any org role' : '';
+    throw new CloudError(`refused by the server — ${reason}${hint}`);
+  }
+  const code = await errorCode(res);
+  throw new CloudError(`opt-out request failed (HTTP ${res.status}${code ? `: ${code}` : ''})`);
+}
+
+async function fetchOptOutState(deps: CloudDeps, auth: ApiAuth): Promise<OptOutState> {
+  const res = await doFetch(deps, `${auth.server}${OPTOUT_PATH}`, { method: 'GET', headers: optOutHeaders(auth, false) });
+  return await parseOptOutResponse(res, 'read');
+}
+
+async function setOptOutState(deps: CloudDeps, auth: ApiAuth, optedOut: boolean): Promise<OptOutState> {
+  const res = await doFetch(deps, `${auth.server}${OPTOUT_PATH}`, {
+    method: 'PUT',
+    headers: optOutHeaders(auth, true),
+    body: JSON.stringify({ optedOut }),
+  });
+  return await parseOptOutResponse(res, 'set');
+}
+
+// ---- arg parsing ------------------------------------------------------------
+
+export interface OptOutArgs {
+  /** `undefined` = the bare read form. */
+  setRaw?: string;
+  org?: string;
+  server?: string;
+  machineToken?: string;
+  json: boolean;
+  help: boolean;
+  unknownFlag?: string;
+  extra?: string;
+}
+
+const OPTOUT_USAGE =
+  'Usage: pipeline cloud optout [--set true|false] [--org <slug>] [--server <url>]\n' +
+  '                              [--machine-token <token>] [--json]';
+
+export function parseOptOutArgs(args: string[]): OptOutArgs {
+  const out: OptOutArgs = { json: false, help: false };
+  const take = (i: number) => args[i + 1];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? '';
+    const eq = (p: string) => (a.startsWith(p + '=') ? a.slice(p.length + 1) : undefined);
+    if (a === '--json') out.json = true;
+    else if (a === '--help' || a === '-h') out.help = true;
+    else if (a === '--set') out.setRaw = take(i++);
+    else if (eq('--set') !== undefined) out.setRaw = eq('--set');
+    else if (a === '--org') out.org = take(i++);
+    else if (eq('--org') !== undefined) out.org = eq('--org');
+    else if (a === '--server') out.server = take(i++);
+    else if (eq('--server') !== undefined) out.server = eq('--server');
+    else if (a === '--machine-token') out.machineToken = take(i++);
+    else if (eq('--machine-token') !== undefined) out.machineToken = eq('--machine-token');
+    else if (a === '--') continue;
+    else if (a.startsWith('-')) out.unknownFlag = a;
+    else out.extra = a;
+  }
+  return out;
+}
+
+function optOutHelpText(): string {
+  return (
+    `${OPTOUT_USAGE}\n\n` +
+    "Read (bare form), or with --set, CHANGE this org's aggregate-telemetry\n" +
+    'opt-out (07-security.md §5.2, OPTOUT-1) — the k-anonymity-floored,\n' +
+    "cross-org aggregates the public pipeline registry computes from\n" +
+    "PUBLISHED pipelines' run outcomes. Separate from `pipeline stats\n" +
+    "telemetry`, which is your OWN runs streaming to YOUR OWN dashboard.\n\n" +
+    'Reading is any org role; --set requires the ADMIN role or higher — a\n' +
+    "lower role is refused with the server's own reason, never a silent\n" +
+    'no-op.\n\n' +
+    'Never opens a browser or prompts, in --json OR plain mode: it reuses an\n' +
+    'already-stored, silently-refreshable credential (same posture as\n' +
+    '`pipeline department status`) and fails naming `pipeline cloud connect`\n' +
+    'if nothing is stored yet, rather than starting a new sign-in.\n\n' +
+    'Options:\n' +
+    '  --set <true|false>       Opt out (true) or back in (false). Omit to read only.\n' +
+    '  --org <slug>             Which org (default: your selected org, or your\n' +
+    '                           only one).\n' +
+    '  --server <url>           Control-plane base URL.\n' +
+    `  --machine-token <token>  Same as ${MACHINE_TOKEN_ENV}.\n` +
+    '  --json                   Print {ok, org, optedOut, optedOutAt}.\n' +
+    '  --help, -h               Show this help.\n'
+  );
+}
+
+function renderOptOutHuman(out: (s: string) => void, orgSlug: string, state: OptOutState, changed: boolean): void {
+  if (changed) {
+    out(
+      state.optedOut
+        ? `✓ '${orgSlug}' opted OUT of aggregate telemetry — effective immediately and retroactively.\n`
+        : `✓ '${orgSlug}' opted back IN to aggregate telemetry.\n`,
+    );
+    return;
+  }
+  out(`org: ${orgSlug}\n`);
+  out(
+    state.optedOut
+      ? `Aggregate telemetry: opted OUT${state.optedOutAt ? ` (since ${state.optedOutAt})` : ''}\n`
+      : 'Aggregate telemetry: contributing (default — not opted out)\n',
+  );
+}
+
+/**
+ * `pipeline cloud optout [--set true|false] …` (task j2). See the "SILENT
+ * ladder" section above for why auth resolution never opens a browser or
+ * device code here, in either mode — that is this command's OWN Goal, not
+ * only a `--json` obligation.
+ */
+export async function runCloudOptout(args: string[], deps: CloudDeps = realDeps): Promise<number> {
+  const a = parseOptOutArgs(args);
+  if (a.help) {
+    deps.out(optOutHelpText());
+    return 0;
+  }
+  if (a.unknownFlag !== undefined) {
+    deps.err(`pipeline cloud optout: unknown flag '${a.unknownFlag}'\n${OPTOUT_USAGE}\n`);
+    return 2;
+  }
+  if (a.extra !== undefined) {
+    deps.err(`pipeline cloud optout: unexpected argument '${a.extra}'\n${OPTOUT_USAGE}\n`);
+    return 2;
+  }
+  let setValue: boolean | undefined;
+  if (a.setRaw !== undefined) {
+    if (a.setRaw === 'true') setValue = true;
+    else if (a.setRaw === 'false') setValue = false;
+    else {
+      deps.err(`pipeline cloud optout: --set takes 'true' or 'false' (got '${a.setRaw}')\n${OPTOUT_USAGE}\n`);
+      return 2;
+    }
+  }
+
+  // Same flag-then-env precedence `department retire` uses for the same flag.
+  const machineToken = (a.machineToken ?? deps.env[MACHINE_TOKEN_ENV] ?? '').trim();
+
+  let auth: ApiAuth;
+  try {
+    auth = await resolveSilentApiAuth(deps, {
+      ...(a.server !== undefined ? { server: a.server } : {}),
+      ...(a.org !== undefined ? { org: a.org } : {}),
+      ...(machineToken.length > 0 ? { machineToken } : {}),
+      json: a.json,
+    });
+  } catch (e) {
+    if (e instanceof CloudError) {
+      deps.err(`pipeline cloud optout: ${e.message}\n`);
+      return 1;
+    }
+    throw e;
+  }
+
+  try {
+    const state =
+      setValue === undefined ? await fetchOptOutState(deps, auth) : await setOptOutState(deps, auth, setValue);
+    if (a.json) {
+      deps.out(
+        JSON.stringify(
+          { ok: true, org: auth.orgSlug, optedOut: state.optedOut, optedOutAt: state.optedOutAt },
+          null,
+          2,
+        ) + '\n',
+      );
+    } else {
+      renderOptOutHuman(deps.out, auth.orgSlug, state, setValue !== undefined);
+    }
+    return 0;
+  } catch (e) {
+    if (e instanceof CloudError) {
+      deps.err(`pipeline cloud optout: ${e.message}\n`);
+      return 1;
+    }
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CLI shell
 // ---------------------------------------------------------------------------
 
@@ -1894,18 +2232,33 @@ function resolveMachineToken(opts: ConnectOptions, env: Record<string, string | 
   return fromEnv && fromEnv.length > 0 ? fromEnv : undefined;
 }
 
+/** The combined `pipeline cloud` listing (bare invocation / `--help` /
+ *  unknown subcommand) — `connect`'s own USAGE plus `optout`'s (task j2).
+ *  Kept separate from `USAGE` itself: `parseConnectArgs`' own error sites
+ *  print `USAGE` alone, so a `connect`-specific mistake is not answered with
+ *  an unrelated `optout` usage line. */
+const CLOUD_TOP_USAGE =
+  `${USAGE}\n\n` +
+  `${OPTOUT_USAGE}\n` +
+  "  Read (or, with --set and the ADMIN role, change) this org's aggregate-\n" +
+  '  telemetry opt-out (07-security.md §5.2, OPTOUT-1) — see `pipeline cloud\n' +
+  '  optout --help`. Never opens a browser or prompts, in --json OR plain mode.\n';
+
 export async function runCloud(args: string[], deps: CloudDeps = realDeps): Promise<number> {
   const sub = args[0];
   if (sub === undefined) {
-    deps.err(USAGE);
+    deps.err(CLOUD_TOP_USAGE);
     return 2;
   }
   if (sub === '--help' || sub === '-h') {
-    deps.out(USAGE);
+    deps.out(CLOUD_TOP_USAGE);
     return 0;
   }
+  if (sub === 'optout') {
+    return await runCloudOptout(args.slice(1), deps);
+  }
   if (sub !== 'connect') {
-    deps.err(`pipeline cloud: unknown subcommand '${sub}'\n${USAGE}`);
+    deps.err(`pipeline cloud: unknown subcommand '${sub}'\n${CLOUD_TOP_USAGE}`);
     return 2;
   }
 
