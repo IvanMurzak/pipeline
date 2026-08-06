@@ -158,7 +158,6 @@ import {
   SERVER_ENV,
   realFs,
   readCredentialStore,
-  writeCredentialStore,
   readCloudBinding,
   writeCloudBinding,
   cloudJsonPath,
@@ -183,8 +182,7 @@ import {
   realSpawnBrowser,
   type SpawnFn,
 } from '../lib/loopback-oauth';
-import { ensureFreshCredential, type RefreshDeps } from '../lib/credential-refresh';
-import { protectCredentialFile } from '../lib/credential-protect';
+import { ensureFreshCredential, persistCredentialSecurely, type RefreshDeps } from '../lib/credential-refresh';
 import {
   enrolRunner,
   isRunnerServiceInstalled,
@@ -1258,17 +1256,20 @@ export function selectOrg(
 // ---------------------------------------------------------------------------
 
 /**
- * Persist the credential store AND apply the per-platform file protection
- * (a5, 04-cloud-auth.md §6) in one call — every writer of the store in this
- * file goes through this instead of calling `writeCredentialStore` directly,
- * so no write site can forget the Windows ACL step. `writeCredentialStore`
+ * Persist the credential store AND apply every b14/a5 at-rest protection in
+ * one call — every writer of the store in this file goes through this
+ * instead of calling `writeCredentialStore` directly, so no write site can
+ * forget a protection step. Delegates to `credential-refresh.ts`'s
+ * `persistCredentialSecurely`, the single chokepoint that also decides
+ * whether `server`'s refresh token belongs in the OS keychain or the file
+ * (b14) — `ensureFreshCredential`'s own rotation path goes through the exact
+ * same function, so the two writers cannot drift. `writeCredentialStore`
  * itself is durable (atomic write-then-rename, `chmod 0600` on every
  * platform); `protectCredentialFile` adds the Windows-only ACL restriction
- * that `chmod` cannot express there — see `lib/credential-protect.ts`.
+ * `chmod` cannot express there — see `lib/credential-protect.ts`.
  */
-function persistCredential(deps: CloudDeps, credPath: string, store: CredentialStore): void {
-  writeCredentialStore(deps.fs, credPath, store);
-  protectCredentialFile(credPath, { platform: deps.platform, env: deps.env });
+function persistCredential(deps: CloudDeps, credPath: string, store: CredentialStore, server: string): void {
+  persistCredentialSecurely({ fs: deps.fs, platform: deps.platform, env: deps.env }, credPath, store, server);
 }
 
 /** Adapt this file's `CloudDeps` into `credential-refresh.ts`'s narrower
@@ -1302,8 +1303,12 @@ async function obtainAndPersistToken(
     token_prefix: tok.token_prefix,
     refresh_token: tok.refresh_token,
     expires_at: tok.expires_in ? now + tok.expires_in * 1000 : undefined,
+    // b14 — the inactivity clock (`credential-refresh.ts#isRefreshInactive`)
+    // starts at mint, exactly matching the server's own `last_used_at`
+    // stamped "at mint AND at every rotation".
+    last_used_at: now,
   };
-  persistCredential(deps, credPath, store);
+  persistCredential(deps, credPath, store, server);
   say('Authenticated. Credential stored securely (not in this project).\n');
   return tok.access_token;
 }
@@ -1714,8 +1719,12 @@ async function authenticateWithMachineCredential(
     // and `/api/v1/me` — which 401s for this class by construction — is the
     // only thing it can ask.
     principal: 'machine',
+    // b14 — harmless here (this class never gets a refresh_token, so
+    // `isRefreshInactive` never applies to it), kept only for uniformity
+    // with every other write site.
+    last_used_at: now,
   };
-  persistCredential(deps, credPath, store);
+  persistCredential(deps, credPath, store, server);
   say('Authenticated with a machine credential. Credential stored securely (not in this project).\n');
 
   if (!opts.org) {
@@ -1728,7 +1737,7 @@ async function authenticateWithMachineCredential(
   const cred = store.servers[server];
   if (cred) {
     cred.org_slug = orgSlug;
-    persistCredential(deps, credPath, store);
+    persistCredential(deps, credPath, store, server);
   }
 
   // No org UUID is knowable here — only the slug the operator passed via
@@ -1763,7 +1772,17 @@ async function authenticateAsHuman(deps: CloudDeps, opts: ApiAuthOptions, server
   if (reusable) {
     token = existing!.access_token;
     say(`Using the stored credential for ${server}.\n`);
-  } else if (existing !== undefined && !opts.reauth && existing.refresh_token) {
+  } else if (
+    existing !== undefined &&
+    !opts.reauth &&
+    // b14: a refresh token that has been moved into the OS keychain is no
+    // longer present INLINE here (`persistCredentialSecurely` strips it) —
+    // `refresh_token_in_keychain` is the marker that one still exists.
+    // `ensureFreshCredential` does its own keychain-aware lookup, so this
+    // check only has to decide WHETHER to attempt it, never resolve the
+    // actual value.
+    (existing.refresh_token || existing.refresh_token_in_keychain)
+  ) {
     // 04§6: refresh-token rotation exists precisely so an expired access
     // token does not always cost the user a new browser/device round trip.
     // `ensureFreshCredential` is the ONE code path allowed to call the
@@ -1806,7 +1825,7 @@ async function authenticateAsHuman(deps: CloudDeps, opts: ApiAuthOptions, server
   if (cred) {
     cred.org_slug = org.slug;
     if (me.user?.email) cred.user_email = me.user.email;
-    persistCredential(deps, credPath, store);
+    persistCredential(deps, credPath, store, server);
   }
 
   // `org.id` is a UUID here (from /api/v1/me), so callers can ride it as

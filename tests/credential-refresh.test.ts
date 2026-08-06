@@ -13,7 +13,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ensureFreshCredential,
+  isRefreshInactive,
+  persistCredentialSecurely,
   REAUTH_REQUIRED_MESSAGE,
+  REFRESH_TOKEN_INACTIVITY_WINDOW_S,
   type RefreshDeps,
   type HttpResponse,
   type HttpInit,
@@ -22,10 +25,12 @@ import {
   realFs,
   credentialFilePath,
   credentialLockPath,
+  readCredentialStore,
   writeCredentialStore,
   CloudError,
   type HomeContext,
 } from '../src/lib/cloud-config';
+import type { KeychainDeps } from '../src/lib/credential-keychain';
 
 const created: string[] = [];
 afterEach(() => {
@@ -46,7 +51,14 @@ function reply(status: number, body: unknown): HttpResponse {
 
 function seed(
   home: string,
-  fields: { access_token: string; refresh_token?: string; expires_at?: number; token_type?: string },
+  fields: {
+    access_token: string;
+    refresh_token?: string;
+    expires_at?: number;
+    token_type?: string;
+    last_used_at?: number;
+    refresh_token_in_keychain?: boolean;
+  },
 ): string {
   const ctx: HomeContext = { platform: 'linux', env: { PIPELINE_CLOUD_HOME: home }, homedir: home };
   const path = credentialFilePath(ctx);
@@ -254,5 +266,245 @@ describe('ensureFreshCredential — IN-PROCESS concurrent single-flight (complem
     expect(b.access_token).toBe('at-new');
     expect(a.refresh_token).toBe('rt-new');
     expect(b.refresh_token).toBe('rt-new');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// b14 — OS keychain wiring (07-security.md §3.3's "OS keychain where
+// available, with a documented fallback"). A scripted `KeychainDeps` stands
+// in for a real Keychain/Secret Service — this machine (and the CI matrix,
+// `ubuntu-latest`/`windows-latest` only) has neither for real; see
+// `credential-keychain.test.ts` for the backend's own command-shape proof.
+// ---------------------------------------------------------------------------
+
+/** A trivial in-memory keychain used to prove `persistCredentialSecurely` and
+ *  `ensureFreshCredential` round-trip through WHATEVER `KeychainDeps` they
+ *  are given — "available" is entirely the test's choice, never a real OS
+ *  call. */
+function fakeKeychain(available: boolean): { deps: KeychainDeps; store: Map<string, string> } {
+  const backing = new Map<string, string>();
+  // Asserts through the SAME `KeychainDeps.runCommand` seam
+  // `credential-keychain.ts`'s real functions call, emulating exactly what
+  // `security` would do for the macOS backend — this exercises
+  // `persistCredentialSecurely`/`ensureFreshCredential`'s OWN call shape
+  // (`storeInKeychain`/`readFromKeychain`), not a re-implementation of them.
+  const deps: KeychainDeps = {
+    platform: 'darwin', // any backend-bearing platform — the fake ignores it
+    runCommand: (cmd, args) => {
+      if (!available) return { status: null, stdout: '', stderr: 'ENOENT' };
+      if (cmd === 'security' && args.includes('add-generic-password')) {
+        const account = args[args.indexOf('-a') + 1]!;
+        const secret = args[args.indexOf('-w') + 1]!;
+        backing.set(account, secret);
+        return { status: 0, stdout: '', stderr: '' };
+      }
+      if (cmd === 'security' && args.includes('find-generic-password')) {
+        const account = args[args.indexOf('-a') + 1]!;
+        const value = backing.get(account);
+        return value !== undefined
+          ? { status: 0, stdout: `${value}\n`, stderr: '' }
+          : { status: 44, stdout: '', stderr: 'not found' };
+      }
+      if (cmd === 'security' && args.includes('delete-generic-password')) {
+        const account = args[args.indexOf('-a') + 1]!;
+        backing.delete(account);
+        return { status: 0, stdout: '', stderr: '' };
+      }
+      throw new Error(`fakeKeychain: unexpected invocation ${cmd} ${args.join(' ')}`);
+    },
+  };
+  return { deps, store: backing };
+}
+
+describe('b14 — persistCredentialSecurely: keychain AVAILABLE strips refresh_token from the file', () => {
+  test('a refresh_token present in the store is moved into the keychain; the on-disk file has neither the token nor a truthy value for it', () => {
+    const home = mkHome();
+    const credPath = seed(home, { access_token: 'at1', refresh_token: 'rt-should-move' });
+    const { deps: keychain, store: backing } = fakeKeychain(true);
+
+    const store = readCredentialStore(realFs, credPath);
+    persistCredentialSecurely({ fs: realFs, platform: 'linux', env: {}, keychain }, credPath, store, SERVER);
+
+    const onDisk = JSON.parse(readFileSync(credPath, 'utf-8'));
+    expect(onDisk.servers[SERVER].refresh_token).toBeUndefined();
+    expect(JSON.stringify(onDisk)).not.toContain('rt-should-move');
+    expect(onDisk.servers[SERVER].refresh_token_in_keychain).toBe(true);
+    expect(backing.get(SERVER)).toBe('rt-should-move');
+  });
+
+  test('keychain UNAVAILABLE (the documented fallback): refresh_token stays inline, exactly as before this task', () => {
+    const home = mkHome();
+    const credPath = seed(home, { access_token: 'at1', refresh_token: 'rt-stays-in-file' });
+    const { deps: keychain } = fakeKeychain(false);
+
+    const store = readCredentialStore(realFs, credPath);
+    persistCredentialSecurely({ fs: realFs, platform: 'linux', env: {}, keychain }, credPath, store, SERVER);
+
+    const onDisk = JSON.parse(readFileSync(credPath, 'utf-8'));
+    expect(onDisk.servers[SERVER].refresh_token).toBe('rt-stays-in-file');
+    expect(onDisk.servers[SERVER].refresh_token_in_keychain).toBeFalsy();
+  });
+});
+
+describe('b14 — ensureFreshCredential round-trips a keychain-backed refresh token', () => {
+  test('a credential whose refresh_token lives ONLY in the keychain still refreshes successfully, and the rotated token is placed back in the keychain', async () => {
+    const home = mkHome();
+    const credPath = seed(home, { access_token: 'at-old', expires_at: 2_030_000, refresh_token_in_keychain: true });
+    const { deps: keychain, store: backing } = fakeKeychain(true);
+    backing.set(SERVER, 'rt-from-keychain');
+
+    const calls: HttpInit[] = [];
+    const deps: RefreshDeps = {
+      ...baseDeps(home, async (url, init) => {
+        calls.push(init);
+        const params = new URLSearchParams(init.body ?? '');
+        expect(params.get('refresh_token')).toBe('rt-from-keychain');
+        return reply(200, { access_token: 'at-new', token_type: 'Bearer', expires_in: 900, refresh_token: 'rt-new' });
+      }),
+      keychain,
+    };
+
+    const cred = await ensureFreshCredential(deps, SERVER);
+    expect(cred.access_token).toBe('at-new');
+    expect(calls).toHaveLength(1);
+
+    // The rotated token was placed back in the (fake) keychain, and the file
+    // still carries no plaintext refresh_token.
+    expect(backing.get(SERVER)).toBe('rt-new');
+    const onDisk = JSON.parse(readFileSync(credPath, 'utf-8'));
+    expect(onDisk.servers[SERVER].refresh_token).toBeUndefined();
+    expect(onDisk.servers[SERVER].refresh_token_in_keychain).toBe(true);
+  });
+
+  test('the marker says keychain, but the entry is gone (lookup returns nothing) — clean CloudError, never a crash', async () => {
+    const home = mkHome();
+    seed(home, { access_token: 'at-old', expires_at: 2_030_000, refresh_token_in_keychain: true });
+    const { deps: keychain } = fakeKeychain(true); // available, but nothing was ever stored under SERVER
+
+    const deps: RefreshDeps = {
+      ...baseDeps(home, async () => {
+        throw new Error('must not reach the network — there is no token to refresh with');
+      }),
+      keychain,
+    };
+    await expect(ensureFreshCredential(deps, SERVER)).rejects.toThrow(/cannot be refreshed automatically/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// b14 — refresh-token inactivity expiry, the CLI-side mirror of the server's
+// RFC 9700 §4.14.2 SHOULD (`f3`'s `REFRESH_TOKEN_INACTIVITY_WINDOW_S`, same
+// 14-day number, duplicated per this file's own module doc).
+// ---------------------------------------------------------------------------
+
+describe('isRefreshInactive — the pure decision', () => {
+  test('exactly at the window boundary is NOT yet inactive (strictly greater-than, mirrors the server)', () => {
+    const now = 1_000_000_000;
+    expect(isRefreshInactive(now - REFRESH_TOKEN_INACTIVITY_WINDOW_S * 1000, now)).toBe(false);
+  });
+  test('one second past the window IS inactive', () => {
+    const now = 1_000_000_000;
+    expect(isRefreshInactive(now - REFRESH_TOKEN_INACTIVITY_WINDOW_S * 1000 - 1000, now)).toBe(true);
+  });
+  test('undefined lastUsedAt (no local history yet) is NOT treated as inactive', () => {
+    expect(isRefreshInactive(undefined, 1_000_000_000)).toBe(false);
+  });
+  test('the exported window constant is exactly 14 days, matching f3', () => {
+    expect(REFRESH_TOKEN_INACTIVITY_WINDOW_S).toBe(14 * 24 * 60 * 60);
+  });
+});
+
+describe('ensureFreshCredential — local inactivity expiry', () => {
+  test('a refresh_token idle for more than 14 days is refused LOCALLY — no network call at all', async () => {
+    const home = mkHome();
+    const now = 2_000_000_000;
+    seed(home, {
+      access_token: 'at-old',
+      refresh_token: 'rt-old',
+      expires_at: 1_000, // needs refresh
+      last_used_at: now - (REFRESH_TOKEN_INACTIVITY_WINDOW_S * 1000 + 60_000), // 15 days idle
+    });
+    let networkCalls = 0;
+    const deps = baseDeps(
+      home,
+      async () => {
+        networkCalls++;
+        throw new Error('must not be called — the credential is locally inactive');
+      },
+      () => now,
+    );
+    await expect(ensureFreshCredential(deps, SERVER)).rejects.toThrow(/inactive/);
+    await expect(ensureFreshCredential(deps, SERVER)).rejects.toThrow(/pipeline cloud connect --reauth/);
+    expect(networkCalls).toBe(0);
+  });
+
+  test('a refresh_token used 13 days ago (inside the window) still refreshes normally', async () => {
+    const home = mkHome();
+    const now = 2_000_000_000;
+    seed(home, {
+      access_token: 'at-old',
+      refresh_token: 'rt-old',
+      expires_at: 1_000,
+      last_used_at: now - 13 * 24 * 60 * 60 * 1000,
+    });
+    const deps = baseDeps(
+      home,
+      async () => reply(200, { access_token: 'at-new', token_type: 'Bearer', expires_in: 900, refresh_token: 'rt-new' }),
+      () => now,
+    );
+    const cred = await ensureFreshCredential(deps, SERVER);
+    expect(cred.access_token).toBe('at-new');
+  });
+
+  test('a credential with NO last_used_at at all (pre-b14) is not punished — it refreshes, and gains a fresh last_used_at', async () => {
+    const home = mkHome();
+    const now = 2_000_000_000;
+    const credPath = seed(home, { access_token: 'at-old', refresh_token: 'rt-old', expires_at: 1_000 });
+    const deps = baseDeps(
+      home,
+      async () => reply(200, { access_token: 'at-new', token_type: 'Bearer', expires_in: 900, refresh_token: 'rt-new' }),
+      () => now,
+    );
+    const cred = await ensureFreshCredential(deps, SERVER);
+    expect(cred.access_token).toBe('at-new');
+    expect(cred.last_used_at).toBe(now);
+    const onDisk = JSON.parse(readFileSync(credPath, 'utf-8'));
+    expect(onDisk.servers[SERVER].last_used_at).toBe(now);
+  });
+
+  test('a successful refresh re-authorizes cleanly afterward: the re-auth error names the exact remedy, and a fresh connect (simulated by re-seeding) then refreshes fine', async () => {
+    const home = mkHome();
+    const now = 2_000_000_000;
+    const credPath = seed(home, {
+      access_token: 'at-old',
+      refresh_token: 'rt-old',
+      expires_at: 1_000,
+      last_used_at: now - (REFRESH_TOKEN_INACTIVITY_WINDOW_S * 1000 + 1),
+    });
+    const deadDeps = baseDeps(home, async () => {
+      throw new Error('must not be called');
+    }, () => now);
+    let threw: unknown;
+    try {
+      await ensureFreshCredential(deadDeps, SERVER);
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw).toBeInstanceOf(CloudError);
+    expect((threw as Error).message).toContain('pipeline cloud connect --reauth');
+
+    // Simulate what `pipeline cloud connect --reauth` does: mint a whole new
+    // credential (fresh last_used_at), overwriting the stale one.
+    writeCredentialStore(realFs, credPath, {
+      version: 1,
+      servers: { [SERVER]: { access_token: 'at-fresh', refresh_token: 'rt-fresh', token_type: 'bearer', expires_at: 1_000, last_used_at: now } },
+    });
+    const liveDeps = baseDeps(
+      home,
+      async () => reply(200, { access_token: 'at-newer', token_type: 'Bearer', expires_in: 900, refresh_token: 'rt-newer' }),
+      () => now,
+    );
+    const cred = await ensureFreshCredential(liveDeps, SERVER);
+    expect(cred.access_token).toBe('at-newer');
   });
 });

@@ -55,11 +55,13 @@ import {
   readCredentialStore,
   writeCredentialStore,
   type CloudFs,
+  type CredentialStore,
   type HomeContext,
   type StoredCredential,
 } from './cloud-config';
 import { acquireLock, realLockDeps, type LockDeps } from './credential-lock';
 import { protectCredentialFile } from './credential-protect';
+import { readFromKeychain, storeInKeychain, realRunKeychainCommand, type KeychainDeps } from './credential-keychain';
 
 // ---------------------------------------------------------------------------
 // HTTP seam — deliberately local (mirrors commands/cloud.ts's near-identical
@@ -101,6 +103,39 @@ const FORM_HEADERS = { 'content-type': 'application/x-www-form-urlencoded', acce
  *  observing a token that expires moments after this function returns it. */
 const REFRESH_BUFFER_MS = 60_000;
 
+/**
+ * b14 — RFC 9700 §4.14.2 SHOULD ("refresh tokens SHOULD expire if the client
+ * has been inactive for some time"), the CLI-side half; `f3` is the
+ * server-side half (`cloud/apps/api/src/modules/auth/refresh-token-
+ * policy.ts#REFRESH_TOKEN_INACTIVITY_WINDOW_S`). SAME NUMBER, duplicated
+ * rather than imported — this package cannot import the private `cloud/`
+ * tree (the same constraint this file's module doc and `CLI_CLIENT_ID`
+ * already document), and `07-security.md` §3.1 records this exact value as
+ * the one `b14` MUST use for its own local check.
+ */
+export const REFRESH_TOKEN_INACTIVITY_WINDOW_S = 14 * 24 * 60 * 60; // 14 days
+
+/**
+ * True when `lastUsedAt` (epoch ms — `StoredCredential.last_used_at`) is more
+ * than `windowS` in the past. Mirrors the server's `isRefreshTokenInactive`
+ * with one deliberate difference: `lastUsedAt === undefined` returns `false`
+ * rather than falling back to a creation timestamp. A credential written by
+ * a pre-b14 CLI has no local activity history at all — treating "no history"
+ * as "definitely stale" would force every already-connected user into an
+ * immediate re-login the moment they upgrade, which is not what a SHOULD is
+ * for. `ensureFreshCredential` backfills `last_used_at` on the very next
+ * successful refresh either way, so the local clock starts from the first
+ * observation instead of guessing at one that was never recorded.
+ */
+export function isRefreshInactive(
+  lastUsedAt: number | undefined,
+  now: number,
+  windowS: number = REFRESH_TOKEN_INACTIVITY_WINDOW_S,
+): boolean {
+  if (lastUsedAt === undefined) return false;
+  return now - lastUsedAt > windowS * 1000;
+}
+
 /** 04-cloud-auth.md §9's EXACT wording for "Refresh lost a rotation race" —
  *  used for every `invalid_grant` a refresh attempt receives. The server
  *  gives no distinguishable error code between "genuinely expired" and
@@ -131,6 +166,12 @@ export interface RefreshDeps {
   lock?: LockDeps;
   /** Bounded wait for the cross-process lock — see `credential-lock.ts`. */
   lockTimeoutMs?: number;
+  /** b14 — injected so tests script the OS keychain backend (available/
+   *  unavailable, a scripted failure) without a real Keychain/Secret Service
+   *  to observe it against. Production always resolves to
+   *  `{ platform: deps.platform, runCommand: realRunKeychainCommand }` (the
+   *  default when omitted) — see `credential-keychain.ts`. */
+  keychain?: KeychainDeps;
 }
 
 /** `expires_at === undefined` means "never expires" (matches
@@ -182,6 +223,52 @@ async function callRefreshGrant(
   return body;
 }
 
+function resolveKeychainDeps(deps: { platform: string; keychain?: KeychainDeps }): KeychainDeps {
+  return deps.keychain ?? { platform: deps.platform, runCommand: realRunKeychainCommand };
+}
+
+/**
+ * Persist `store` and apply BOTH b14 protections in one call: the OS
+ * keychain for `server`'s refresh token where available (this function's own
+ * addition), and the pre-existing per-platform file protection
+ * (`writeCredentialStore`'s `chmod 0600` plus `protectCredentialFile`'s
+ * Windows ACL). Every writer of the credential store — `ensureFreshCredential`
+ * below and `commands/cloud.ts`'s `persistCredential` — MUST go through this
+ * rather than calling `writeCredentialStore` directly, exactly the same
+ * "no write site can forget the protection step" reasoning
+ * `commands/cloud.ts`'s own `persistCredential` doc comment already states
+ * for the Windows ACL alone.
+ *
+ * IDEMPOTENT AND SELF-CORRECTING: it inspects `store.servers[server]` fresh
+ * on every call, so it does not matter whether the in-memory `refresh_token`
+ * field is already keychain-backed, freshly rotated, or plain — this
+ * function always decides for itself where the SERIALIZED copy's secret
+ * belongs, and strips it from the file when (and only when) the keychain
+ * write just now succeeded. A keychain write failure is silently the
+ * documented fallback: the refresh token stays in the file, precisely as it
+ * did before this task, and `refresh_token_in_keychain` is left false so a
+ * later read never mistakes the file's own copy for a stale one.
+ */
+export function persistCredentialSecurely(
+  deps: { fs: CloudFs; platform: string; env: Record<string, string | undefined>; keychain?: KeychainDeps },
+  filePath: string,
+  store: CredentialStore,
+  server: string,
+): void {
+  const keychainDeps = resolveKeychainDeps(deps);
+  const cred = store.servers[server];
+  let toPersist = store;
+  if (cred?.refresh_token) {
+    const stored = storeInKeychain(keychainDeps, server, cred.refresh_token);
+    const updatedCred: StoredCredential = stored
+      ? { ...cred, refresh_token: undefined, refresh_token_in_keychain: true }
+      : { ...cred, refresh_token_in_keychain: false };
+    toPersist = { ...store, servers: { ...store.servers, [server]: updatedCred } };
+  }
+  writeCredentialStore(deps.fs, filePath, toPersist);
+  protectCredentialFile(filePath, { platform: deps.platform, env: deps.env });
+}
+
 /**
  * Return a credential for `server` that is safe to use right now, refreshing
  * it first if it is missing/expiring — single-flight across every process on
@@ -228,23 +315,56 @@ export async function ensureFreshCredential(deps: RefreshDeps, server: string): 
       // re-read its result", not "serialize into two sequential refreshes").
       return current;
     }
-    if (!current.refresh_token) {
+    if (!current.refresh_token && !current.refresh_token_in_keychain) {
       throw new CloudError(
         `the stored credential for ${server} is expired and cannot be refreshed automatically — ` +
           'run `pipeline cloud connect --reauth`',
       );
     }
-    const tok = await callRefreshGrant(deps, server, current.refresh_token);
+    // b14 — the local mirror of the server's RFC 9700 §4.14.2 SHOULD
+    // (`f3`'s `REFRESH_TOKEN_INACTIVITY_WINDOW_S`). Checked BEFORE resolving
+    // the actual refresh-token value (which, for a keychain-backed
+    // credential, costs a real subprocess call) and before touching the
+    // network at all: a credential this stale is refused locally, on the
+    // same 14-day number the server would refuse it on anyway, rather than
+    // spending a round trip to learn what this process can already tell.
+    if (isRefreshInactive(current.last_used_at, deps.now())) {
+      throw new CloudError(
+        `the stored credential for ${server} has been inactive for more than ` +
+          `${Math.floor(REFRESH_TOKEN_INACTIVITY_WINDOW_S / 86_400)} days and can no longer be refreshed ` +
+          'automatically — run `pipeline cloud connect --reauth`',
+      );
+    }
+    const keychainDeps = resolveKeychainDeps(deps);
+    const refreshToken = current.refresh_token ?? readFromKeychain(keychainDeps, server);
+    if (!refreshToken) {
+      // The marker said the keychain holds it, but the lookup came back
+      // empty (backend went unavailable since it was written, the entry was
+      // removed out-of-band, …) — fail exactly like "no refresh_token at
+      // all" rather than crash: the file's own protection never claimed to
+      // survive the keychain disappearing out from under it.
+      throw new CloudError(
+        `the stored credential for ${server} is expired and cannot be refreshed automatically — ` +
+          'run `pipeline cloud connect --reauth`',
+      );
+    }
+    const tok = await callRefreshGrant(deps, server, refreshToken);
     const updated: StoredCredential = {
       ...current,
       access_token: tok.access_token,
       token_type: tok.token_type ?? current.token_type ?? 'bearer',
-      refresh_token: tok.refresh_token ?? current.refresh_token,
+      refresh_token: tok.refresh_token ?? refreshToken,
       expires_at: tok.expires_in ? deps.now() + tok.expires_in * 1000 : undefined,
+      last_used_at: deps.now(),
+      refresh_token_in_keychain: undefined,
     };
     store.servers[server] = updated;
-    writeCredentialStore(deps.fs, credPath, store);
-    protectCredentialFile(credPath, { platform: deps.platform, env: deps.env });
+    persistCredentialSecurely(
+      { fs: deps.fs, platform: deps.platform, env: deps.env, keychain: keychainDeps },
+      credPath,
+      store,
+      server,
+    );
     return updated;
   } finally {
     handle.release();

@@ -103,6 +103,23 @@ export interface StoredCredential {
   refresh_token?: string;
   /** Epoch ms when the token expires (absent = unknown/non-expiring). */
   expires_at?: number;
+  /** b14 — epoch ms of the last successful `/oauth/token` refresh-grant use
+   *  (mint counts too). The CLI-side mirror of the server's
+   *  `oauth_refresh_tokens.last_used_at` (migration 038): "no successful
+   *  refresh call in the window", not "the row is old" — see
+   *  `credential-refresh.ts`'s `isRefreshInactive`. Absent means "no local
+   *  activity history yet" (a credential written before this field existed) —
+   *  deliberately NOT treated as expired; see `isRefreshInactive`'s doc for
+   *  why forcing an immediate re-login on upgrade day is the wrong call. */
+  last_used_at?: number;
+  /** b14 — `true` when `refresh_token` has been moved OUT of this file and
+   *  into the OS keychain (`lib/credential-keychain.ts`), keyed by this
+   *  entry's server URL. Absent/`false` means `refresh_token` (if any) lives
+   *  inline here, exactly as it did before this field existed — the
+   *  documented fallback for a platform/host with no available keychain
+   *  backend. Written and consumed exclusively by
+   *  `credential-refresh.ts#persistCredentialSecurely`. */
+  refresh_token_in_keychain?: boolean;
   /**
    * x50 — WHICH rung of the 04§4 ladder minted this credential, and therefore
    * whether a human identity exists behind it at all. `machine` is written
