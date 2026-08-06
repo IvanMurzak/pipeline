@@ -17,7 +17,30 @@ test('parseLogsArgs: defaults', () => {
     json: false,
     color: 'auto',
     project: null,
+    chat: false,
+    chatRunId: null,
   });
+});
+
+test('parseLogsArgs: --chat <run-id> and --chat=<run-id> forms', () => {
+  const a = parseLogsArgs(['--chat', 'abc123']);
+  expect(a.chat).toBe(true);
+  expect(a.chatRunId).toBe('abc123');
+
+  const b = parseLogsArgs(['--chat=def456']);
+  expect(b.chat).toBe(true);
+  expect(b.chatRunId).toBe('def456');
+});
+
+test('parseLogsArgs: --chat with no value (or followed by another flag) leaves chatRunId null', () => {
+  const a = parseLogsArgs(['--chat']);
+  expect(a.chat).toBe(true);
+  expect(a.chatRunId).toBe(null);
+
+  const b = parseLogsArgs(['--chat', '--json']);
+  expect(b.chat).toBe(true);
+  expect(b.chatRunId).toBe(null);
+  expect(b.json).toBe(true);
 });
 
 test('parseLogsArgs: flags + values', () => {

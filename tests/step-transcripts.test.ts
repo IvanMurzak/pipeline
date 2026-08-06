@@ -6,7 +6,7 @@ import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { foldStepSessionTranscripts, readStepSessionRefs } from '../src/lib/step-transcripts';
+import { foldStepSessionTranscripts, listStepSessionTranscriptFiles, readStepSessionRefs } from '../src/lib/step-transcripts';
 import { encodeClaudeProjectDir } from '../src/lib/vendor/transcript-walk';
 
 let sandbox: string;
@@ -165,5 +165,63 @@ describe('foldStepSessionTranscripts', () => {
     expect(fold.found_any).toBe(false);
     expect(fold.tools_called).toBe(0);
     expect(fold.failures).toEqual([]);
+  });
+});
+
+// listStepSessionTranscriptFiles — the LOCATE-ONLY counterpart used by
+// `pipeline logs --chat` (commands/logs.ts) to render actual content instead
+// of folding it into counts.
+describe('listStepSessionTranscriptFiles', () => {
+  test('one step, one session, no subagents → a single session-kind file', () => {
+    writeSession('01-a', 'sess-1');
+    const dir = transcriptDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'sess-1.jsonl'), entry('2026-07-08T10:00:00.000Z', { role: 'assistant', content: [] }), 'utf8');
+
+    const files = listStepSessionTranscriptFiles(readStepSessionRefs(sessionsDir), home);
+    expect(files).toEqual([
+      { step_id: '01-a', session_id: 'sess-1', is_previous: false, kind: 'session', path: join(dir, 'sess-1.jsonl') },
+    ]);
+  });
+
+  test('previous_session_ids render oldest-first, current last', () => {
+    writeSession('02-b', 'sess-new', ['sess-old']);
+    const dir = transcriptDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'sess-old.jsonl'), entry('2026-07-08T09:00:00.000Z', { role: 'assistant', content: [] }), 'utf8');
+    writeFileSync(join(dir, 'sess-new.jsonl'), entry('2026-07-08T09:10:00.000Z', { role: 'assistant', content: [] }), 'utf8');
+
+    const files = listStepSessionTranscriptFiles(readStepSessionRefs(sessionsDir), home);
+    expect(files.map((f) => ({ session_id: f.session_id, is_previous: f.is_previous, kind: f.kind }))).toEqual([
+      { session_id: 'sess-old', is_previous: true, kind: 'session' },
+      { session_id: 'sess-new', is_previous: false, kind: 'session' },
+    ]);
+  });
+
+  test('a session\'s subagents/ fan-out is listed right after its own session file', () => {
+    writeSession('01-a', 'sess-1');
+    const dir = transcriptDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'sess-1.jsonl'), entry('2026-07-08T10:00:00.000Z', { role: 'assistant', content: [] }), 'utf8');
+    const subDir = join(dir, 'sess-1', 'subagents');
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(join(subDir, 'agent-2.jsonl'), entry('2026-07-08T10:06:00.000Z', { role: 'assistant', content: [] }), 'utf8');
+    writeFileSync(join(subDir, 'agent-1.jsonl'), entry('2026-07-08T10:05:00.000Z', { role: 'assistant', content: [] }), 'utf8');
+
+    const files = listStepSessionTranscriptFiles(readStepSessionRefs(sessionsDir), home);
+    // The session's own transcript always sorts first; its two subagent files
+    // follow it (best-effort ordered by file time between themselves — real
+    // fs timestamps for two near-simultaneous writes aren't a stable enough
+    // signal to assert a strict order between THEM here, see
+    // telemetry-outbox.test.ts's birthtime-reliability note).
+    expect(files.map((f) => f.kind)).toEqual(['session', 'subagent', 'subagent']);
+    expect(files[0].path).toBe(join(dir, 'sess-1.jsonl'));
+    expect(new Set(files.slice(1).map((f) => f.path))).toEqual(new Set([join(subDir, 'agent-1.jsonl'), join(subDir, 'agent-2.jsonl')]));
+  });
+
+  test('missing session dir / no step files → empty list, never throws', () => {
+    expect(listStepSessionTranscriptFiles(readStepSessionRefs(join(sandbox, 'nope')), home)).toEqual([]);
+    writeSession('01-a', 'sess-none'); // step file exists, transcript never written
+    expect(listStepSessionTranscriptFiles(readStepSessionRefs(sessionsDir), home)).toEqual([]);
   });
 });

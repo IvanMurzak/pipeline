@@ -26,7 +26,7 @@
 // lockstep note. Best-effort like all stats code: every entry point swallows
 // failures and returns what it could read.
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import {
   RUN_FAILURES_COLLECT_MAX,
@@ -172,5 +172,84 @@ export function foldStepSessionTranscripts(refs: StepSessionRef[], homeOverride?
     }
   }
   out.failures.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// listStepSessionTranscriptFiles — the LOCATE-ONLY counterpart of
+// foldStepSessionTranscripts, for `pipeline logs --chat` (a headless run's
+// post-mortem transcript reader, see commands/logs.ts). The fold above
+// answers "how many tools/tokens"; this answers "which files, in what
+// order" so the caller can render their actual conversation content instead
+// of a count.
+// ---------------------------------------------------------------------------
+
+export interface StepTranscriptFile {
+  step_id: string;
+  session_id: string;
+  /** True when this file came from `previous_session_ids` (an earlier
+   *  execution, replaced by a graph loop-back) rather than the CURRENT
+   *  pinned session. */
+  is_previous: boolean;
+  /** 'session' = the step's own pinned transcript; 'subagent' = a Task/Agent
+   *  fan-out spawned from within that session. */
+  kind: 'session' | 'subagent';
+  path: string;
+}
+
+/** List every transcript file belonging to a headless run's step sessions,
+ *  in a readable order: `refs` in the order given (callers sort by step_id
+ *  for the usual numbered-step convention), and within each step every
+ *  PREVIOUS execution's session (oldest first) then the CURRENT session —
+ *  each followed by its own `subagents/` fan-out, sorted by file birth/mtime.
+ *
+ *  Unlike `foldStepSessionTranscripts`'s fold (which reaches a session's
+ *  subagents via `foldRunStatsFromTranscript`'s internal, unexported
+ *  `inWindowSubagentFiles`), this does its own subagents/ directory listing:
+ *  that vendored helper is both private and window-gated, and a headless
+ *  step's `subagents/` dir needs neither — it belongs to exactly one pinned
+ *  session, so every file in it is this step's by construction, no window
+ *  needed. Best-effort throughout: a missing file or unreadable dir is
+ *  skipped, never thrown. */
+export function listStepSessionTranscriptFiles(refs: StepSessionRef[], homeOverride?: string): StepTranscriptFile[] {
+  const out: StepTranscriptFile[] = [];
+  const dir = claudeProjectsDir(homeOverride);
+  for (const ref of refs) {
+    const projDir = encodeClaudeProjectDir(ref.spawn_cwd);
+    // session_ids is [current, ...previous] (most recent first) — reverse so
+    // the render order is chronological: oldest previous execution first,
+    // current execution last.
+    const chronological = [...ref.session_ids].reverse();
+    const currentId = ref.session_ids[0];
+    for (const sessionId of chronological) {
+      const file = join(dir, projDir, `${sessionId}.jsonl`);
+      if (existsSync(file)) {
+        out.push({ step_id: ref.step_id, session_id: sessionId, is_previous: sessionId !== currentId, kind: 'session', path: file });
+      }
+      const subDir = join(dir, projDir, sessionId, 'subagents');
+      if (!existsSync(subDir)) continue;
+      let names: string[];
+      try {
+        names = readdirSync(subDir).filter((n) => n.endsWith('.jsonl'));
+      } catch {
+        continue;
+      }
+      const withTime = names.map((name) => {
+        const p = join(subDir, name);
+        let t = 0;
+        try {
+          const s = statSync(p);
+          t = s.birthtimeMs && s.birthtimeMs > 0 ? s.birthtimeMs : s.mtimeMs;
+        } catch {
+          // 0 sorts first — still rendered, just not necessarily in order
+        }
+        return { p, t };
+      });
+      withTime.sort((a, b) => a.t - b.t);
+      for (const { p } of withTime) {
+        out.push({ step_id: ref.step_id, session_id: sessionId, is_previous: sessionId !== currentId, kind: 'subagent', path: p });
+      }
+    }
+  }
   return out;
 }
