@@ -19,10 +19,17 @@
 //
 //   • salted PROJECT FINGERPRINT → cloud `project_fingerprint`: an HMAC-SHA-256
 //     of a STABLE project identifier (git remote if present, else the absolute
-//     project path) keyed by a salt. Privacy-preserving and non-reversible: the
-//     cloud groups analytics per-project without ever learning the raw path or
-//     private repo name. Wire format: `fp:<hex>` (or `fp:<label>:<hex>` when the
-//     caller opts a PUBLIC label in).
+//     project path) keyed by a salt. Non-reversible: the raw path/remote
+//     cannot be recovered from the digest. NOT anonymous, only PSEUDONYMOUS —
+//     the cloud deliberately groups every run from one project under the same
+//     fingerprint, which is the point of the field. Whether that fingerprint
+//     also resists an outside GUESSING attack (hashing a suspected
+//     remote/path to test for a match) depends entirely on the salt: b15
+//     (07-security.md T16/SG13) closes that with a per-install CSPRNG secret
+//     (`lib/fingerprint-salt.ts`), falling back with no error to a documented
+//     PUBLIC constant — see `DEFAULT_FINGERPRINT_SALT` — for an install that
+//     predates b15 or could not persist one. Wire format: `fp:<hex>` (or
+//     `fp:<label>:<hex>` when the caller opts a PUBLIC label in).
 //       evidence: apps/api/src/db/migrations/003_runs.sql:120-121,
 //       apps/api/src/modules/runs/ingest.ts:607 (`project_fingerprint`),
 //       apps/api/src/modules/runs/ingest.test.ts:57 (`"fp:acme-api:9a8b7c"`),
@@ -55,17 +62,27 @@ export const PIPELINE_VERSION_PREFIX = 'sha256:';
 export const FINGERPRINT_PREFIX = 'fp:';
 
 /** Env var read as the fingerprint salt when the caller passes none. Set this to
- *  a per-INSTALL secret for real privacy (see DEFAULT_FINGERPRINT_SALT). */
+ *  PIN a specific salt deliberately — e.g. sharing one fingerprint across
+ *  several machines for the same project, or overriding the b15 auto-generated
+ *  per-install secret (`lib/fingerprint-salt.ts`) entirely. Always wins over
+ *  that per-install secret; see `resolveSalt`'s precedence. */
 export const FINGERPRINT_SALT_ENV = 'PIPELINE_FINGERPRINT_SALT';
 
 /**
- * Fallback salt when neither an explicit salt nor `PIPELINE_FINGERPRINT_SALT` is
- * present. A PUBLIC constant only guarantees a STABLE, well-framed fingerprint —
- * it is NOT a privacy secret (anyone with this repo could hash a guessed
- * remote/path under it). For unlinkable fingerprints on private repos, supply a
- * per-install secret salt via the env var or the `salt` argument. Documented,
- * not defended against here (the raw path/name still never leaves the machine —
- * only its keyed hash does).
+ * Last-resort fallback salt — reached only when NONE of an explicit `salt`,
+ * `PIPELINE_FINGERPRINT_SALT`, or a resolved per-install secret salt (b15,
+ * `lib/fingerprint-salt.ts#loadOrCreateInstallSalt`) is available. A PUBLIC
+ * constant only guarantees a STABLE, well-framed fingerprint — it is NOT a
+ * privacy secret (anyone with this repo could hash a guessed remote/path
+ * under it) and MUST NEVER be described as making the fingerprint anonymous
+ * anywhere this project documents it (07-security.md T16). Reached in
+ * practice by: an install predating b15 that has not generated a salt file
+ * yet on this call path, a caller that has not wired `installSalt` in, or a
+ * `loadOrCreateInstallSalt` failure (read-only home dir, a failed Windows ACL
+ * call, …) — every one of those degrades here with NO thrown error, exactly
+ * as every install behaved before b15 existed. Documented, not defended
+ * against here (the raw path/name still never leaves the machine — only its
+ * keyed hash does).
  */
 export const DEFAULT_FINGERPRINT_SALT = 'claude-pipeline/run-identity/v1';
 
@@ -414,11 +431,18 @@ export function formatFingerprint(fingerprintHex: string, visibleLabel?: string)
 }
 
 /** Salt precedence: explicit `salt` → `env[PIPELINE_FINGERPRINT_SALT]` →
- *  `DEFAULT_FINGERPRINT_SALT`. Empty strings are treated as absent. */
-function resolveSalt(salt: string | undefined, env: Record<string, string | undefined>): string {
+ *  the caller-resolved per-install secret salt (`installSalt`, b15 — see
+ *  `RunIdentityOptions.installSalt`) → `DEFAULT_FINGERPRINT_SALT`. Empty
+ *  strings are treated as absent at every step. */
+function resolveSalt(
+  salt: string | undefined,
+  env: Record<string, string | undefined>,
+  installSalt: string | undefined,
+): string {
   if (salt !== undefined && salt !== '') return salt;
   const fromEnv = env[FINGERPRINT_SALT_ENV];
   if (fromEnv !== undefined && fromEnv !== '') return fromEnv;
+  if (installSalt !== undefined && installSalt !== '') return installSalt;
   return DEFAULT_FINGERPRINT_SALT;
 }
 
@@ -442,6 +466,20 @@ export interface RunIdentityOptions {
   projectPath?: string;
   /** Fingerprint salt (see `resolveSalt` precedence). */
   salt?: string;
+  /**
+   * b15 — the per-install secret salt, ALREADY RESOLVED by the caller (see
+   * `lib/fingerprint-salt.ts#loadOrCreateInstallSalt`). This module stays a
+   * pure, disk-free library — exactly like `contentHash.readFile` and
+   * `identifier.readGitConfig`, the CALLER decides whether/how to source the
+   * on-disk secret; `computeRunIdentity` never reads it itself. Used only
+   * when neither an explicit `salt` nor `PIPELINE_FINGERPRINT_SALT` is set,
+   * and wins over `DEFAULT_FINGERPRINT_SALT` — the whole reason `b15` exists
+   * is that the default is a PUBLIC, dictionary-attackable constant (see its
+   * own doc comment). Omitted (the common case for a caller that has not
+   * wired `fingerprint-salt.ts` yet, or when generation/read failed) falls
+   * back to that public constant with NO error — see `resolveSalt`.
+   */
+  installSalt?: string;
   /** OPTIONAL public label for the fingerprint (`fp:<label>:<hex>`) — an
    *  explicit org-visible name for a PUBLIC repo. NEVER pass the raw local path;
    *  omitted ⇒ fully opaque `fp:<hex>`. */
@@ -472,7 +510,7 @@ export function computeRunIdentity(options: RunIdentityOptions): RunIdentity {
     options.projectIdentifier ??
     resolveProjectIdentifier(options.projectPath ?? process.cwd(), options.identifier);
 
-  const salt = resolveSalt(options.salt, options.env ?? process.env);
+  const salt = resolveSalt(options.salt, options.env ?? process.env, options.installSalt);
   const projectFingerprintHash = computeProjectFingerprint(projectIdentifier, salt);
   const projectFingerprint = formatFingerprint(projectFingerprintHash, options.visibleLabel);
 

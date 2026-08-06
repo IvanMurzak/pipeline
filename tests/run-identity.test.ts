@@ -347,30 +347,56 @@ test('computeRunIdentity: optional visibleLabel produces `fp:<label>:<hex>`', ()
   expect(id.projectFingerprintHash).toBe(bare.projectFingerprintHash);
 });
 
-test('computeRunIdentity: salt precedence — explicit > env > default constant', () => {
+test('computeRunIdentity: salt precedence — explicit > env > installSalt (b15) > default constant', () => {
   const root = fixture();
   const idn = 'github.com/o/n';
 
-  // env salt is used when no explicit salt is given.
+  // b15: the per-install secret salt is used when no explicit salt and no
+  // env override are given — this is what makes the fingerprint resist a
+  // dictionary/guessing attack (07-security.md T16) instead of falling
+  // straight through to the public constant.
+  const viaInstall = computeRunIdentity({
+    pipelineRoot: root,
+    projectIdentifier: idn,
+    env: {},
+    installSalt: 'per-install-secret',
+  });
+  expect(viaInstall.projectFingerprintHash).toBe(computeProjectFingerprint(idn, 'per-install-secret'));
+  expect(viaInstall.projectFingerprintHash).not.toBe(computeProjectFingerprint(idn, DEFAULT_FINGERPRINT_SALT));
+
+  // env salt is used when no explicit salt is given, and wins over installSalt
+  // (PIPELINE_FINGERPRINT_SALT is how a user PINS a salt deliberately).
   const viaEnv = computeRunIdentity({
     pipelineRoot: root,
     projectIdentifier: idn,
     env: { [FINGERPRINT_SALT_ENV]: 'env-salt' },
+    installSalt: 'per-install-secret',
   });
   expect(viaEnv.projectFingerprintHash).toBe(computeProjectFingerprint(idn, 'env-salt'));
 
-  // explicit salt overrides env.
+  // explicit salt overrides both env and installSalt.
   const viaExplicit = computeRunIdentity({
     pipelineRoot: root,
     projectIdentifier: idn,
     salt: 'real-salt',
     env: { [FINGERPRINT_SALT_ENV]: 'env-salt' },
+    installSalt: 'per-install-secret',
   });
   expect(viaExplicit.projectFingerprintHash).toBe(computeProjectFingerprint(idn, 'real-salt'));
 
-  // neither → the documented default constant.
+  // none of the three (a pre-b15 caller, or one whose install-salt generation
+  // failed) → the documented default constant, with no error.
   const viaDefault = computeRunIdentity({ pipelineRoot: root, projectIdentifier: idn, env: {} });
   expect(viaDefault.projectFingerprintHash).toBe(computeProjectFingerprint(idn, DEFAULT_FINGERPRINT_SALT));
+
+  // installSalt of '' (empty string) is treated as absent, same as salt/env.
+  const viaEmptyInstall = computeRunIdentity({
+    pipelineRoot: root,
+    projectIdentifier: idn,
+    env: {},
+    installSalt: '',
+  });
+  expect(viaEmptyInstall.projectFingerprintHash).toBe(computeProjectFingerprint(idn, DEFAULT_FINGERPRINT_SALT));
 });
 
 test('computeRunIdentity: resolves the identifier from projectPath when none is given', () => {

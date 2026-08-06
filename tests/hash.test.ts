@@ -1,8 +1,10 @@
-import { test, expect, afterEach } from 'bun:test';
-import { runHash } from '../src/commands/hash';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { test, expect, afterEach, describe } from 'bun:test';
+import { runHash, type HashCommandDeps } from '../src/commands/hash';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
+import { realFs } from '../src/lib/cloud-config';
+import { computeProjectFingerprint, resolveProjectIdentifier, DEFAULT_FINGERPRINT_SALT } from '../src/lib/run-identity';
 
 // ---------------------------------------------------------------------------
 // Scaffolding — fixture pipelines under the OS temp dir
@@ -313,4 +315,170 @@ test('hash command: changing content changes the hash', () => {
     process.stdout.write = originalWrite;
     process.stderr.write = originalStderr;
   }
+});
+
+// ===========================================================================
+// `--project` — b15: the REAL production entry point for `computeRunIdentity`'s
+// project-fingerprint half (07-security.md T16/SG13). Everything here goes
+// through `runHash` itself — the actual dispatched command — not `resolveSalt`
+// or `computeRunIdentity` directly, so a regression in the WIRING (not just
+// the library) shows up here.
+// ===========================================================================
+
+/** Capture stdout/stderr around `fn`, always restoring the real writers. */
+function capture(fn: () => number): { code: number; stdout: string; stderr: string } {
+  let stdout = '';
+  let stderr = '';
+  const originalOut = process.stdout.write;
+  const originalErr = process.stderr.write;
+  process.stdout.write = ((s: string) => {
+    stdout += s;
+    return true;
+  }) as any;
+  process.stderr.write = ((s: string) => {
+    stderr += s;
+    return true;
+  }) as any;
+  try {
+    const code = fn();
+    return { code, stdout, stderr };
+  } finally {
+    process.stdout.write = originalOut;
+    process.stderr.write = originalErr;
+  }
+}
+
+/** A scratch per-install-salt home, isolated from this dev machine's REAL
+ *  `%APPDATA%\claude-pipeline` — PIPELINE_CLOUD_HOME is the override every
+ *  `cloud-config.ts#credentialDir` caller respects (see `fingerprint-
+ *  salt.test.ts`'s own module doc for why this matters: omitting it once
+ *  wrote a real file into this dev box's actual credential directory). */
+function scratchDeps(home: string, overrides: Partial<HashCommandDeps> = {}): HashCommandDeps {
+  return {
+    fs: realFs,
+    platform: 'linux',
+    env: { PIPELINE_CLOUD_HOME: home },
+    homedir: home,
+    ...overrides,
+  };
+}
+
+function mkScratchHome(): string {
+  const d = mkdtempSync(join(TMP_ROOT, 'hash-salt-home-'));
+  created.push(d);
+  return d;
+}
+
+describe('hash command: --project (b15 real wiring)', () => {
+  test('--project requires --json (usage error, exit 2)', () => {
+    const root = makePipeline({ 'PIPELINE.md': '# m\n' });
+    const { code, stderr } = capture(() => runHash(['--root', root, '--project', root]));
+    expect(code).toBe(2);
+    expect(stderr).toContain('--project requires --json');
+  });
+
+  test('--label without --project is a usage error, exit 2', () => {
+    const root = makePipeline({ 'PIPELINE.md': '# m\n' });
+    const { code, stderr } = capture(() => runHash(['--root', root, '--json', '--label', 'x']));
+    expect(code).toBe(2);
+    expect(stderr).toContain('--label requires --project');
+  });
+
+  test('--project --json includes project_fingerprint alongside content_hash', () => {
+    const root = makePipeline({ 'PIPELINE.md': '# m\n' });
+    const home = mkScratchHome();
+    const { code, stdout, stderr } = capture(() =>
+      runHash(['--root', root, '--project', root, '--json'], scratchDeps(home)),
+    );
+    expect(code).toBe(0);
+    expect(stderr).toBe('');
+    const result = JSON.parse(stdout);
+    expect(result.content_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(result.project_fingerprint).toMatch(/^fp:[0-9a-f]{64}$/);
+  });
+
+  test(
+    'WIRING PROOF: the REAL entry point fingerprints under the per-install secret, ' +
+      'not the public DEFAULT_FINGERPRINT_SALT — proven by comparing against an ' +
+      'independent computation, not by reading resolveSalt internals',
+    () => {
+      const root = makePipeline({ 'PIPELINE.md': '# m\n' });
+      const home = mkScratchHome();
+      const { code, stdout } = capture(() =>
+        runHash(['--root', root, '--project', root, '--json'], scratchDeps(home)),
+      );
+      expect(code).toBe(0);
+      const result = JSON.parse(stdout);
+
+      // Independently compute what the PUBLIC constant would have produced for
+      // this exact project path — the CLI's own fallback, and what every prior
+      // (pre-b15) release would have shipped.
+      const identifier = resolveProjectIdentifier(root, { gitRemoteUrl: null });
+      const publicConstantFingerprint =
+        'fp:' + computeProjectFingerprint(identifier, DEFAULT_FINGERPRINT_SALT);
+
+      // MUTATION-PROVABLE: if `runHash` stopped resolving/threading the
+      // install salt (e.g. reverted to calling computeRunIdentity without
+      // `installSalt`), this assertion is exactly what would go red.
+      expect(result.project_fingerprint).not.toBe(publicConstantFingerprint);
+    },
+  );
+
+  test('two different install-salt homes produce two different fingerprints for the SAME project', () => {
+    const root = makePipeline({ 'PIPELINE.md': '# m\n' });
+    const homeA = mkScratchHome();
+    const homeB = mkScratchHome();
+    const a = capture(() => runHash(['--root', root, '--project', root, '--json'], scratchDeps(homeA)));
+    const b = capture(() => runHash(['--root', root, '--project', root, '--json'], scratchDeps(homeB)));
+    expect(JSON.parse(a.stdout).project_fingerprint).not.toBe(JSON.parse(b.stdout).project_fingerprint);
+  });
+
+  test('the SAME install-salt home reuses the SAME fingerprint across invocations', () => {
+    const root = makePipeline({ 'PIPELINE.md': '# m\n' });
+    const home = mkScratchHome();
+    const deps = scratchDeps(home);
+    const first = capture(() => runHash(['--root', root, '--project', root, '--json'], deps));
+    const second = capture(() => runHash(['--root', root, '--project', root, '--json'], deps));
+    expect(JSON.parse(first.stdout).project_fingerprint).toBe(JSON.parse(second.stdout).project_fingerprint);
+  });
+
+  test('PIPELINE_FINGERPRINT_SALT env still wins over the per-install secret, through the real entry point', () => {
+    const root = makePipeline({ 'PIPELINE.md': '# m\n' });
+    const home = mkScratchHome();
+    const deps = scratchDeps(home, { env: { PIPELINE_CLOUD_HOME: home, PIPELINE_FINGERPRINT_SALT: 'pinned-salt' } });
+    const { stdout } = capture(() => runHash(['--root', root, '--project', root, '--json'], deps));
+    const identifier = resolveProjectIdentifier(root, { gitRemoteUrl: null });
+    const expected = 'fp:' + computeProjectFingerprint(identifier, 'pinned-salt');
+    expect(JSON.parse(stdout).project_fingerprint).toBe(expected);
+  });
+
+  test('--label produces `fp:<label>:<hex>` through the real entry point', () => {
+    const root = makePipeline({ 'PIPELINE.md': '# m\n' });
+    const home = mkScratchHome();
+    const { stdout } = capture(() =>
+      runHash(['--root', root, '--project', root, '--json', '--label', 'acme-api'], scratchDeps(home)),
+    );
+    expect(JSON.parse(stdout).project_fingerprint).toMatch(/^fp:acme-api:[0-9a-f]{64}$/);
+  });
+
+  test('NEVER UPLOADED: the resolved install salt itself never appears in stdout', () => {
+    const root = makePipeline({ 'PIPELINE.md': '# m\n' });
+    const home = mkScratchHome();
+    const deps = scratchDeps(home);
+    // Prime the salt file first so we can read back the RAW secret and assert
+    // its absence, independent of the command under test.
+    const primed = capture(() => runHash(['--root', root, '--project', root, '--json'], deps));
+    const saltFilePath = join(home, 'fingerprint-salt.json');
+    const rawSalt = (JSON.parse(readFileSync(saltFilePath, 'utf-8')) as { salt: string }).salt;
+    expect(rawSalt).toMatch(/^[0-9a-f]{64}$/);
+    expect(primed.stdout).not.toContain(rawSalt);
+  });
+
+  test('when --project is omitted, output is unchanged (no project_fingerprint key at all)', () => {
+    const root = makePipeline({ 'PIPELINE.md': '# m\n' });
+    const { stdout } = capture(() => runHash(['--root', root, '--json']));
+    const result = JSON.parse(stdout);
+    expect(result).toEqual({ content_hash: result.content_hash });
+    expect('project_fingerprint' in result).toBe(false);
+  });
 });

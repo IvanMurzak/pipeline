@@ -223,6 +223,19 @@ export function credentialLockPath(ctx: HomeContext): string {
   return join(credentialDir(ctx), 'credentials.lock');
 }
 
+/** b15 — the per-install fingerprint-salt file (07-security.md T16/SG13):
+ *  a CSPRNG secret that replaces `run-identity.ts`'s public
+ *  `DEFAULT_FINGERPRINT_SALT` when available, closing the dictionary-attack
+ *  gap the public constant documents about itself. Lives beside the
+ *  credential store in the SAME per-user directory — one protected location,
+ *  not a second one — and is written/protected exactly like it (see
+ *  `lib/fingerprint-salt.ts#loadOrCreateInstallSalt`, which reuses
+ *  `writeSecretFileAtomic` and `credential-protect.ts#protectCredentialFile`
+ *  verbatim). */
+export function fingerprintSaltFilePath(ctx: HomeContext): string {
+  return join(credentialDir(ctx), 'fingerprint-salt.json');
+}
+
 /** The project binding path — resolved against the consumer project's cwd. */
 export function cloudJsonPath(cwd: string): string {
   return join(cwd, '.pipeline', 'cloud.json');
@@ -285,29 +298,52 @@ function writeFileAtomic(fs: CloudFs, filePath: string, data: string, mode: numb
 }
 
 /**
- * Persist the credential store durably and with restrictive perms: the
- * directory is created 0700, the content lands via `writeFileAtomic` (write
- * temp + rename — a5 DoD box 2), and the final path is chmod'd 0600 again to
- * defeat umask and to tighten a pre-existing file at this path. On Windows,
- * `chmod` only ever toggles the read-only DOS attribute — it does NOT
- * restrict which OTHER accounts can read the file (NTFS uses ACLs, not POSIX
- * mode bits). That is a SEPARATE, Windows-only control — see
- * `lib/credential-protect.ts`'s `protectCredentialFile`, which every writer
- * of this store (`commands/cloud.ts`, `lib/credential-refresh.ts`) calls
- * explicitly right after this function, keyed off the CALLER's injected
- * platform rather than the real OS — this function intentionally does not
- * do it itself, so it stays a pure, always-safe-to-call primitive with no
- * implicit dependency on `process.platform`.
+ * Persist ANY secret file durably and with restrictive perms: the directory
+ * is created 0700, the content lands via `writeFileAtomic` (write temp +
+ * rename — a5 DoD box 2), and the final path is chmod'd 0600 again to defeat
+ * umask and to tighten a pre-existing file at this path. On Windows, `chmod`
+ * only ever toggles the read-only DOS attribute — it does NOT restrict which
+ * OTHER accounts can read the file (NTFS uses ACLs, not POSIX mode bits).
+ * That is a SEPARATE, Windows-only control — see `lib/credential-
+ * protect.ts`'s `protectCredentialFile`, which every writer of a secret file
+ * (`commands/cloud.ts`, `lib/credential-refresh.ts`, b15's `lib/fingerprint-
+ * salt.ts`) calls explicitly right after this function, keyed off the
+ * CALLER's injected platform rather than the real OS — this function
+ * intentionally does not do it itself, so it stays a pure, always-safe-to-
+ * call primitive with no implicit dependency on `process.platform`.
+ *
+ * ONE storage mechanism for every secret this package persists at rest —
+ * `writeCredentialStore` below is just this function plus JSON framing, and
+ * b15's per-install fingerprint salt reuses it directly rather than
+ * inventing a second write path.
+ */
+export function writeSecretFileAtomic(fs: CloudFs, filePath: string, data: string): void {
+  const dir = dirname(filePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileAtomic(fs, filePath, data, 0o600);
+  fs.chmodSync(filePath, 0o600);
+}
+
+/**
+ * Persist the credential store durably and with restrictive perms — see
+ * `writeSecretFileAtomic` for the mechanism; this is just that function plus
+ * the store's JSON framing. On Windows, `chmod` only ever toggles the
+ * read-only DOS attribute — it does NOT restrict which OTHER accounts can
+ * read the file (NTFS uses ACLs, not POSIX mode bits). That is a SEPARATE,
+ * Windows-only control — see `lib/credential-protect.ts`'s
+ * `protectCredentialFile`, which every writer of this store
+ * (`commands/cloud.ts`, `lib/credential-refresh.ts`) calls explicitly right
+ * after this function, keyed off the CALLER's injected platform rather than
+ * the real OS — this function intentionally does not do it itself, so it
+ * stays a pure, always-safe-to-call primitive with no implicit dependency on
+ * `process.platform`.
  */
 export function writeCredentialStore(
   fs: CloudFs,
   filePath: string,
   store: CredentialStore,
 ): void {
-  const dir = dirname(filePath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  writeFileAtomic(fs, filePath, JSON.stringify(store, null, 2) + '\n', 0o600);
-  fs.chmodSync(filePath, 0o600);
+  writeSecretFileAtomic(fs, filePath, JSON.stringify(store, null, 2) + '\n');
 }
 
 // ---------------------------------------------------------------------------
