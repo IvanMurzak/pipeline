@@ -1,12 +1,11 @@
-// Pipeline UI — event writer (TypeScript port of apps/pipeline-ui/writer.py).
+// Event journal writer.
+//
+// (Historically a TypeScript port of the local dashboard's writer.py; both that
+// file and the dashboard are gone. The journal is not — it is ux-v2's telemetry
+// source and what `pipeline logs` renders.)
 //
 // Appends one JSON event to
 //     <project-root>/.pipeline/.runtime/events.jsonl
-//
-// Also (best-effort, non-blocking) pings the local UI daemon's /api/register
-// endpoint so newly-touched projects show up in the project picker. If the
-// daemon is not running, the ping is silently skipped — the journal write is
-// the source of truth.
 //
 // This is a FAITHFUL MECHANICAL PORT of writer.py. The envelope shape/order,
 // kv coercion, worktree detection, rotation, mirror-binding, and liveness logic
@@ -34,7 +33,6 @@ import { ensureGeneratedDir } from './generated-dir';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, dirname, resolve, isAbsolute, basename } from 'node:path';
-import { request as httpRequest } from 'node:http';
 
 // Schema v5 — see EVENTS.md. Kept in lockstep with analytics_relay.ts /
 // server.ts. v4 added the optional `step_id` field on iteration.* events; v5
@@ -42,12 +40,13 @@ import { request as httpRequest } from 'node:http';
 // `name:`). The rename is the only non-additive change in the journal's
 // history, which is why it bumps the stamp at all — every prior addition
 // stayed at its version. Readers MUST still accept `step_id` (EVENTS.md's
-// "a daemon at vN parses vN-1 cleanly" invariant): journals already on disk
+// "a reader at vN parses vN-1 cleanly" invariant): journals already on disk
 // keep folding, so no already-computed analytic reattributes.
 export const SCHEMA_VERSION = 5;
 
-// Keep in sync with hooks/analytics_relay.ts's MIRROR_BINDING_SCHEMA and
-// apps/pipeline-ui/mirror.ts's MirrorBindingRecord shape (issue #11).
+// Keep in sync with hooks/analytics_relay.ts's MIRROR_BINDING_SCHEMA (issue #11).
+// The bindings journal is now read by analytics_relay.ts's own session→run
+// lookup; the dashboard's MirrorService that first consumed it is deleted.
 export const MIRROR_BINDING_SCHEMA = 1;
 
 const DEBUG = process.env.PIPELINE_UI_DEBUG === '1';
@@ -59,8 +58,8 @@ function log(msg: string): void {
 /** Transcript opt-out switch (`PIPELINE_UI_TRANSCRIPTS`, default ON). Gates
  *  ONLY the transcript pointer this writer records on the Path-B supervisor
  *  mirror binding: when off, `registerMirrorBinding` writes `transcript_path:
- *  null` so the daemon never mirrors the session transcript, while the binding
- *  still carries run_id/session_id for run correlation. Same falsy parse as
+ *  null` so nothing downstream can reach the session transcript through the
+ *  binding, while the binding still carries run_id/session_id for correlation. Same falsy parse as
  *  `PIPELINE_UI_ENABLED`. Orthogonal to `PIPELINE_STATS_ENABLED`. */
 export function pipelineUiTranscriptsEnabled(): boolean {
   const v = (process.env.PIPELINE_UI_TRANSCRIPTS ?? '').trim().toLowerCase();
@@ -68,17 +67,17 @@ export function pipelineUiTranscriptsEnabled(): boolean {
 }
 
 /** Master UI opt-out switch (`PIPELINE_UI_ENABLED`, default ON) — the same
- *  first-statement gate `hooks/analytics_relay.ts` and `hooks/pipeline_ui_relay.ts`
+ *  first-statement gate `hooks/analytics_relay.ts` and `hooks/session_relay.ts`
  *  apply. Only an explicit falsy value (`0`/`false`/`no`/`off`) disables; unset,
  *  empty and every other value leave it enabled.
  *
  *  This is the CLI-side copy of the helper the two hooks duplicate (they cannot
- *  import a sibling at runtime); `commands/ui.ts`'s `uiEnabled` delegates here,
- *  so the count of independent copies stays at three. Keep the falsy-parse
- *  semantics identical in all of them.
+ *  import a sibling at runtime), so the count of independent copies is three:
+ *  here, `hooks/analytics_relay.ts`, and `hooks/session_relay.ts`. Keep the
+ *  falsy-parse semantics identical in all of them.
  *
  *  Used by {@link registerDriveSessionBinding}: "opted out ⇒ no mirror
- *  bindings" is part of the master switch's contract (`docs/ui-subsystem.md`),
+ *  bindings" is part of the master switch's contract (`docs/journal-and-hooks.md`),
  *  and drive writes its bindings unprompted, so the gate belongs on that path.
  *  `emitEvent`/`registerMirrorBinding` deliberately stay ungated — they are
  *  called explicitly by `/pipeline:run` and journal what `pipeline logs` reads. */
@@ -133,10 +132,11 @@ function normcase(p: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Home-runtime / daemon bookkeeping
+// Home-runtime bookkeeping
 // ---------------------------------------------------------------------------
 
-/** Per-user daemon bookkeeping dir (~/.claude/pipeline-ui).
+/** Per-user bookkeeping dir (~/.claude/pipeline-ui) — home of the mirror
+ *  bindings journal.
  *
  *  Reads process.env first (USERPROFILE/HOME) so tests can override the home
  *  dir between cases — matching analytics_relay.ts:mirrorBindingsPath, since
@@ -144,22 +144,6 @@ function normcase(p: string): string {
 function userHomeRuntime(): string {
   const home = process.env.USERPROFILE ?? process.env.HOME ?? homedir();
   return join(home, '.claude', 'pipeline-ui');
-}
-
-interface DaemonLock {
-  port?: number | string;
-  [k: string]: unknown;
-}
-
-function readDaemonLock(): DaemonLock | null {
-  const lock = join(userHomeRuntime(), 'daemon.lock');
-  if (!existsSync(lock)) return null;
-  try {
-    return JSON.parse(readFileSync(lock, 'utf-8')) as DaemonLock;
-  } catch (e) {
-    log(`daemon.lock unreadable: ${e}`);
-    return null;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -192,9 +176,9 @@ export interface ResolvedRoot {
  *  checkout there as `core.worktree`. Without this, every worktree of a
  *  submodule registers as its own project under a path inside `.git`.
  *
- *  COPY of apps/pipeline-ui/lib.ts:submoduleWorktreeOf — this package publishes
+ *  This is the CANONICAL copy of submoduleWorktreeOf — this package publishes
  *  standalone to npm and cannot import a sibling app at runtime.
- *  apps/pipeline-ui/tests/resolve-parity.test.ts fails on drift. */
+ *  apps/pipeline-cli/tests/resolve-parity.test.ts fails on drift. */
 function submoduleWorktreeOf(commonDir: string): string | null {
   try {
     const config = readFileSync(join(commonDir, 'config'), 'utf-8');
@@ -353,15 +337,6 @@ export function parseKvArgs(args: string[]): ParsedKv {
 }
 
 // ---------------------------------------------------------------------------
-// project_id
-// ---------------------------------------------------------------------------
-
-/** sha1(String(project_root)).hexdigest()[:12] — mirrors writer.py:_project_id. */
-function projectId(projectRoot: string): string {
-  return createHash('sha1').update(projectRoot, 'utf8').digest('hex').slice(0, 12);
-}
-
-// ---------------------------------------------------------------------------
 // Rotation + append
 // ---------------------------------------------------------------------------
 
@@ -408,61 +383,6 @@ function appendEventLine(runtimeDir: string, event: unknown): void {
 }
 
 // ---------------------------------------------------------------------------
-// Daemon ping
-// ---------------------------------------------------------------------------
-
-/** Best-effort POST to /api/register on 127.0.0.1:<port>. Silent on failure;
- *  never throws. Mirrors writer.py:_ping_daemon_register with a 0.5s timeout. */
-function pingDaemonRegister(
-  daemon: DaemonLock | null,
-  projectRoot: string,
-  worktree: string | null,
-): void {
-  if (!daemon || daemon.port === undefined || daemon.port === null) return;
-  try {
-    const body = JSON.stringify({
-      project_root: projectRoot,
-      project_name: basename(projectRoot),
-      project_id: projectId(projectRoot),
-      worktree: worktree ? worktree : null,
-    });
-    const port = parseInt(String(daemon.port), 10);
-    if (!Number.isFinite(port)) return;
-    const req = httpRequest(
-      {
-        host: '127.0.0.1',
-        port,
-        path: '/api/register',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body),
-        },
-        timeout: 500,
-      },
-      (res) => {
-        // Drain + ignore the response body, like conn.getresponse().read().
-        res.on('data', () => {});
-        res.on('end', () => {});
-        res.on('error', () => {});
-      },
-    );
-    req.on('timeout', () => {
-      try {
-        req.destroy();
-      } catch {
-        // ignore
-      }
-    });
-    req.on('error', (e) => log(`daemon register ping failed: ${e}`));
-    req.write(body);
-    req.end();
-  } catch (e) {
-    log(`daemon register ping failed: ${e}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Envelope normalization
 // ---------------------------------------------------------------------------
 
@@ -478,7 +398,7 @@ function normEnvelope(v: KvValue | undefined): string | null {
 // Transcript-path encoding (mirror binding)
 // ---------------------------------------------------------------------------
 
-/** Mirror of apps/pipeline-ui/transcripts.ts:encodeClaudeProjectDir and
+/** Mirror of vendor/transcript-walk.ts:encodeClaudeProjectDir and
  *  writer.py:_encode_claude_project_dir — replace each `:`, `/`, `\` with `-`. */
 function encodeClaudeProjectDir(absPath: string): string {
   let out = '';
@@ -541,7 +461,7 @@ function resolveEnvelopeRoot(projectRootOverride: string | null): {
 // Public API: emitEvent
 // ---------------------------------------------------------------------------
 
-/** Build the envelope, append to events.jsonl, best-effort daemon ping. Always
+/** Build the envelope and append it to events.jsonl. Always
  *  returns 0. `argv` is the kv-arg list AFTER the event-type token.
  *  Faithful port of the event-emit branch of writer.py:main. */
 export function emitEvent(eventType: string, argv: string[]): number {
@@ -583,11 +503,6 @@ export function emitEvent(eventType: string, argv: string[]): number {
     return 0;
   }
 
-  const daemon = readDaemonLock();
-  if (daemon) {
-    pingDaemonRegister(daemon, projectRoot, worktree);
-  }
-
   return 0;
 }
 
@@ -615,7 +530,7 @@ export interface EmitEventJsonOpts {
  * Envelope shape and resolution are identical to emitEvent: same schema
  * version, same field order, same env fallbacks (PIPELINE_UI_RUN_ID /
  * PIPELINE_UI_PARENT_RUN_ID / CLAUDE_SESSION_ID), same project_root/worktree
- * detection (shared resolveEnvelopeRoot), same rotation + daemon ping. `data`
+ * detection (shared resolveEnvelopeRoot), same rotation. `data`
  * is journalled as passed (caller owns the payload shape). Always returns 0 —
  * never blocks the caller.
  */
@@ -649,11 +564,6 @@ export function emitEventJson(
   } catch (e) {
     log(`journal write failed: ${e}`);
     return 0;
-  }
-
-  const daemon = readDaemonLock();
-  if (daemon) {
-    pingDaemonRegister(daemon, projectRoot, worktree);
   }
 
   return 0;
@@ -720,8 +630,8 @@ export function registerMirrorBinding(argv: string[]): number {
   const pipelineName = dataStrOr(data, 'pipeline_name') || '';
   const sessionId = dataStrOr(data, 'session_id') || envOrNull('CLAUDE_SESSION_ID');
   // PIPELINE_UI_TRANSCRIPTS off: withhold the transcript pointer (and skip the
-  // filesystem derivation) so the daemon never mirrors this session transcript;
-  // the binding still carries run_id/session_id for run correlation.
+  // filesystem derivation) so nothing downstream can reach this session's
+  // transcript; the binding still carries run_id/session_id for correlation.
   const transcriptPath = pipelineUiTranscriptsEnabled()
     ? (dataStrOr(data, 'transcript_path') ||
        deriveMainTranscriptPath(projectRoot, sessionId))
@@ -790,23 +700,22 @@ export interface DriveSessionBinding {
  * attribution by construction, not by correlation.
  *
  * `transcript_path` is deliberately `null`: at pre-write time the child's
- * transcript file does not exist yet, and the daemon's `indexRunTranscripts`
- * skips pointer-less records, so this binding never widens what MirrorService
- * tails (issue #11 scope discipline is unchanged).
+ * transcript file does not exist yet, and a pointer-less record names no
+ * transcript, so this binding never widens transcript scope (issue #11 scope
+ * discipline is unchanged).
  *
  * Lifecycle: no explicit `terminal` record is written, and none is needed —
  * `findRunIdForSession` treats a binding as terminated once the run emits
  * `pipeline.completed`/`pipeline.halted` into events.jsonl, which retires every
  * binding sharing that run_id at once; a run that never terminates ages out at
- * `BINDING_MAX_AGE_MS` (7 days); and the daemon compacts the journal to its
- * newest `BINDINGS_MAX_LINES` records. A session id is minted per step-session
+ * `BINDING_MAX_AGE_MS` (7 days). A session id is minted per step-session
  * and never reused across runs, so a record whose spawn never happened can
  * never be matched by anything — it is inert bytes, bounded by compaction.
  *
  * Never throws; failure only degrades attribution.
  */
 export function registerDriveSessionBinding(b: DriveSessionBinding): void {
-  // Master opt-out: "no events, no mirror bindings" (docs/ui-subsystem.md).
+  // Master opt-out: "no events, no mirror bindings" (docs/journal-and-hooks.md).
   if (!pipelineUiEnabled()) return;
   if (!b.runId || !b.sessionId) return;
 

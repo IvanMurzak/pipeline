@@ -528,7 +528,10 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
     // Stderr, not stdout: `init --json` owns the one-JSON-document contract on
     // stdout, so a note there would corrupt it for every scripted caller — which
     // is precisely the population still passing this flag.
-    deps.err('pipeline init: --no-ui is deprecated and does nothing — init no longer starts the local dashboard.\n');
+    deps.err(
+      'pipeline init: --no-ui is deprecated and does nothing — there is no local dashboard ' +
+        '(the hosted one at ai-pipeline.dev is the UI).\n',
+    );
   }
   const entry = findTemplate(parsed.template);
   if (!entry) {

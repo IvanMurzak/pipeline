@@ -4,14 +4,13 @@ A single local CLI that holds the **deterministic, LLM-free** work of the
 Claude-Pipeline plugin. Agents shell out to it (or `import` it) so control-flow
 work — enumerating steps, resolving models, building/validating the DAG, matching
 tasks to pipelines, routing graph pipelines, driving the whole run loop, and
-emitting UI events — costs **near-zero LLM tokens** instead of being done in an
-agent's context. The one non-computation is `ui`, a thin launcher for the
-dashboard daemon.
+emitting journal events — costs **near-zero LLM tokens** instead of being done
+in an agent's context.
 
 ## Runtime
 
 Written in TypeScript, run directly with **Bun** (no build step needed for the
-plugin's own use, exactly like `apps/pipeline-ui/server.ts`):
+plugin's own use):
 
 ```bash
 bun "${CLAUDE_PLUGIN_ROOT}/apps/pipeline-cli/src/cli.ts" <command> [options]
@@ -159,13 +158,13 @@ hard-filters on the negative corpus (Scope.Out) by keyword overlap. Prints
 `{task, candidates, excluded}` JSON. Used by `/pipeline:find` and
 `/pipeline:dispatch` tier 1.
 
-### `event` — write a UI event / liveness / mirror binding
+### `event` — write a journal event / liveness / mirror binding
 
 ```bash
 bun src/cli.ts event <type|write-liveness|clear-liveness|register-mirror-binding> [--project-root=/abs] [k=v ...]
 ```
 
-The UI event writer. Appends one event envelope to
+The journal event writer. Appends one event envelope to
 `<project>/.pipeline/.runtime/events.jsonl` (or writes the per-run liveness
 lockfile / mirror binding for the subcommands). `/pipeline:run` (lifecycle + liveness
 + mirror binding) and `pipeline-manager` (per-iteration events) call it. Always exits
@@ -237,23 +236,6 @@ Records the manager sends back (`--record '<json>'`): `{kind:"step",…}`,
 no-record call on an existing run) re-enters at `--start` — used for nested-blocker
 resumes and crashed-manager re-spawns. Exit code: `1` on a `halt` action, `0`
 otherwise.
-
-### `ui` — start / open the dashboard daemon
-
-```bash
-bun src/cli.ts ui [--open] [--json]
-```
-
-A thin launcher (NOT a daemon rewrite). Detects a running daemon via
-`~/.claude/pipeline-ui/daemon.lock` + `/api/health`; if none is up it spawns the
-**supervisor** (`apps/pipeline-ui/supervisor.ts`) detached, registers the current
-project (`POST /api/register-cwd`) when it uses the pipeline plugin, and prints
-the dashboard URL. `--open` also opens a browser; `--json` prints
-`{url,host,port,pid,started,registered}`. Requires Bun (the daemon is a Bun
-process). Locates the daemon via `${CLAUDE_PLUGIN_ROOT}` or by walking up from the
-CLI's own directory, so it works both plugin-installed and embedded. The daemon's
-single-instance / version-reconcile / liveness machinery is untouched — this only
-launches it. `/pipeline:ui` routes through this command.
 
 ### `submodule bump` — record + push a guarded submodule-pointer change
 

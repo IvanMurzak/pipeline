@@ -2,7 +2,7 @@
 // env-variables design's live e2e gate): the published @baizor/pipeline
 // tarball crashed `pipeline drive` at import time because
 // lib/step-transcripts.ts reached OUTSIDE the package root into the sibling
-// apps/pipeline-ui app — a directory the npm tarball never contains (`bin`
+// sibling app directory the npm tarball never contained (`bin`
 // points at `src/cli.ts` verbatim; only apps/pipeline-cli itself is
 // published). The fix vendors the needed pipeline-ui functions into
 // lib/vendor/transcript-walk.ts (see its header for the lockstep contract).

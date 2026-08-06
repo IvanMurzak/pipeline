@@ -32,7 +32,7 @@
 //   - everything else (`runner === 'manager'`, or unset/legacy) → locate the
 //     manager transcript by run_id (`findTranscriptByRunId`) and fold it +
 //     its in-window subagents (`foldRunStatsFromTranscript`,
-//     apps/pipeline-ui/transcript-stats.ts) — the exact walk the pre-refactor
+//     lib/vendor/transcript-walk.ts) — the exact walk the pre-refactor
 //     stats_relay hook used inline.
 //   - `transcriptHint` + `hintMode:'always'` overrides BOTH branches: every
 //     in-window tokens-null record is folded against the hint, regardless of
@@ -65,7 +65,7 @@ import { loadUsageTotals } from './envelope';
 import { resolveProjectRoot } from './event';
 import { readStepSessionRefs, foldStepSessionTranscripts } from './step-transcripts';
 // VENDORED walkers, never the sibling app: apps/pipeline-cli publishes
-// standalone to npm and the tarball contains no apps/pipeline-ui, so a
+// standalone to npm and the tarball contained no sibling app, so a
 // `../../../pipeline-ui/…` import resolves in this checkout but crashes at
 // import time for every npm-installed user (the shipped 0.2.0 regression that
 // created lib/vendor/transcript-walk.ts in the first place). Keep the vendor

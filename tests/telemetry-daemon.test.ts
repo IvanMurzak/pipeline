@@ -5,7 +5,7 @@
 // The lock ACQUIRE/reclaim scheme itself — the atomic `wx` race fix and its
 // stale-lock reclamation — lives in `hooks/analytics_relay.ts`
 // (`ensureTelemetryDaemonRunning` / `acquireTelemetryDaemonLock`), tested in
-// `apps/pipeline-ui/tests/hook-telemetry-daemon-lock.test.ts` (that file also
+// `apps/pipeline-cli/tests/hook-telemetry-daemon-lock.test.ts` (that file also
 // carries the mutation check for the race fix). This file covers everything
 // downstream of "a daemon process now exists": the pure idle/wall-clock loop
 // (`runTelemetryDaemonLoop`), one real poll cycle (`pollProjectOnce`), the

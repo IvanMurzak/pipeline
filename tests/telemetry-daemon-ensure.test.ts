@@ -2,7 +2,7 @@
  * `commands/telemetry-daemon.ts`'s own `ensureTelemetryDaemonRunning` /
  * `acquireDaemonLock` (ux-v2 b12) — the headless-`drive` counterpart of
  * `hooks/analytics_relay.ts`'s `ensureTelemetryDaemonRunning`, exercised the
- * same two-layer way `apps/pipeline-ui/tests/hook-telemetry-daemon-lock.test.ts`
+ * same two-layer way `apps/pipeline-cli/tests/hook-telemetry-daemon-lock.test.ts`
  * exercises the hook's copy:
  *
  *   - `acquireDaemonLock` against a REAL filesystem (a tmpdir) — the

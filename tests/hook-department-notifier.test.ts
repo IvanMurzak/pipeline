@@ -24,7 +24,7 @@
  * credential store) or pre-seeds a lock pointing at THIS test process's own
  * pid (always alive), so `ensureDaemonRunning` takes the "already running"
  * early return. The real spawn path is smoke-tested manually / proven at the
- * `e3` gate, same deferral as pipeline_ui_relay.ts's own spawnDaemon().
+ * `e3` gate, same deferral the deleted dashboard's launcher hook made.
  */
 
 import { describe, expect, test, afterEach } from "bun:test";

@@ -8,7 +8,7 @@
 //     reaches a connected project pre-seeds `daemon.lock` with THIS test
 //     process's own (always-alive) pid first, so the function takes the
 //     "already running" branch and never actually spawns — the same
-//     precaution `apps/pipeline-ui/tests/hook-telemetry-daemon-lock.test.ts`
+//     precaution `apps/pipeline-cli/tests/hook-telemetry-daemon-lock.test.ts`
 //     documents for the hook's own copy.
 
 import { afterEach, expect, test } from 'bun:test';

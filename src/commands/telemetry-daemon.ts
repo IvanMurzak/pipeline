@@ -27,7 +27,7 @@
 //     It duplicates the ONE-LINE lock path formula (`telemetryDaemonLockPath`
 //     below) and implements its own copy of the acquire/reclaim/spawn
 //     sequence, exactly the way `hooks/analytics_relay.ts`'s own header
-//     already duplicates `submoduleWorktreeOf` from `pipeline-ui/lib.ts`
+//     already duplicates `submoduleWorktreeOf` from `lib/event.ts`
 //     rather than importing it — "hooks cannot import a sibling at runtime"
 //     is that file's own stated reason; the reason here is the same shape
 //     (keep a hot path's import graph light), applied to a heavier
@@ -149,7 +149,7 @@ export function releaseDaemonLock(lockPath: string): void {
 // reclaimed on a dead pid (immediate) or once it outlives `LOCK_STALE_AGE_MS`
 // (the pid-reuse defense). `tests/telemetry-daemon-ensure.test.ts` exercises
 // the race + reclaim directly against this copy; the hook's own copy is
-// proven by `apps/pipeline-ui/tests/hook-telemetry-daemon-lock*.test.ts`, and
+// proven by `apps/pipeline-cli/tests/hook-telemetry-daemon-lock*.test.ts`, and
 // the ONE constant both copies must agree on is pinned by
 // `tests/telemetry-daemon-lock-parity.test.ts` above.
 // ---------------------------------------------------------------------------
@@ -225,7 +225,7 @@ export type DaemonAcquireResult =
  *  read taken immediately before its own unlink+retry. Exported for
  *  `tests/telemetry-daemon-ensure.test.ts` — the race and the stale-lock
  *  reclaim are proven directly against a real filesystem, mirroring
- *  `apps/pipeline-ui/tests/hook-telemetry-daemon-lock.test.ts`'s coverage of
+ *  `apps/pipeline-cli/tests/hook-telemetry-daemon-lock.test.ts`'s coverage of
  *  the hook's own copy. */
 export function acquireDaemonLock(lockPath: string, now: number, selfPid: number): DaemonAcquireResult {
   const snapshot = readDaemonLockRecord(lockPath);

@@ -12,6 +12,16 @@
  *
  * Only the two import paths were adjusted (this file lives two directories
  * deeper than the real hook did); the algorithm below is untouched.
+ *
+ * plugin-thin `p3`: the transcript-fold import moved from
+ * `apps/pipeline-ui/transcript-stats` — deleted with the local dashboard — to
+ * `src/lib/vendor/transcript-walk`, the vendored copy of exactly those
+ * functions that the real hook already folds through. An import path is not
+ * the algorithm, so the freeze holds. What it costs is honest: this pair used
+ * to run the two fold copies against each other as a side effect, and now both
+ * halves share one. The comparison this test exists for — the pre-refactor
+ * INLINE enrichment loop vs. the `backfillProject` wrapper that replaced it —
+ * is unaffected, because that was never the fold.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -30,7 +40,7 @@ import {
   RUN_FAILURES_COLLECT_MAX,
   collectRunToolFailures,
   foldRunStatsFromTranscript,
-} from '../../../pipeline-ui/transcript-stats';
+} from '../../src/lib/vendor/transcript-walk';
 
 const ENRICH_WINDOW_MS = 48 * 3600 * 1000;
 

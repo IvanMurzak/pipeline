@@ -416,7 +416,7 @@ interface ChatWindow {
 
 /** True when a user turn's ENTIRE content is empty tool_results — CC
  *  housekeeping noise (e.g. an attachment ack) with nothing user-facing to
- *  show. Same rule apps/pipeline-ui/transcript-normalize.ts applies before
+ *  show. Same rule the deleted dashboard's transcript-normalize.ts applied before
  *  mirroring into the (now-removed) chat panel. */
 function isNoiseUserTurn(content: unknown): boolean {
   if (!Array.isArray(content) || content.length === 0) return false;

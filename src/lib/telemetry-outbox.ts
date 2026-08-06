@@ -1465,7 +1465,7 @@ function readRunId(payload: Record<string, unknown>): string | null {
  * Event `type`s whose journal envelope legitimately carries a null `run_id`
  * BY DESIGN, not by malfunction (ux-v2 `b20`).
  *
- * `session.opened` is written by `hooks/pipeline_ui_relay.ts` when a Claude
+ * `session.opened` is written by `hooks/session_relay.ts` when a Claude
  * Code SESSION opens — frequently before any run exists yet to carry an id —
  * with `run_id: null` stamped explicitly at the write site, never omitted by
  * accident. It is therefore UNDEDUPABLE by construction, not lost telemetry:

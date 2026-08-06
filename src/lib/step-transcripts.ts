@@ -15,7 +15,7 @@
 // the last.
 //
 // Uses the SAME validated fold the dashboard's FAIL tile and stats relay run
-// on (apps/pipeline-ui/transcript-stats — each walks the session file + its
+// on (lib/vendor/transcript-walk.ts — each walks the session file + its
 // in-window subagents), but via a VENDORED copy (lib/vendor/transcript-walk.ts)
 // rather than a relative import into the sibling pipeline-ui app: this module
 // is reachable from `pipeline drive`, which ships standalone as the published

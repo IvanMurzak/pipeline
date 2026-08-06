@@ -10,7 +10,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runStats } from '../src/commands/stats';
-import { encodeClaudeProjectDir } from '../../pipeline-ui/transcripts';
+import { encodeClaudeProjectDir } from '../src/lib/vendor/transcript-walk';
 import type { BackfillReport } from '../src/lib/stats-backfill';
 
 let sandbox: string;

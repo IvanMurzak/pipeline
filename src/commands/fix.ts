@@ -5,7 +5,7 @@
 // and spawns ONE headless `claude -p` session that edits the pipeline folder
 // until those issues are gone, then re-plans and reports what is left.
 //
-// PROVENANCE: ported from apps/pipeline-ui/aifix.ts, which is being deleted
+// PROVENANCE: ported from apps/pipeline-ui/aifix.ts, since deleted
 // with the local dashboard (plugin-thin 01-remove-local-ui.md). The browser's
 // job-polling shape (POST -> 202 {job_id}, GET job snapshot) is deliberately
 // NOT ported — it existed because a browser cannot hold a subprocess. A

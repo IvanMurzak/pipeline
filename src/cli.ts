@@ -1,15 +1,15 @@
 #!/usr/bin/env bun
 // pipeline — the unified Claude-Pipeline CLI.
 //
-// Commands: `plan`, `match`, `event`, `route`, `next`, `gc`, `ci-wait`, `ui`,
+// Commands: `plan`, `match`, `event`, `route`, `next`, `gc`, `ci-wait`,
 // `logs`, `fix`.
 // Each is a deterministic, LLM-free computation the agents shell out to
 // instead of doing in-context — keeping per-iteration token cost near zero.
-// (`ui` is a thin launcher for the dashboard daemon, `logs` a read-only
-// terminal tail of the event journal, and `gc` a git worktree/branch janitor,
-// rather than pure computations. `fix` and `drive` are the two exceptions that
-// SPAWN A CLAUDE SESSION against the user's files — see their own headers for
-// the trust level that makes that defensible.)
+// (`logs` is a read-only terminal tail of the event journal and `gc` a git
+// worktree/branch janitor, rather than pure computations. `fix` and `drive`
+// are the two exceptions that SPAWN A CLAUDE SESSION against the user's
+// files — see their own headers for the trust level that makes that
+// defensible.)
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,7 +18,6 @@ import { runMatch } from './commands/match';
 import { runEvent } from './commands/event';
 import { runRoute } from './commands/route';
 import { runNext } from './commands/next';
-import { runUi } from './commands/ui';
 import { runLogs } from './commands/logs';
 import { runSubmodule } from './commands/submodule';
 import { runRelease } from './commands/release';
@@ -29,8 +28,8 @@ import { runId } from './commands/id';
 
 /**
  * Single-sourced from package.json — resolved relative to THIS file's own
- * directory (`import.meta.dir`, the same idiom `commands/release.ts` and
- * `commands/ui.ts` already use to locate files relative to themselves) so it
+ * directory (`import.meta.dir`, the same idiom `commands/release.ts`
+ * already uses to locate files relative to itself) so it
  * reads the SAME package.json whether `pipeline` runs from a repo checkout
  * (`apps/pipeline-cli/src/cli.ts` -> `apps/pipeline-cli/package.json`) or an
  * npm/bun global install: the published `bin` entry points at `src/cli.ts`
@@ -120,7 +119,7 @@ function usage(): string {
     '',
     '  event <event-type|register-mirror-binding|write-liveness|clear-liveness>',
     '        [--project-root=/abs] [k=v ...]',
-    '      Emit a Pipeline UI event to the project event journal (or manage',
+    '      Emit an event to the project event journal (or manage',
     '      mirror bindings / per-run liveness lockfiles). Always exits 0.',
     '',
     '  route --root <pipeline_root> --run-id <id> --from <step_id>',
@@ -187,18 +186,12 @@ function usage(): string {
     '      `next` (resolved once, frozen into next.json; frozen resumes reject',
     '      new --var values).',
     '',
-    '  ui [--open] [--json] [--restart]',
-    '      Start (if needed) and point at the local dashboard daemon. Thin',
-    '      launcher: detects/spawns the shared Bun daemon, registers the current',
-    '      project, prints the URL (--open also opens a browser). --restart asks',
-    '      a running daemon to hand off to the newest installed plugin version',
-    '      (or re-exec itself) and waits for the successor.',
-    '',
     '  logs [--follow|-f] [--tail <n>] [--all] [--json] [--no-color]',
     '       [--project <path>]',
     '      Tail the event journal (.runtime/events.jsonl) to the terminal,',
     '      pretty-printing each event as it appears. Read-only and daemon-free —',
-    '      works regardless of PIPELINE_UI_ENABLED (even when the UI is opted out).',
+    '      works regardless of PIPELINE_UI_ENABLED (even when the hooks are',
+    '      opted out).',
     '',
     '  logs --chat <run-id> [--project <path>] [--json] [--no-color]',
     '      Render a LOCAL run\'s Claude Code transcript(s) in the terminal —',
@@ -420,7 +413,7 @@ async function main(argv: string[]): Promise<number> {
     case 'id':
       return runId(rest);
     case 'init': {
-      // Lazy import (mirrors `drive`/`gc`): `init` composes clone + ui +
+      // Lazy import (mirrors `drive`/`gc`): `init` composes clone +
       // drive + a `claude` shell-out — keep the hot `next` loop's per-spawn
       // startup cost unchanged.
       const { runInit } = await import('./commands/init');
@@ -463,8 +456,6 @@ async function main(argv: string[]): Promise<number> {
       const { runCiWait } = await import('./commands/ci-wait');
       return runCiWait(rest);
     }
-    case 'ui':
-      return runUi(rest);
     case 'logs':
       return runLogs(rest);
     case 'submodule':
