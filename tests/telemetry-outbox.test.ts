@@ -382,14 +382,34 @@ describe('outbox — torn trailing lines are retried, never skipped and never pa
     expect(second.lines_read).toBe(0);
   });
 
-  test('a journal line with no usable run_id is dropped and counted — it cannot be dedup-keyed', () => {
+  test('a journal line with no usable run_id, of an UNEXPECTED type, is a genuine drop — counted and surfaced (b20)', () => {
+    const root = mkProject();
+    // `tool.called` has no documented reason to lack a run_id. A bare
+    // `session.opened` is an EXPECTED exclusion (see the next test) — but
+    // nothing marks THIS event type as runless-by-design, so it is real,
+    // unexpected loss and must stay on the `dropped_no_run_id` path: the
+    // count that b20's own DoD says "must never become silent".
+    writeJournal(root, [evt('tool.called', null, { tool_name: 'Read' }), evt('tool.called', 'run-a', {})]);
+    const outbox = mkOutbox(root);
+    const result = outbox.drainJournal();
+    expect(result.skipped_no_run_id).toBe(1);
+    expect(result.skipped_excluded).toBe(0);
+    expect(result.enqueued).toBe(1);
+    expect(outbox.counters().dropped_no_run_id).toBe(1);
+    expect(outbox.counters().excluded_not_applicable).toBe(0);
+  });
+
+  test('a `session.opened` line with no run_id is an EXPECTED EXCLUSION, not a drop — pinned so a future change cannot silently reclassify it back (b20)', () => {
     const root = mkProject();
     writeJournal(root, [evt('session.opened', null, { claude_pid: 42 }), evt('tool.called', 'run-a', {})]);
     const outbox = mkOutbox(root);
     const result = outbox.drainJournal();
-    expect(result.skipped_no_run_id).toBe(1);
+    expect(result.skipped_excluded).toBe(1);
+    expect(result.skipped_no_run_id).toBe(0);
     expect(result.enqueued).toBe(1);
-    expect(outbox.counters().dropped_no_run_id).toBe(1);
+    // Never counted as a drop, and never folded into totalDropped()'s ledger.
+    expect(outbox.counters().dropped_no_run_id).toBe(0);
+    expect(outbox.counters().excluded_not_applicable).toBe(1);
   });
 });
 
@@ -450,22 +470,83 @@ describe('outbox — the bound is enforced and every drop is counted, never sile
     expect(DEFAULT_MAX_RECORDS).toBe(10_000);
   });
 
-  test('drops are reported ONCE PER CYCLE, not once per record — a report nobody reads is silence', () => {
+  test('GENUINE drops are reported ONCE PER CYCLE, not once per record — a report nobody reads is silence (b20)', () => {
+    const root = mkProject();
+    // Five run_id-less `tool.called` events — an UNEXPECTED type, so this is
+    // real, unexpected loss and must go out through `onDrop` in "dropped"
+    // vocabulary, never silently and never per-record.
+    writeJournal(root, [
+      ...Array.from({ length: 5 }, () => evt('tool.called', null, { tool_name: 'Read' })),
+      evt('tool.called', 'run-a', { tool_name: 'Read' }),
+    ]);
+    const dropReports: Array<{ reason: string; count: number }> = [];
+    const excludeReports: Array<{ reason: string; count: number }> = [];
+    const outbox = mkOutbox(root, {
+      onDrop: (i: { reason: string; count: number }) => dropReports.push({ reason: i.reason, count: i.count }),
+      onExclude: (i: { reason: string; count: number }) => excludeReports.push({ reason: i.reason, count: i.count }),
+    });
+    const result = outbox.drainJournal();
+    expect(result.skipped_no_run_id).toBe(5);
+    expect(result.skipped_excluded).toBe(0);
+    expect(dropReports).toEqual([{ reason: 'no_run_id', count: 5 }]); // one report, full count
+    expect(excludeReports).toEqual([]); // nothing expected happened
+    expect(outbox.counters().dropped_no_run_id).toBe(5); // and the count is durable
+  });
+
+  test('EXPECTED exclusions are reported ONCE PER CYCLE, on a SEPARATE sink from onDrop, in "not_applicable" vocabulary — never "dropped" (b20)', () => {
     const root = mkProject();
     // `session.opened` legitimately has a null run_id and a real journal is
-    // full of such lines; per-record reporting would drown the signal.
+    // full of such lines; per-record reporting would drown the signal, same
+    // as genuine drops — but this must never reach `onDrop` at all.
     writeJournal(root, [
       ...Array.from({ length: 5 }, () => evt('session.opened', null, { claude_pid: 1 })),
       evt('tool.called', 'run-a', { tool_name: 'Read' }),
     ]);
-    const reports: Array<{ reason: string; count: number }> = [];
+    const dropReports: Array<{ reason: string; count: number; detail: string }> = [];
+    const excludeReports: Array<{ reason: string; count: number; detail: string }> = [];
     const outbox = mkOutbox(root, {
-      onDrop: (i: { reason: string; count: number }) => reports.push({ reason: i.reason, count: i.count }),
+      onDrop: (i: { reason: string; count: number; detail: string }) => dropReports.push(i),
+      onExclude: (i: { reason: string; count: number; detail: string }) => excludeReports.push(i),
     });
     const result = outbox.drainJournal();
-    expect(result.skipped_no_run_id).toBe(5);
-    expect(reports).toEqual([{ reason: 'no_run_id', count: 5 }]); // one report, full count
-    expect(outbox.counters().dropped_no_run_id).toBe(5); // and the count is durable
+    expect(result.skipped_excluded).toBe(5);
+    expect(result.skipped_no_run_id).toBe(0);
+    expect(dropReports).toEqual([]); // the "dropped" sink never fires
+    expect(excludeReports.length).toBe(1); // one report, full count — not once per record
+    expect(excludeReports[0].reason).toBe('not_applicable');
+    expect(excludeReports[0].count).toBe(5);
+    expect(excludeReports[0].detail).not.toContain('dropped');
+    expect(outbox.counters().dropped_no_run_id).toBe(0); // never counted as a drop
+    expect(outbox.counters().excluded_not_applicable).toBe(5); // and THIS count is durable
+  });
+
+  test('the DEFAULT stderr line for a healthy connected run (session.opened only) never reads as data loss (b20 DoD)', () => {
+    const root = mkProject();
+    // Exactly what "every healthy connected run" looks like per the b20 brief:
+    // a session.opened line and nothing else run_id-less.
+    writeJournal(root, [evt('session.opened', null, { claude_pid: 7 }), evt('tool.called', 'run-a', {})]);
+    const written: string[] = [];
+    const realWrite = process.stderr.write.bind(process.stderr);
+    // Neither onDrop nor onExclude is overridden — this exercises the REAL
+    // default stderr writers a real run would use.
+    process.stderr.write = ((chunk: string) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      new TelemetryOutbox({
+        projectRoot: root,
+        org: 'acme',
+        env: {},
+        fingerprintSalt: TEST_SALT,
+      }).drainJournal();
+    } finally {
+      process.stderr.write = realWrite;
+    }
+    const line = written.join('');
+    expect(line).toContain('excluded');
+    expect(line).toContain('not_applicable');
+    expect(line).not.toContain('dropped'); // the exact wording b20 exists to remove
   });
 
   test('the durable queue depth is right even on a drain that returns early', () => {

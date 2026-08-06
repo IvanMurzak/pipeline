@@ -60,6 +60,9 @@ function counters(over: Partial<OutboxCounters> = {}): OutboxCounters {
     quarantine_depth: 0,
     last_drop_at: null,
     last_drop_reason: null,
+    excluded_not_applicable: 0,
+    last_exclusion_at: null,
+    last_exclusion_reason: null,
     ...over,
   };
 }
@@ -79,6 +82,10 @@ describe('totalDropped', () => {
   test('quarantine_depth is NOT summed (it is a snapshot depth, not an event count)', () => {
     const c = counters({ quarantined: 2, quarantine_depth: 999 });
     expect(totalDropped(c)).toBe(2);
+  });
+  test('excluded_not_applicable is NOT summed — an expected exclusion never left the send path (b20)', () => {
+    const c = counters({ dropped_bound: 3, excluded_not_applicable: 40 });
+    expect(totalDropped(c)).toBe(3);
   });
 });
 
@@ -236,6 +243,7 @@ function baseReport(over: Partial<TelemetryStatusReport> = {}): TelemetryStatusR
       last_drop_at: null,
       last_drop_reason: null,
     },
+    excluded: { not_applicable: 0 },
     last_error: null,
     ...over,
   };
@@ -312,5 +320,16 @@ describe('renderTelemetryStatus', () => {
   test('dropped total renders whatever totalDropped computed, not re-derived', () => {
     const text = renderTelemetryStatus(baseReport({ dropped: { ...baseReport().dropped, total: 7 } }), Date.now());
     expect(text.split('\n')[4]).toBe('Dropped    7');
+  });
+
+  test('a healthy connected run (excluded.not_applicable > 0, dropped.total 0) renders "Dropped 0" — no line reads as data loss (b20 DoD)', () => {
+    const text = renderTelemetryStatus(
+      baseReport({ dropped: { ...baseReport().dropped, total: 0 }, excluded: { not_applicable: 40 } }),
+      Date.now(),
+    );
+    const lines = text.split('\n');
+    expect(lines).toHaveLength(8); // the documented seven lines + trailing ''
+    expect(lines[4]).toBe('Dropped    0');
+    expect(text).not.toContain('dropped'); // no residual loss-shaped wording anywhere on screen
   });
 });

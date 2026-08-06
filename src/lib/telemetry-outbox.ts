@@ -107,6 +107,17 @@
 //    through the SAME `onDrop` sink as every other loss, so there is one place
 //    to look rather than two.
 //
+// 6. AN EXPECTED, DOCUMENTED EXCLUSION IS NOT A DROP (`b20`). `session.opened`
+//    has no `run_id` BY DESIGN (point 2 above), not by malfunction, so a
+//    "dropped … (no_run_id)" line on every healthy connected run told the
+//    reader a correct run had lost data. `appendFiltered` now tells the two
+//    apart via `isExpectedRunlessType`: a run_id-less record of a documented
+//    type goes through `noteExclusion`/`excluded_not_applicable` and is
+//    reported (if at all) as "excluded … not_applicable"; anything else
+//    run_id-less is still genuine, unexpected loss on the ORIGINAL
+//    `noteDrop`/`dropped_no_run_id` path, still counted, still visible. The
+//    count is never silent either way — only the WORD and the LEDGER split.
+//
 // Everything lives under `ensureGeneratedDir`, so the tree carries its own
 // `.gitignore` and a `git add -A` after a run cannot sweep the queue into a
 // commit.
@@ -226,7 +237,11 @@ export interface OutboxCounters {
   queued: number;
   /** Dropped because the queue was at its bound (oldest-first). */
   dropped_bound: number;
-  /** Journal lines with no usable `run_id` — undedupable, so unshippable. */
+  /** Journal lines with no usable `run_id` and NOT of a documented
+   *  runless-by-design type — undedupable, so unshippable, AND genuinely
+   *  unexpected. Narrower as of `b20`: a documented exclusion such as
+   *  `session.opened` no longer lands here — see `excluded_not_applicable`
+   *  — so this counter now means only real loss, not routine noise. */
   dropped_no_run_id: number;
   /** Newline-terminated lines that were not parseable JSON objects. */
   dropped_malformed: number;
@@ -246,6 +261,18 @@ export interface OutboxCounters {
   quarantine_depth: number;
   last_drop_at: string | null;
   last_drop_reason: string | null;
+  /** Records with no `run_id` whose event `type` is documented to
+   *  legitimately lack one — `session.opened`, today, written when a Claude
+   *  Code SESSION opens, often before any run exists to carry an id. NOT a
+   *  loss and NOT folded into `dropped_no_run_id` / `totalDropped()`: the
+   *  record was never shippable in the first place, by design (ux-v2
+   *  `b20` — an expected, documented exclusion must not read as data
+   *  loss). See `noteExclusion`. */
+  excluded_not_applicable: number;
+  /** Mirrors `last_drop_at` for the exclusion ledger — kept separate so a
+   *  genuine drop's timestamp is never overwritten by a routine exclusion. */
+  last_exclusion_at: string | null;
+  last_exclusion_reason: string | null;
 }
 
 export interface DropInfo {
@@ -255,11 +282,28 @@ export interface DropInfo {
   detail: string;
 }
 
+/**
+ * An EXPECTED exclusion — a record with no `run_id` whose event `type` is
+ * documented to legitimately lack one (`session.opened`, today). Deliberately
+ * NOT a `DropInfo`: nothing was lost, so it is never reported in "dropped"
+ * vocabulary (ux-v2 `b20`). See `TelemetryOutbox`'s private `noteExclusion`.
+ */
+export interface ExclusionInfo {
+  reason: 'not_applicable';
+  count: number;
+  /** Human-readable, and deliberately CONTENT-FREE: never the payload. */
+  detail: string;
+}
+
 export interface DrainResult {
   /** Complete journal lines consumed this cycle. */
   lines_read: number;
   enqueued: number;
+  /** Genuinely unexpected — not of a documented runless-by-design type. */
   skipped_no_run_id: number;
+  /** Expected exclusions (`session.opened`, today) — not a loss, not part of
+   *  `skipped_no_run_id` as of `b20`. */
+  skipped_excluded: number;
   skipped_malformed: number;
   /** An unterminated final line was observed and left for the next drain. */
   torn_tail: boolean;
@@ -313,6 +357,13 @@ export interface TelemetryOutboxOptions {
    *  the aggregated count, never once per record; defaults to one stderr line.
    *  Counting is independent of this sink and is always durable. */
   onDrop?: (info: DropInfo) => void;
+  /** Where EXPECTED exclusions are reported (e.g. `session.opened`'s null
+   *  `run_id`) — a SEPARATE sink from `onDrop`, so an operator can never
+   *  mistake routine, by-design exclusion for data loss (ux-v2 `b20`). Same
+   *  cadence as `onDrop`: at most once per reason per cycle; defaults to one
+   *  stderr line phrased as "excluded … not_applicable", never "dropped".
+   *  Counting is independent of this sink and is always durable. */
+  onExclude?: (info: ExclusionInfo) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +438,9 @@ function emptyCounters(): OutboxCounters {
     quarantine_depth: 0,
     last_drop_at: null,
     last_drop_reason: null,
+    excluded_not_applicable: 0,
+    last_exclusion_at: null,
+    last_exclusion_reason: null,
   };
 }
 
@@ -600,6 +654,7 @@ export class TelemetryOutbox {
   private readonly env: Record<string, string | undefined>;
   private readonly now: () => number;
   private readonly onDrop: (info: DropInfo) => void;
+  private readonly onExclude: (info: ExclusionInfo) => void;
 
   /** Queue depth and the file size it was derived from. A size that no longer
    *  matches means another process appended, so the depth is re-derived. */
@@ -607,6 +662,10 @@ export class TelemetryOutbox {
   private observedSize = -1;
   /** Drops seen this cycle, reported once each by `flushDropReports`. */
   private readonly dropAccum = new Map<DropInfo['reason'], { count: number; detail: string }>();
+  /** Expected exclusions seen this cycle, reported once each by
+   *  `flushExclusionReports` — a SEPARATE ledger from `dropAccum` so an
+   *  exclusion can never be aggregated (or worded) as a drop (ux-v2 `b20`). */
+  private readonly exclusionAccum = new Map<ExclusionInfo['reason'], { count: number; detail: string }>();
 
   constructor(opts: TelemetryOutboxOptions) {
     const org = (opts.org ?? '').trim();
@@ -665,6 +724,21 @@ export class TelemetryOutbox {
         try {
           process.stderr.write(
             `[pipeline-telemetry] dropped ${info.count} record(s) (${info.reason}): ${info.detail}\n`,
+          );
+        } catch {
+          /* never fail a run over a log line */
+        }
+      });
+
+    // ux-v2 `b20`: a SEPARATE sink and vocabulary from `onDrop`. `session.opened`
+    // fires on every connected run — printing it as "dropped" told a clean
+    // run's reader the run had lost data when it had not.
+    this.onExclude =
+      opts.onExclude ??
+      ((info) => {
+        try {
+          process.stderr.write(
+            `[pipeline-telemetry] excluded ${info.count} record(s) (${info.reason}): ${info.detail}\n`,
           );
         } catch {
           /* never fail a run over a log line */
@@ -730,6 +804,12 @@ export class TelemetryOutbox {
       }
       if (typeof parsed.counters.last_drop_reason === 'string') {
         state.counters.last_drop_reason = parsed.counters.last_drop_reason;
+      }
+      if (typeof parsed.counters.last_exclusion_at === 'string') {
+        state.counters.last_exclusion_at = parsed.counters.last_exclusion_at;
+      }
+      if (typeof parsed.counters.last_exclusion_reason === 'string') {
+        state.counters.last_exclusion_reason = parsed.counters.last_exclusion_reason;
       }
     }
     return state;
@@ -988,6 +1068,7 @@ export class TelemetryOutbox {
     } finally {
       lock.release();
       this.flushDropReports();
+      this.flushExclusionReports();
     }
   }
 
@@ -1001,6 +1082,18 @@ export class TelemetryOutbox {
   ): OutboxRecord | null {
     const runId = readRunId(payload);
     if (!runId) {
+      // ux-v2 `b20`: an EXPECTED exclusion (`session.opened`, today) is not
+      // loss — see `isExpectedRunlessType` and `noteExclusion` — so it gets
+      // its own counter and its own vocabulary, never "dropped".
+      if (isExpectedRunlessType(payload)) {
+        state.counters.excluded_not_applicable += 1;
+        this.noteExclusion(state, {
+          reason: 'not_applicable',
+          count: 1,
+          detail: `kind=${kind} type=${typeof payload.type === 'string' ? payload.type : 'unknown'} — no run_id exists yet when this event is written, by design`,
+        });
+        return null;
+      }
       state.counters.dropped_no_run_id += 1;
       this.noteDrop(state, {
         reason: 'no_run_id',
@@ -1091,12 +1184,12 @@ export class TelemetryOutbox {
    * Record a drop: durably counted here, REPORTED once per cycle by
    * {@link flushDropReports}.
    *
-   * Aggregated deliberately. `session.opened` legitimately carries a null
-   * `run_id` and a project journal is full of such lines, so a per-record
-   * report would turn a routine, expected exclusion into a stream of log
-   * lines — the fastest way to make a drop report something people stop
-   * reading. The COUNT is what is never allowed to be silent, and it is
-   * written to `state.json` on every path.
+   * Aggregated deliberately — a per-record report would turn a routine batch
+   * (e.g. every record dropped together at the bound) into a stream of log
+   * lines nobody reads. This ledger is reserved for GENUINE loss as of
+   * `b20`: a `session.opened`-shaped exclusion never reaches here — see
+   * {@link noteExclusion} — so the COUNT is what is never allowed to be
+   * silent, and it is written to `state.json` on every path.
    */
   private noteDrop(state: OutboxState, info: DropInfo): void {
     state.counters.last_drop_at = new Date(this.now()).toISOString();
@@ -1121,6 +1214,48 @@ export class TelemetryOutbox {
     this.dropAccum.clear();
   }
 
+  /**
+   * Record an EXPECTED exclusion: durably counted here, REPORTED once per
+   * cycle by {@link flushExclusionReports}. Distinct from {@link noteDrop}
+   * — this is not loss (ux-v2 `b20`).
+   *
+   * Aggregated for the same reason `noteDrop` is. `session.opened`
+   * legitimately carries a null `run_id` and a project journal is full of
+   * such lines, so a per-record report would turn a routine, expected
+   * exclusion into a stream of log lines — the fastest way to make a report
+   * something people stop reading. What `b20` changes is the WORD and the
+   * LEDGER: this path is never phrased as "dropped", because the record was
+   * never shippable in the first place, by design, not lost in flight. It
+   * gets its own counter (`excluded_not_applicable`) and its own vocabulary
+   * ("excluded … not_applicable"). The count is still never silent — it is
+   * written to `state.json` on every path, exactly like a drop's.
+   */
+  private noteExclusion(state: OutboxState, info: ExclusionInfo): void {
+    state.counters.last_exclusion_at = new Date(this.now()).toISOString();
+    state.counters.last_exclusion_reason = info.reason;
+    const prior = this.exclusionAccum.get(info.reason);
+    if (prior) {
+      prior.count += info.count;
+    } else {
+      this.exclusionAccum.set(info.reason, { count: info.count, detail: info.detail });
+    }
+  }
+
+  /** Emit at most one report per reason per enqueue/drain cycle — same
+   *  cadence as {@link flushDropReports}, kept on a separate ledger/sink so
+   *  an expected exclusion can never be aggregated into, or worded as, a
+   *  drop. */
+  private flushExclusionReports(): void {
+    for (const [reason, acc] of this.exclusionAccum) {
+      try {
+        this.onExclude({ reason, count: acc.count, detail: acc.detail });
+      } catch {
+        /* a reporting sink must never fail the caller */
+      }
+    }
+    this.exclusionAccum.clear();
+  }
+
   // ── drain ─────────────────────────────────────────────────────────────────
 
   /**
@@ -1134,6 +1269,7 @@ export class TelemetryOutbox {
       lines_read: 0,
       enqueued: 0,
       skipped_no_run_id: 0,
+      skipped_excluded: 0,
       skipped_malformed: 0,
       torn_tail: false,
       restarted: false,
@@ -1254,10 +1390,12 @@ export class TelemetryOutbox {
           });
           continue;
         }
-        const before = state.counters.dropped_no_run_id;
+        const beforeDropped = state.counters.dropped_no_run_id;
+        const beforeExcluded = state.counters.excluded_not_applicable;
         const rec = this.appendFiltered(state, 'event', parsed);
         if (rec) result.enqueued += 1;
-        else if (state.counters.dropped_no_run_id > before) result.skipped_no_run_id += 1;
+        else if (state.counters.dropped_no_run_id > beforeDropped) result.skipped_no_run_id += 1;
+        else if (state.counters.excluded_not_applicable > beforeExcluded) result.skipped_excluded += 1;
       }
 
       this.saveState(state);
@@ -1276,6 +1414,7 @@ export class TelemetryOutbox {
     } finally {
       lock.release();
       this.flushDropReports();
+      this.flushExclusionReports();
     }
   }
 
@@ -1320,6 +1459,27 @@ function readRunId(payload: Record<string, unknown>): string | null {
     return data.run_id.trim();
   }
   return null;
+}
+
+/**
+ * Event `type`s whose journal envelope legitimately carries a null `run_id`
+ * BY DESIGN, not by malfunction (ux-v2 `b20`).
+ *
+ * `session.opened` is written by `hooks/pipeline_ui_relay.ts` when a Claude
+ * Code SESSION opens — frequently before any run exists yet to carry an id —
+ * with `run_id: null` stamped explicitly at the write site, never omitted by
+ * accident. It is therefore UNDEDUPABLE by construction, not lost telemetry:
+ * see this module's `noteExclusion` and `04-subsystem-rules.md`.
+ *
+ * Anything else that reaches `appendFiltered` with no `run_id` is genuine,
+ * unexpected loss and stays on the `dropped_no_run_id` / `noteDrop` path —
+ * this set is intentionally small and reviewed on every addition, never
+ * grown to quietly reclassify a real drop.
+ */
+const EXPECTED_RUNLESS_TYPES: ReadonlySet<string> = new Set(['session.opened']);
+
+function isExpectedRunlessType(payload: Record<string, unknown>): boolean {
+  return typeof payload.type === 'string' && EXPECTED_RUNLESS_TYPES.has(payload.type);
 }
 
 /**

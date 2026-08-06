@@ -80,9 +80,14 @@ export interface TelemetryStatusReport {
   dropped: {
     /** bound + no_run_id + malformed + lock_contention + quarantined — the
      *  complete "left the send path and is not coming back on its own"
-     *  count, read from `b9`'s one ledger (see this module's header). */
+     *  count, read from `b9`'s one ledger (see this module's header).
+     *  `excluded.not_applicable` is deliberately NOT summed in here (ux-v2
+     *  `b20`) — an expected exclusion never left the send path, because it
+     *  was never eligible to enter it. */
     total: number;
     bound: number;
+    /** Genuinely unexpected as of `b20` — a documented exclusion such as
+     *  `session.opened` no longer counts here, see `excluded.not_applicable`. */
     no_run_id: number;
     malformed: number;
     lock_contention: number;
@@ -93,6 +98,14 @@ export interface TelemetryStatusReport {
     quarantine_depth: number;
     last_drop_at: string | null;
     last_drop_reason: string | null;
+  };
+  /** EXPECTED exclusions — records with no `run_id` whose event type is
+   *  documented to legitimately lack one (`session.opened`, today). Not a
+   *  drop, not summed into `dropped.total`, and never rendered in "dropped"
+   *  vocabulary — surfaced here (and via `--json`) so the number is still
+   *  answerable, just not in loss language (ux-v2 `b20`). */
+  excluded: {
+    not_applicable: number;
   };
   last_error: LastFlushRecord | null;
 }

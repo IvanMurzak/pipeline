@@ -219,6 +219,29 @@ describe('runStatsTelemetry — the seven J6 questions on one screen', () => {
     expect(report.dropped.quarantined).toBe(5);
   });
 
+  test('b20: expected exclusions (session.opened) do NOT inflate "Dropped", and are exposed separately via --json', async () => {
+    const root = mkProject();
+    boundAndCredentialed(root);
+    // A healthy connected project: real loss (2 genuinely unbound records) PLUS
+    // a large pile of expected session.opened exclusions, exactly the shape a
+    // long-lived project accumulates.
+    writeOutboxCounters(root, { dropped_bound: 2, excluded_not_applicable: 41 });
+
+    const { deps, out: humanOut } = baseDeps(root);
+    await runStatsTelemetry([], deps);
+    // Only the genuine loss counts — the 41 expected exclusions are invisible
+    // to the "Dropped" line, which would otherwise misreport a healthy run.
+    expect(humanOut()).toContain('Dropped    2');
+    expect(humanOut()).not.toContain('Dropped    43');
+
+    const { deps: jsonDeps, out: jsonOut } = baseDeps(root);
+    await runStatsTelemetry(['--json'], jsonDeps);
+    const report = JSON.parse(jsonOut());
+    expect(report.dropped.total).toBe(2);
+    expect(report.dropped.no_run_id).toBe(0);
+    expect(report.excluded.not_applicable).toBe(41);
+  });
+
   test('F4: records queued under a different org surface as a blocked line', async () => {
     const root = mkProject();
     boundAndCredentialed(root, 'acme');

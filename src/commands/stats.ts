@@ -194,6 +194,9 @@ function buildTelemetryStatusReport(deps: StatsTelemetryDeps, projectRoot: strin
     last_drop_at: null,
     last_drop_reason: null,
   };
+  // ux-v2 b20: expected exclusions (session.opened) — not a drop, not summed
+  // into `dropped.total`. See TelemetryStatusReport['excluded']'s doc comment.
+  let excluded: TelemetryStatusReport['excluded'] = { not_applicable: 0 };
   // Only meaningful once connected (F7: no account ⇒ nothing was ever
   // queued — `lib/telemetry-tail.ts` and every other entry point gate the
   // SAME way, so there is genuinely nothing to read here otherwise).
@@ -231,6 +234,7 @@ function buildTelemetryStatusReport(deps: StatsTelemetryDeps, projectRoot: strin
       last_drop_at: counters.last_drop_at,
       last_drop_reason: counters.last_drop_reason,
     };
+    excluded = { not_applicable: counters.excluded_not_applicable };
   }
 
   return {
@@ -243,6 +247,7 @@ function buildTelemetryStatusReport(deps: StatsTelemetryDeps, projectRoot: strin
     streaming,
     queue,
     dropped,
+    excluded,
     last_error: readLastFlush(projectRoot),
   };
 }
