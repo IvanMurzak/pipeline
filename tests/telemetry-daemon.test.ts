@@ -22,11 +22,21 @@
 //     process. Only that block can make that second claim.
 
 import { afterAll, describe, expect, test } from 'bun:test';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { realFs } from '../src/lib/cloud-config';
-import { telemetryDir, type OutboxRecord } from '../src/lib/telemetry-outbox';
+import { journalPath, telemetryDir, type OutboxRecord } from '../src/lib/telemetry-outbox';
 import { uploadStatePath, type UploadFetch, type UploadRequest } from '../src/lib/telemetry-upload';
 import {
   DEFAULT_IDLE_EXIT_MS,
@@ -85,6 +95,60 @@ function plantInQueue(root: string, records: OutboxRecord[]): void {
   const dir = telemetryDir(root);
   mkdirSync(dir, { recursive: true });
   appendFileSync(join(dir, 'outbox.jsonl'), records.map((r) => `${JSON.stringify(r)}\n`).join(''), 'utf-8');
+}
+
+// ---------------------------------------------------------------------------
+// Journal helpers (ux-v2 b17) — a manager-driven run's ONLY telemetry path is
+// the project journal (`.pipeline/.runtime/events.jsonl`), never
+// `outbox.jsonl` directly (that is what `plantInQueue` simulates for the
+// upload-path tests above). `pollProjectOnce` must drain the journal itself
+// — see `src/commands/telemetry-daemon.ts`'s own doc comment on that call.
+// ---------------------------------------------------------------------------
+
+/** Shape mirrors `telemetry-outbox-interleaving.test.ts`'s own `evt()` — the
+ *  minimum a real journal line needs to survive `drainJournal`'s parse and
+ *  privacy filter and be enqueued under a real `run_id`. */
+function journalEvent(runId: string, type = 'tool.called'): Record<string, unknown> {
+  return {
+    schema: 5,
+    ts: new Date().toISOString(),
+    type,
+    project_root: 'C:/proj',
+    worktree: null,
+    run_id: runId,
+    parent_run_id: null,
+    session_id: 'sess-1',
+    data: {},
+  };
+}
+
+function appendJournal(root: string, e: Record<string, unknown>): void {
+  writeFileSync(journalPath(root), `${JSON.stringify(e)}\n`, { flag: 'a' });
+}
+
+/** Hold the outbox's `drain.lock` with a REAL `wx`-created fd, simulating a
+ *  concurrent `drive` process (or another daemon poll) mid-drain — the SAME
+ *  primitive `drainJournal` itself contends for. Duplicated from
+ *  `telemetry-outbox-interleaving.test.ts` rather than imported — this
+ *  repo's house style for test-only fixtures, per that file's own header. */
+function holdLock(root: string): { release: () => void } {
+  const lockPath = join(telemetryDir(root), 'drain.lock');
+  mkdirSync(telemetryDir(root), { recursive: true });
+  const fd = openSync(lockPath, 'wx', 0o600);
+  return {
+    release: () => {
+      try {
+        closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        /* already gone */
+      }
+    },
+  };
 }
 
 function rec(over: Partial<OutboxRecord> = {}): OutboxRecord {
@@ -390,6 +454,129 @@ describe('pollProjectOnce', () => {
     };
     const deps: TelemetryDaemonPollDeps = { ...home(root), fs: realFs, now: () => Date.now(), fetch: fetchImpl };
     expect(await pollProjectOnce(deps, root)).toBe('active');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pollProjectOnce — journal drain (ux-v2 b17)
+//
+// b12 wired `drainJournal()` into `drive` and into `next.ts`'s step-boundary
+// flush, but never into the daemon's own poll — a manager-driven run
+// (`/pipeline:run`, no `drive` process) has NO OTHER path to the outbox.
+// Every test above this block plants records directly in `outbox.jsonl`
+// (`plantInQueue`), which is exactly why the daemon's own suite never caught
+// the gap: it never exercised the journal at all. These tests write to the
+// project JOURNAL instead (`appendJournal`, the real intake for a
+// manager-driven run) and prove `pollProjectOnce` itself drains it.
+// ---------------------------------------------------------------------------
+
+describe('pollProjectOnce — journal drain (ux-v2 b17)', () => {
+  test("a manager-driven run's journal events reach the outbox and are sent — nothing pre-planted in outbox.jsonl", async () => {
+    const root = mkProject();
+    boundAndCredentialed(root);
+    // The ONLY telemetry surface a manager-driven run writes to. Before this
+    // task's fix, pollProjectOnce never reads it: the outbox stays empty,
+    // flushOnce finds nothing, and the poll reports 'idle' forever even
+    // though the journal keeps growing.
+    appendJournal(root, journalEvent('run-b17'));
+    const requests: UploadRequest[] = [];
+    const fetchImpl: UploadFetch = async (req) => {
+      requests.push(req);
+      return { status: 200 };
+    };
+    const deps: TelemetryDaemonPollDeps = { ...home(root), fs: realFs, now: () => Date.now(), fetch: fetchImpl };
+    expect(await pollProjectOnce(deps, root)).toBe('active');
+    expect(requests.length).toBe(1);
+    expect(requests[0].url).toContain('/api/v1/ingest');
+  });
+
+  test('a project with no journal at all still reports idle (nothing regresses for the no-journal case)', async () => {
+    const root = mkProject();
+    boundAndCredentialed(root);
+    const fetchImpl: UploadFetch = async () => ({ status: 200 });
+    const deps: TelemetryDaemonPollDeps = { ...home(root), fs: realFs, now: () => Date.now(), fetch: fetchImpl };
+    expect(await pollProjectOnce(deps, root)).toBe('idle');
+  });
+
+  // ── the concurrency risk (task b17): deadlock vs. double-enqueue ─────────
+  //
+  // `drainJournal()`'s own lock attempt is a ZERO-wait `tryLockSync(..., 0)`
+  // (telemetry-outbox.ts) — it was already built to coexist with a
+  // concurrently-draining `drive` process before this daemon call existed
+  // (see telemetry-outbox-interleaving.test.ts, b12). That makes DEADLOCK
+  // structurally impossible here: a held lock is never waited on, so this
+  // new caller cannot block the poll loop. The real risk this wiring could
+  // still introduce is DOUBLE-ENQUEUE — draining the same journal bytes
+  // twice into two different `seq` values. The test below proves neither:
+  // the poll under lock contention returns promptly with nothing sent (the
+  // drain was correctly deferred, not lost), and the very next poll drains
+  // and sends the SAME event exactly once.
+  test('a concurrently-held drain.lock does not stall the poll and does not lose or duplicate the event', async () => {
+    const root = mkProject();
+    boundAndCredentialed(root);
+    appendJournal(root, journalEvent('run-b17-locked'));
+    const requests: UploadRequest[] = [];
+    const fetchImpl: UploadFetch = async (req) => {
+      requests.push(req);
+      return { status: 200 };
+    };
+    const deps: TelemetryDaemonPollDeps = { ...home(root), fs: realFs, now: () => Date.now(), fetch: fetchImpl };
+
+    const held = holdLock(root);
+    let outcome: string;
+    let elapsedMs: number;
+    try {
+      const startedAt = Date.now();
+      outcome = await pollProjectOnce(deps, root);
+      elapsedMs = Date.now() - startedAt;
+    } finally {
+      held.release();
+    }
+    // Deferred: the lock was held, so this cycle drained nothing and had
+    // nothing to send.
+    expect(outcome).toBe('idle');
+    expect(requests.length).toBe(0);
+    // Non-blocking: a regression to a WAITING lock acquisition (or, worse, a
+    // genuine deadlock) would show up here as a multi-second — or infinite —
+    // stall instead of an effectively immediate return.
+    expect(elapsedMs!).toBeLessThan(500);
+
+    // Lock free now. The next poll cycle drains the SAME journal bytes
+    // (the cursor never advanced while the lock was held) and sends the
+    // event exactly once — not duplicated, not lost.
+    expect(await pollProjectOnce(deps, root)).toBe('active');
+    expect(requests.length).toBe(1);
+    expect(requests[0].url).toContain('/api/v1/ingest');
+
+    // A third cycle proves it too: the cursor advanced past the one line
+    // that existed, so there is nothing left to re-send.
+    expect(await pollProjectOnce(deps, root)).toBe('idle');
+    expect(requests.length).toBe(1);
+  });
+
+  // ── no stale lock on any exit path ────────────────────────────────────────
+  test('drain.lock is never left behind after a normal poll cycle', async () => {
+    const root = mkProject();
+    boundAndCredentialed(root);
+    appendJournal(root, journalEvent('run-b17-clean'));
+    const fetchImpl: UploadFetch = async () => ({ status: 200 });
+    const deps: TelemetryDaemonPollDeps = { ...home(root), fs: realFs, now: () => Date.now(), fetch: fetchImpl };
+    await pollProjectOnce(deps, root);
+    expect(existsSync(join(telemetryDir(root), 'drain.lock'))).toBe(false);
+  });
+
+  test('drain.lock is never left behind even when the subsequent flush itself fails (5xx -> retry)', async () => {
+    const root = mkProject();
+    boundAndCredentialed(root);
+    appendJournal(root, journalEvent('run-b17-flusherr'));
+    const fetchImpl: UploadFetch = async () => ({ status: 503 });
+    const deps: TelemetryDaemonPollDeps = { ...home(root), fs: realFs, now: () => Date.now(), fetch: fetchImpl };
+    const outcome = await pollProjectOnce(deps, root);
+    // 'retry' maps to 'active' (there's a queue, the daemon is on it) — the
+    // point of this test is the LOCK, not the outcome mapping (already
+    // covered above).
+    expect(outcome).toBe('active');
+    expect(existsSync(join(telemetryDir(root), 'drain.lock'))).toBe(false);
   });
 });
 

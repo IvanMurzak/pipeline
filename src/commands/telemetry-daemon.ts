@@ -484,6 +484,33 @@ export interface TelemetryDaemonPollDeps {
  * cycle rather than sending under a stale target until the daemon happens to
  * restart. The cost is two small JSON reads per cycle — negligible next to an
  * HTTP round trip.
+ *
+ * DRAINS THE JOURNAL FIRST (ux-v2 `b17`). `b12` wired `drainJournal()` into
+ * `drive` and into `next.ts`'s step-boundary flush, but a manager-driven run
+ * (`/pipeline:run`, no `drive` process at all) never goes through either of
+ * those — this poll cycle was its ONLY path back to the outbox, and it never
+ * took it. Without this call a manager-driven run queues nothing: the
+ * uploader has an empty outbox to flush and reports `'idle'` forever, even
+ * while the project journal fills up with un-drained events. Same instance,
+ * same project, called BEFORE `flushOnce()` so anything newly drained this
+ * cycle is eligible to send in the same cycle rather than waiting one more
+ * `pollIntervalMs`.
+ *
+ * CONCURRENCY (see `telemetry-outbox-interleaving.test.ts`, `b12`):
+ * `drainJournal()` takes `drain.lock` with a ZERO-wait attempt — it never
+ * blocks. If a concurrently-running `drive` (or another daemon poll, though
+ * there is only ever one live daemon per project by `daemon.lock`) holds the
+ * lock at this instant, this call returns `skipped_locked: true` immediately
+ * and touches nothing; the journal cursor is untouched, so the NEXT poll
+ * cycle (`pollIntervalMs` later) drains the same bytes exactly once. So
+ * neither of the two risks the task called out is live here: a deadlock
+ * would require this call to block, and it structurally cannot; a
+ * double-enqueue would require two callers to advance the SAME persisted
+ * cursor/seq state without the lock, and the lock plus loading state fresh
+ * from disk on every call rules that out. See `pollProjectOnce — journal
+ * drain` below for the daemon-level proof (not just the lower-level
+ * `TelemetryOutbox` one `telemetry-outbox-interleaving.test.ts` already
+ * carried before this daemon caller existed).
  */
 export async function pollProjectOnce(deps: TelemetryDaemonPollDeps, projectRoot: string): Promise<TelemetryDaemonPollOutcome> {
   if (!telemetrySyncEnabled(deps.env)) return 'disabled';
@@ -500,6 +527,7 @@ export async function pollProjectOnce(deps: TelemetryDaemonPollDeps, projectRoot
   if (target === null) return 'idle';
 
   const outbox = new TelemetryOutbox({ projectRoot, org: target.org, env: deps.env, now: deps.now });
+  outbox.drainJournal();
   const uploader = new TelemetryUploader({
     outbox,
     target,
