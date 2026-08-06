@@ -1,12 +1,15 @@
 #!/usr/bin/env bun
 // pipeline — the unified Claude-Pipeline CLI.
 //
-// Commands: `plan`, `match`, `event`, `route`, `next`, `gc`, `ci-wait`, `ui`, `logs`.
+// Commands: `plan`, `match`, `event`, `route`, `next`, `gc`, `ci-wait`, `ui`,
+// `logs`, `fix`.
 // Each is a deterministic, LLM-free computation the agents shell out to
 // instead of doing in-context — keeping per-iteration token cost near zero.
 // (`ui` is a thin launcher for the dashboard daemon, `logs` a read-only
 // terminal tail of the event journal, and `gc` a git worktree/branch janitor,
-// rather than pure computations.)
+// rather than pure computations. `fix` and `drive` are the two exceptions that
+// SPAWN A CLAUDE SESSION against the user's files — see their own headers for
+// the trust level that makes that defensible.)
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -94,6 +97,21 @@ function usage(): string {
     '      resolved models + reasoning efforts, DAG layers, validation) as JSON.',
     '      Repeatable --model/--effort pin single steps for THIS run (beat the',
     '      step\'s own frontmatter). Effort levels: low|medium|high|xhigh|max|inherit.',
+    '',
+    '  fix --root <pipeline_root> [--project <path>] [--model <m>]',
+    '      [--timeout <sec>] [--json]',
+    '      Resolve the errors/warnings `pipeline plan` reports for a pipeline by',
+    '      running an AI coding session over that pipeline folder.',
+    '      TRUST LEVEL: this STARTS A HEADLESS CLAUDE AGENT THAT EDITS FILES IN',
+    '      YOUR PROJECT — `--permission-mode acceptEdits` from the project root,',
+    '      no per-edit prompt, the same trust level as `pipeline drive`. Write',
+    '      scope is ENFORCED: a PreToolUse hook denies every Edit/Write/',
+    '      MultiEdit/NotebookEdit outside <pipeline_root>, and a --root outside',
+    "      the project's .pipeline/ is refused before anything is spawned (Bash",
+    '      inside the session is not path-restricted, same as `drive`). Uploads',
+    '      nothing. Run `pipeline fix --help` for the full statement. Exit 0 the',
+    '      issues are gone (or there were none) · 1 the session failed or issues',
+    '      remain · 2 usage / --root outside the project / no manifest.',
     '',
     '  match --pipelines-dir <dir> (--task <t> | --issue <ref>)',
     '        [--top <n>] [--neg-threshold <n>]',
@@ -403,6 +421,15 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'plan':
       return runPlan(rest);
+    case 'fix': {
+      // Lazy import (mirrors `drive`/`gc`): `fix` pulls in the subprocess +
+      // temp-settings machinery — keep the hot `next` loop's per-spawn startup
+      // cost unchanged. This case also serves the hidden `--scope-guard` hook
+      // entry point, which the spawned session re-enters on every file edit,
+      // so its startup cost is on the critical path of the session it guards.
+      const { runFix } = await import('./commands/fix');
+      return runFix(rest);
+    }
     case 'match':
       return runMatch(rest);
     case 'event':
