@@ -970,4 +970,10 @@ test('B4: .ps1 hooks run under pwsh when available, falling back to powershell (
   const i = interpreterFor('C:/x/worktree-create.ps1');
   expect(['pwsh', 'powershell']).toContain(i.cmd);
   expect(i.args).toEqual(['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'C:/x/worktree-create.ps1']);
-});
+  // 20 s like its 23 siblings in this file, and for the same reason: this case
+  // RESOLVES a real PowerShell on PATH, and `pwsh` cold-start on a loaded
+  // windows-latest runner routinely costs seconds. On Bun's default 5 s it
+  // flaked at 7,954 ms during ux-v2 `b12` — a red CI on a PR that touches no
+  // hook code, which is the most expensive kind of flake: it makes a green
+  // gate untrustworthy exactly when someone is relying on it.
+}, 20000);
