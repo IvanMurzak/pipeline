@@ -101,12 +101,19 @@ function writeRaw(root: string, raw: string): void {
   appendFileSync(journalPath(root), raw, 'utf-8');
 }
 
+/** Test-only fixed salt (b18) — real enough to satisfy the constructor's
+ *  empty-salt guard, distinct enough from `''`/`DEFAULT_FINGERPRINT_SALT`
+ *  that a test which forgot to override it would not accidentally collide
+ *  with a production constant. */
+const TEST_SALT = 'test-salt-outbox-fixture';
+
 function mkOutbox(root: string, over: Record<string, unknown> = {}): TelemetryOutbox {
   return new TelemetryOutbox({
     projectRoot: root,
     org: 'acme',
     // Explicit env so the suite never depends on (or mutates) the ambient one.
     env: {},
+    fingerprintSalt: TEST_SALT,
     onDrop: () => {},
     ...over,
   } as ConstructorParameters<typeof TelemetryOutbox>[0]);
@@ -673,6 +680,106 @@ describe('outbox — the org tag is what prevents the F4 cross-org leak', () => 
     const root = mkProject();
     expect(() => new TelemetryOutbox({ projectRoot: root, org: '' })).toThrow(/non-empty org/);
     expect(() => new TelemetryOutbox({ projectRoot: root, org: '   ' })).toThrow(/non-empty org/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The fingerprint salt (07-security.md T16/SG13, ux-v2 `b18`)
+//
+// `b15` shipped the per-install secret but wired it only into
+// `run-identity.ts`'s project fingerprint (`commands/hash.ts`'s sole
+// consumer) — nothing uploads that value. THIS class is what actually
+// filters (and, via `fingerprintSalt`, re-filters at wire time) every
+// uploaded record, and it used to default an unresolved salt to `''`
+// (`telemetry-outbox.ts:595`, pre-`b18`) — a silent empty HMAC key, weaker
+// than the public constant `b15` retired. These tests cover the fix: the
+// empty-salt guard, and that the resolved salt is actually load-bearing on
+// the filtered output (not just accepted and ignored).
+// ---------------------------------------------------------------------------
+
+describe('outbox — the fingerprint salt is REQUIRED, not defaulted (b18)', () => {
+  test('an outbox cannot be constructed with an empty fingerprintSalt — the empty-salt guard', () => {
+    const root = mkProject();
+    expect(() => new TelemetryOutbox({ projectRoot: root, org: 'acme', fingerprintSalt: '' })).toThrow(
+      /non-empty fingerprintSalt/,
+    );
+    expect(() => new TelemetryOutbox({ projectRoot: root, org: 'acme', fingerprintSalt: '   ' })).toThrow(
+      /non-empty fingerprintSalt/,
+    );
+  });
+
+  test('an outbox cannot be constructed with fingerprintSalt omitted entirely — the same guard catches a reverted call site', () => {
+    const root = mkProject();
+    // `as any`: TypeScript's own "required field" check is a SEPARATE net
+    // (bun's runtime strips types and does not enforce it) — this asserts
+    // the RUNTIME guard independently, which is what actually protects a
+    // caller that reverts to the pre-b18 shape (`new TelemetryOutbox({
+    // projectRoot, org, env, now })`, no `fingerprintSalt` key at all).
+    expect(() => new (TelemetryOutbox as any)({ projectRoot: root, org: 'acme' })).toThrow(
+      /non-empty fingerprintSalt/,
+    );
+  });
+
+  test('two outboxes salted differently produce DIFFERENT fingerprints for the SAME journal input', () => {
+    const root = mkProject();
+    writeJournal(root, [evt('tool.called', 'run-a', { tool_name: 'Read', success: true })]);
+
+    const a = mkOutbox(root, { org: 'org-a', fingerprintSalt: 'install-secret-A' });
+    a.drainJournal();
+    const [recordA] = a.readAll();
+
+    // A second, independent project (a fresh journal) fingerprinted under a
+    // DIFFERENT salt — same identifier value (`project_root`), different key.
+    const root2 = mkProject();
+    writeJournal(root2, [evt('tool.called', 'run-a', { tool_name: 'Read', success: true })]);
+    const b = mkOutbox(root2, { org: 'org-a', fingerprintSalt: 'install-secret-B' });
+    b.drainJournal();
+    const [recordB] = b.readAll();
+
+    expect(recordA.payload.project_root).not.toBe(recordB.payload.project_root);
+    // Both are still well-formed fingerprints, not raw paths.
+    expect(recordA.payload.project_root).toMatch(/^fp:[0-9a-f]{16}$/);
+    expect(recordB.payload.project_root).toMatch(/^fp:[0-9a-f]{16}$/);
+  });
+
+  test('the SAME salt reused across two outbox instances is STABLE (deterministic, not per-instance-random)', () => {
+    const root = mkProject();
+    writeJournal(root, [evt('tool.called', 'run-a', { tool_name: 'Read', success: true })]);
+    const first = mkOutbox(root, { org: 'org-a', fingerprintSalt: 'shared-secret' });
+    first.drainJournal();
+    const [recordFirst] = first.readAll();
+
+    // A second, independently-constructed outbox instance over the SAME
+    // project, salted identically — simulates the daemon rebuilding a fresh
+    // TelemetryOutbox every poll cycle (`telemetry-daemon.ts`'s own doc
+    // comment: "A fresh TelemetryOutbox … is built EVERY cycle").
+    const root2 = mkProject();
+    writeJournal(root2, [evt('tool.called', 'run-a', { tool_name: 'Read', success: true })]);
+    const second = mkOutbox(root2, { org: 'org-a', fingerprintSalt: 'shared-secret' });
+    second.drainJournal();
+    const [recordSecond] = second.readAll();
+
+    expect(recordFirst.payload.project_root).toBe(recordSecond.payload.project_root);
+  });
+
+  test('NEVER UPLOADED: the raw salt string never appears in the outbox file on disk', () => {
+    const root = mkProject();
+    const secretSalt = 'super-secret-install-salt-do-not-leak-me-9f3a7c';
+    writeJournal(root, [
+      evt('tool.called', 'run-a', { tool_name: 'Read', success: true }),
+      evt('iteration.completed', 'run-a', { iteration_path: 'a1.md', outcome: 'completed' }),
+    ]);
+    const outbox = mkOutbox(root, { org: 'org-a', fingerprintSalt: secretSalt });
+    outbox.drainJournal();
+
+    // Scan every file the telemetry dir wrote, as BYTES — same discipline as
+    // the "on-disk byte scan" block below (matrix 7), applied to the salt
+    // itself rather than a planted secret.
+    const dir = telemetryDir(root);
+    for (const name of readdirSync(dir)) {
+      const bytes = readFileSync(join(dir, name), 'utf-8');
+      expect(bytes).not.toContain(secretSalt);
+    }
   });
 });
 

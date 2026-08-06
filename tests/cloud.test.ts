@@ -24,6 +24,7 @@ import {
   realFs,
   credentialFilePath,
   cloudJsonPath,
+  fingerprintSaltFilePath,
   type CloudFs,
 } from '../src/lib/cloud-config';
 import type { SpawnFn } from '../src/lib/loopback-oauth';
@@ -2156,9 +2157,54 @@ describe('runCloud connect — history backfill (task b13, matrix 6)', () => {
 
     // The local queue is fully drained — nothing left behind after delivery.
     const org = 'acme';
-    const outbox = new TelemetryOutbox({ projectRoot: deps.cwd, org, env: deps.env, now: deps.now });
+    const outbox = new TelemetryOutbox({
+      projectRoot: deps.cwd,
+      org,
+      env: deps.env,
+      now: deps.now,
+      fingerprintSalt: 'test-salt-cloud-fixture', // b18: required — this instance only reads counters/queue
+    });
     expect(outbox.counters().queued).toBe(0);
   });
+
+  // -------------------------------------------------------------------------
+  // b18 wiring proof — `enqueueConnectHistory`'s `TelemetryOutbox`
+  // (commands/cloud.ts:1511) resolves and passes the REAL per-install salt,
+  // not the pre-b18 empty default. Proven through the REAL entry point
+  // (`runCloud`), not by reading `resolveOutboxFingerprintSalt` internals —
+  // same discipline as `hash.test.ts`'s own "WIRING PROOF" tests for `b15`.
+  // -------------------------------------------------------------------------
+
+  test(
+    'WIRING PROOF: connect resolves (and persists) a REAL per-install CSPRNG salt for the ' +
+      'history-upload outbox, not an unresolved/empty one',
+    async () => {
+      const log: FetchLog[] = [];
+      const fetchImpl = scriptedFetch({ log });
+      const { fetch: uploadFetch, requests } = recordingUploadFetch();
+      const { deps } = makeDeps(fetchImpl, recordingFs(), { uploadFetch });
+      writeHistoryRuns(deps.cwd, 3);
+
+      // Before connect: no salt file exists yet — this install has never
+      // resolved one (the pre-b15 / pre-b18 state).
+      const saltPath = fingerprintSaltFilePath({ platform: deps.platform, env: deps.env, homedir: deps.homedir });
+      expect(existsSync(saltPath)).toBe(false);
+
+      const code = await runCloud(['connect'], deps);
+      expect(code).toBe(0);
+      expect(requests.length).toBe(3);
+
+      // MUTATION-PROVABLE: if `enqueueConnectHistory` stopped calling
+      // `resolveOutboxFingerprintSalt` (reverted to the pre-b18
+      // `new TelemetryOutbox({ projectRoot, org, env, now })` shape with no
+      // `fingerprintSalt`), this file would never be written — the
+      // constructor's empty-salt guard would instead throw before the
+      // history scan ever ran.
+      expect(existsSync(saltPath)).toBe(true);
+      const onDisk = JSON.parse(readFileSync(saltPath, 'utf-8')) as { version: number; salt: string };
+      expect(onDisk.salt).toMatch(/^[0-9a-f]{64}$/);
+    },
+  );
 
   test('--no-history produces 0 (matrix 6)', async () => {
     const log: FetchLog[] = [];
@@ -2232,7 +2278,13 @@ describe('a mid-history failure leaves records queued and still exits 0 (task b1
     // still discoverable, either still queued or safely quarantined — never
     // silently gone.
     const org = 'acme';
-    const outbox = new TelemetryOutbox({ projectRoot: deps.cwd, org, env: deps.env, now: deps.now });
+    const outbox = new TelemetryOutbox({
+      projectRoot: deps.cwd,
+      org,
+      env: deps.env,
+      now: deps.now,
+      fingerprintSalt: 'test-salt-cloud-fixture', // b18: required — this instance only reads counters/queue
+    });
     const counters = outbox.counters();
     const accountedFor = counters.enqueued - counters.dropped_bound - counters.dropped_no_run_id - counters.dropped_malformed;
     // Every record that was actually enqueued (47, since nothing wedged the
@@ -2256,7 +2308,13 @@ describe('a mid-history failure leaves records queued and still exits 0 (task b1
     expect(code).toBe(0); // HALF 1
 
     const org = 'acme';
-    const outbox = new TelemetryOutbox({ projectRoot: deps.cwd, org, env: deps.env, now: deps.now });
+    const outbox = new TelemetryOutbox({
+      projectRoot: deps.cwd,
+      org,
+      env: deps.env,
+      now: deps.now,
+      fingerprintSalt: 'test-salt-cloud-fixture', // b18: required — this instance only reads counters/queue
+    });
     expect(outbox.counters().queued).toBe(47); // HALF 2: nothing lost, nothing delivered
     expect(out()).toContain('could not reach the server yet');
 

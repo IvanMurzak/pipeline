@@ -29,13 +29,14 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readFileSync,
   rmSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { realFs } from '../src/lib/cloud-config';
+import { realFs, fingerprintSaltFilePath } from '../src/lib/cloud-config';
 import { journalPath, telemetryDir, type OutboxRecord } from '../src/lib/telemetry-outbox';
 import { uploadStatePath, type UploadFetch, type UploadRequest } from '../src/lib/telemetry-upload';
 import {
@@ -577,6 +578,100 @@ describe('pollProjectOnce — journal drain (ux-v2 b17)', () => {
     // covered above).
     expect(outcome).toBe('active');
     expect(existsSync(join(telemetryDir(root), 'drain.lock'))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pollProjectOnce — the fingerprint salt reaches the wire (ux-v2 b18,
+// 07-security.md T16/SG13)
+//
+// `b15` shipped the per-install CSPRNG salt but wired it only into
+// `run-identity.ts`'s project fingerprint (`commands/hash.ts`'s sole
+// consumer) — nothing uploads that value. `pollProjectOnce` IS one of the
+// paths that actually uploads: `drainJournal()` filters every journal event
+// with the outbox's salt at enqueue time, and `flushOnce()` reuses the SAME
+// `outbox.fingerprintSalt` for the wire-side re-filter. Before this task,
+// `commands/telemetry-daemon.ts:529` (line numbers moved under `b17`) built
+// its `TelemetryOutbox` with no `fingerprintSalt` at all, so every
+// fingerprinted field on the wire — `project_root` included — was an HMAC
+// under an EMPTY key. These tests go through the REAL entry point
+// (`pollProjectOnce`), inspecting the captured wire body, not
+// `resolveOutboxFingerprintSalt` internals.
+// ---------------------------------------------------------------------------
+
+describe('pollProjectOnce — the fingerprint salt reaches the wire (ux-v2 b18)', () => {
+  test('WIRING PROOF: two different installs produce DIFFERENT wire fingerprints for the identical project_root', async () => {
+    const rootA = mkProject();
+    boundAndCredentialed(rootA);
+    appendJournal(rootA, journalEvent('run-wire-a'));
+    const requestsA: UploadRequest[] = [];
+    const fetchA: UploadFetch = async (req) => {
+      requestsA.push(req);
+      return { status: 200 };
+    };
+    const depsA: TelemetryDaemonPollDeps = { ...home(rootA), fs: realFs, now: () => Date.now(), fetch: fetchA };
+    expect(await pollProjectOnce(depsA, rootA)).toBe('active');
+    expect(requestsA.length).toBe(1);
+    const bodyA = JSON.parse(requestsA[0].body) as { events: Array<{ payload: { project_root?: string } }> };
+    const fpA = bodyA.events[0].payload.project_root;
+    // `journalEvent()` hard-codes `project_root: 'C:/proj'` — a well-formed
+    // fingerprint proves the filter ran; the salt below proves WHICH key.
+    expect(fpA).toMatch(/^fp:[0-9a-f]{16}$/);
+
+    // A second, independent "install" — different homedir/PIPELINE_CLOUD_HOME
+    // ⇒ its own generated per-install salt — fingerprinting the SAME
+    // `project_root` value.
+    const rootB = mkProject();
+    boundAndCredentialed(rootB);
+    appendJournal(rootB, journalEvent('run-wire-b'));
+    const requestsB: UploadRequest[] = [];
+    const fetchB: UploadFetch = async (req) => {
+      requestsB.push(req);
+      return { status: 200 };
+    };
+    const depsB: TelemetryDaemonPollDeps = { ...home(rootB), fs: realFs, now: () => Date.now(), fetch: fetchB };
+    expect(await pollProjectOnce(depsB, rootB)).toBe('active');
+    const bodyB = JSON.parse(requestsB[0].body) as { events: Array<{ payload: { project_root?: string } }> };
+    const fpB = bodyB.events[0].payload.project_root;
+
+    // MUTATION-PROVABLE: if pollProjectOnce stopped resolving/threading the
+    // install salt (reverted to `new TelemetryOutbox({ projectRoot, org,
+    // env, now })` with no `fingerprintSalt`), this outbox would either
+    // throw (empty-salt guard) or — pre-b18 — both installs would silently
+    // collapse to the SAME empty-string key, making fpA === fpB.
+    expect(fpA).not.toBe(fpB);
+
+    // NEVER UPLOADED: the raw per-install secret itself is not the wire
+    // value — read it back off disk and confirm its absence from the body.
+    const saltPathA = fingerprintSaltFilePath({ ...home(rootA) });
+    const rawSaltA = (JSON.parse(readFileSync(saltPathA, 'utf-8')) as { salt: string }).salt;
+    expect(requestsA[0].body).not.toContain(rawSaltA);
+  });
+
+  test('the SAME install (same homedir) reuses the SAME wire fingerprint across two poll cycles', async () => {
+    const root = mkProject();
+    boundAndCredentialed(root);
+    appendJournal(root, journalEvent('run-stable-1'));
+    const requests: UploadRequest[] = [];
+    const fetchImpl: UploadFetch = async (req) => {
+      requests.push(req);
+      return { status: 200 };
+    };
+    const deps: TelemetryDaemonPollDeps = { ...home(root), fs: realFs, now: () => Date.now(), fetch: fetchImpl };
+    expect(await pollProjectOnce(deps, root)).toBe('active');
+    expect(requests.length).toBe(1);
+
+    // A second event, a second (fresh, per-cycle — see pollProjectOnce's own
+    // doc comment) TelemetryOutbox instance, same project ⇒ same on-disk salt.
+    appendJournal(root, journalEvent('run-stable-2'));
+    expect(await pollProjectOnce(deps, root)).toBe('active');
+    expect(requests.length).toBe(2);
+
+    const fp1 = (JSON.parse(requests[0].body) as { events: Array<{ payload: { project_root?: string } }> }).events[0]
+      .payload.project_root;
+    const fp2 = (JSON.parse(requests[1].body) as { events: Array<{ payload: { project_root?: string } }> }).events[0]
+      .payload.project_root;
+    expect(fp1).toBe(fp2);
   });
 });
 

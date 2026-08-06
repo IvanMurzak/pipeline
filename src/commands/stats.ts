@@ -32,6 +32,7 @@ import { backfillProject } from '../lib/stats-backfill';
 import { cloudJsonPath, readCloudBinding, realFs, type CloudFs } from '../lib/cloud-config';
 import { appOriginFor } from '../lib/department-serve';
 import { telemetrySyncEnabled, TelemetryOutbox } from '../lib/telemetry-outbox';
+import { resolveOutboxFingerprintSalt } from '../lib/fingerprint-salt';
 import {
   realUploadFetch,
   resolveUploadTarget,
@@ -197,7 +198,19 @@ function buildTelemetryStatusReport(deps: StatsTelemetryDeps, projectRoot: strin
   // queued — `lib/telemetry-tail.ts` and every other entry point gate the
   // SAME way, so there is genuinely nothing to read here otherwise).
   if (connected && org) {
-    const outbox = new TelemetryOutbox({ projectRoot, org, env: deps.env, now: deps.now });
+    const outbox = new TelemetryOutbox({
+      projectRoot,
+      org,
+      env: deps.env,
+      now: deps.now,
+      // b18: the per-install salt (b15) — see fingerprint-salt.ts.
+      fingerprintSalt: resolveOutboxFingerprintSalt({
+        fs: deps.fs,
+        platform: deps.platform,
+        env: deps.env,
+        homedir: deps.homedir,
+      }),
+    });
     const counters = outbox.counters();
     const { sendable, blocked } = outbox.takeBatch(Number.MAX_SAFE_INTEGER);
     const oldestRecord = sendable[0];
@@ -255,7 +268,21 @@ async function drainTelemetryQueue(deps: StatsTelemetryDeps, projectRoot: string
       fetch: deps.refreshFetch,
     });
     if (!target) return; // F7: nothing to drain to — the report already says so
-    const outbox = new TelemetryOutbox({ projectRoot, org: target.org, env: deps.env, now: deps.now });
+    const outbox = new TelemetryOutbox({
+      projectRoot,
+      org: target.org,
+      env: deps.env,
+      now: deps.now,
+      // b18: the per-install salt (b15) — see fingerprint-salt.ts. Load-bearing
+      // here too: flushOnce() reads `outbox.fingerprintSalt` back out to key
+      // the wire-side re-filter (telemetry-upload.ts's `filterForWire`).
+      fingerprintSalt: resolveOutboxFingerprintSalt({
+        fs: deps.fs,
+        platform: deps.platform,
+        env: deps.env,
+        homedir: deps.homedir,
+      }),
+    });
     const uploader = new TelemetryUploader({
       outbox,
       target,

@@ -64,7 +64,13 @@ function appendJournal(root: string, e: Record<string, unknown>): void {
 }
 
 function mkOutbox(root: string, org = 'acme'): TelemetryOutbox {
-  return new TelemetryOutbox({ projectRoot: root, org, env: {}, onDrop: () => {} });
+  return new TelemetryOutbox({
+    projectRoot: root,
+    org,
+    env: {},
+    fingerprintSalt: 'test-salt-interleaving-fixture', // b18: required, see telemetry-outbox.test.ts
+    onDrop: () => {},
+  });
 }
 
 /** Hold the outbox's `drain.lock` with a REAL `wx`-created fd, simulating a

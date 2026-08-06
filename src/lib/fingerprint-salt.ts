@@ -67,6 +67,7 @@ import {
   type HomeContext,
 } from './cloud-config';
 import { protectCredentialFile, type ProtectDeps } from './credential-protect';
+import { DEFAULT_FINGERPRINT_SALT, FINGERPRINT_SALT_ENV } from './run-identity';
 
 const CURRENT_VERSION = 1;
 
@@ -170,4 +171,46 @@ export function loadOrCreateInstallSalt(deps: InstallSaltDeps): string | undefin
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Resolve the salt a `TelemetryOutbox` construction site must pass as
+ * `fingerprintSalt` (ux-v2 `b18`, closing SG13 on the path that actually
+ * uploads — `b15` only wired the salt into the PROJECT fingerprint
+ * `commands/hash.ts` computes, which nothing uploads; the outbox's own
+ * `filterEventForTier`/`filterStatsRecordMetadata` calls are the ones that
+ * key the fingerprints travelling on the wire, and every one of them used to
+ * default to `''` — `telemetry-outbox.ts:595`, pre-`b18`).
+ *
+ * PRECEDENCE mirrors `run-identity.ts#resolveSalt` exactly, minus the
+ * "explicit salt" rung no `TelemetryOutbox` construction site has a
+ * programmatic use for:
+ *
+ *   1. `PIPELINE_FINGERPRINT_SALT` env override — the same escape hatch
+ *      `run-identity.ts` documents (pin one salt across machines, or
+ *      deliberately override the per-install secret). Keeping outbox
+ *      construction sites on the SAME precedence as `pipeline hash --project`
+ *      means the env var affects what actually uploads, not just a
+ *      side-channel debugging command.
+ *   2. The per-install CSPRNG secret (`b15`, `loadOrCreateInstallSalt`).
+ *   3. `DEFAULT_FINGERPRINT_SALT` — the public constant `b15` retired as the
+ *      DEFAULT precisely because it is dictionary-attackable, but which
+ *      remains the correct FALLBACK for an install that predates `b15` or
+ *      could not persist a secret (read-only home dir, a failed Windows ACL
+ *      call). Constraint carried from `b15`: that install must not error.
+ *
+ * NEVER returns an empty string and NEVER throws — every failure mode
+ * `loadOrCreateInstallSalt` documents collapses to step 3, exactly as it did
+ * before this function existed. That is what lets `TelemetryOutbox`'s
+ * constructor treat an EMPTY `fingerprintSalt` as a caller bug (a
+ * construction site that skipped resolution entirely) rather than a
+ * legitimate runtime state it must silently tolerate — the empty-key defect
+ * this task exists to close was exactly that silent tolerance
+ * (`opts.fingerprintSalt ?? ''`).
+ */
+export function resolveOutboxFingerprintSalt(deps: InstallSaltDeps): string {
+  const fromEnv = deps.env[FINGERPRINT_SALT_ENV];
+  if (fromEnv !== undefined && fromEnv.trim() !== '') return fromEnv;
+  const installSalt = loadOrCreateInstallSalt(deps);
+  return installSalt && installSalt.trim() !== '' ? installSalt : DEFAULT_FINGERPRINT_SALT;
 }

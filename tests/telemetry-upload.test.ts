@@ -97,11 +97,16 @@ function mkProject(): string {
   return d;
 }
 
+/** Test-only fixed salt (b18) — see telemetry-outbox.test.ts's own constant
+ *  for why a fixed non-empty value, not `''`, is used here. */
+const TEST_SALT = 'test-salt-upload-fixture';
+
 function mkOutbox(root: string, over: Record<string, unknown> = {}): TelemetryOutbox {
   return new TelemetryOutbox({
     projectRoot: root,
     org: 'acme',
     env: {},
+    fingerprintSalt: TEST_SALT,
     onDrop: () => {},
     ...over,
   } as ConstructorParameters<typeof TelemetryOutbox>[0]);

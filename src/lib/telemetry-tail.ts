@@ -40,8 +40,30 @@
 // missing lock there was latent).
 
 import { existsSync } from 'node:fs';
-import { cloudJsonPath, readCloudBinding, realFs } from './cloud-config';
+import { homedir as osHomedir } from 'node:os';
+import { cloudJsonPath, readCloudBinding, realFs, type CloudFs } from './cloud-config';
 import { telemetrySyncEnabled, TelemetryOutbox } from './telemetry-outbox';
+import { resolveOutboxFingerprintSalt } from './fingerprint-salt';
+
+/** Injectable side effects for `tailProjectJournal` — `fs`/`platform`/
+ *  `homedir` exist ONLY so `resolveOutboxFingerprintSalt` (b18) can locate
+ *  the per-install salt file the same way every other telemetry entry point
+ *  does; real callers (`drive.ts`, `next.ts`) never construct this
+ *  themselves, they call `tailProjectJournal` with just a `projectRoot` and
+ *  get `realTailDeps` by default. */
+export interface TailProjectJournalDeps {
+  env: Record<string, string | undefined>;
+  fs: CloudFs;
+  platform: string;
+  homedir: string;
+}
+
+export const realTailDeps: TailProjectJournalDeps = {
+  env: process.env,
+  fs: realFs,
+  platform: process.platform,
+  homedir: osHomedir(),
+};
 
 /**
  * Best-effort, LOCAL-ONLY drain of one project's journal into its outbox.
@@ -53,19 +75,40 @@ import { telemetrySyncEnabled, TelemetryOutbox } from './telemetry-outbox';
  * records with, so nothing is drained) rather than throwing.
  *
  * NEVER throws (D2) — telemetry can never affect the run that calls it.
+ *
+ * `deps` is a partial override of `realTailDeps` (test seam only — every
+ * production caller omits it). This used to take a bare `env` as its second
+ * positional argument; no caller in this package ever passed one, so
+ * widening it to a deps object here is not a breaking change for
+ * `drive.ts`/`next.ts`.
  */
 export function tailProjectJournal(
   projectRoot: string,
-  env: Record<string, string | undefined> = process.env,
+  deps: Partial<TailProjectJournalDeps> = {},
 ): void {
+  const resolved: TailProjectJournalDeps = { ...realTailDeps, ...deps };
   try {
-    if (!telemetrySyncEnabled(env)) return;
+    if (!telemetrySyncEnabled(resolved.env)) return;
     const bindingPath = cloudJsonPath(projectRoot);
     if (!existsSync(bindingPath)) return;
     const binding = readCloudBinding(realFs, bindingPath);
     const org = binding?.org?.trim();
     if (!org) return;
-    new TelemetryOutbox({ projectRoot, org, env }).drainJournal();
+    new TelemetryOutbox({
+      projectRoot,
+      org,
+      env: resolved.env,
+      // b18: the per-install salt (b15) — see fingerprint-salt.ts. This is
+      // the ONLY drain path for a `pipeline next`/`pipeline drive` run that
+      // never spawns the detached daemon in-process; its filtered records are
+      // exactly what a later daemon poll uploads verbatim.
+      fingerprintSalt: resolveOutboxFingerprintSalt({
+        fs: resolved.fs,
+        platform: resolved.platform,
+        env: resolved.env,
+        homedir: resolved.homedir,
+      }),
+    }).drainJournal();
   } catch {
     /* best-effort — D2: telemetry never affects the run */
   }

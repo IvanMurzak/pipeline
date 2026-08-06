@@ -281,8 +281,30 @@ export interface TelemetryOutboxOptions {
   /** Explicit privacy tier; falls back to `PIPELINE_PRIVACY_TIER`, then
    *  fail-closed to `metadata`. */
   tier?: string;
-  /** Optional salt hardening the deterministic path fingerprints (`b15`). */
-  fingerprintSalt?: string;
+  /**
+   * The salt hardening the deterministic path fingerprints (`b15`) that this
+   * outbox's `filterEventForTier`/`filterStatsRecordMetadata` calls key their
+   * HMACs with — REQUIRED, not optional (`b18`, 07-security.md T16/SG13).
+   *
+   * There is deliberately no default. `b15` shipped the per-install CSPRNG
+   * salt but wired it only into `run-identity.ts`'s project fingerprint,
+   * whose sole consumer is `commands/hash.ts` — nothing uploads it. Every
+   * `TelemetryOutbox` construction site (the ones that actually filter and
+   * ship telemetry) kept relying on this option's old `?? ''` default, so
+   * every uploaded path fingerprint was an HMAC under an EMPTY key — weaker
+   * than the public constant `b15` retired, since an attacker need not even
+   * look the constant up. Making this field required, with the constructor
+   * guard below refusing an empty value, is the fix: a default that cannot
+   * fail is what created the defect, so there is no default left to fall
+   * back to silently.
+   *
+   * Callers resolve this via `fingerprint-salt.ts#resolveOutboxFingerprintSalt`
+   * — env override, else the per-install secret, else the documented public
+   * `DEFAULT_FINGERPRINT_SALT` fallback (never a throw, per `b15`'s own
+   * fallback contract: an install predating the salt, or one that could not
+   * persist it, must not error).
+   */
+  fingerprintSalt: string;
   maxRecords?: number;
   maxTrackedRuns?: number;
   env?: Record<string, string | undefined>;
@@ -554,11 +576,17 @@ export class TelemetryOutbox {
   readonly org: string;
   readonly projectRoot: string;
 
-  /** The deterministic path-fingerprint salt this outbox filtered with (`b15`).
+  /** The deterministic path-fingerprint salt this outbox filtered with (`b15`,
+   *  required as of `b18` — see `TelemetryOutboxOptions.fingerprintSalt`).
    *  PUBLIC so `b10`'s wire-side re-filter uses the SAME salt — a different one
    *  would re-fingerprint an already-fingerprinted path into a value nothing
-   *  else correlates with. Not a secret: `07` T16 records that the default salt
-   *  is public. */
+   *  else correlates with. Exposing it as a TypeScript property is not
+   *  publication: it never becomes part of a payload (see the constructor
+   *  guard and `filterPayload` — the salt only ever KEYS an HMAC, it is never
+   *  a value copied into one). Not a secret in the sense `07` T16 discusses
+   *  the default constant being public; the RESOLVED per-install secret this
+   *  field usually holds still must never be uploaded, and no code path here
+   *  does. */
   readonly fingerprintSalt: string;
 
   private readonly outboxPath: string;
@@ -592,7 +620,26 @@ export class TelemetryOutbox {
     this.projectRoot = opts.projectRoot;
     this.env = opts.env ?? process.env;
     this.now = opts.now ?? (() => Date.now());
-    this.salt = opts.fingerprintSalt ?? '';
+
+    // b18 — THE EMPTY-SALT GUARD. `fingerprintSalt` is a required option (see
+    // its doc comment), but Bun's test/CLI runtime strips TypeScript types
+    // before execution, so "required" alone is not a runtime backstop — a
+    // caller that reverts to omitting it (exactly what every one of the five
+    // pre-b18 construction sites did) would otherwise hand this an
+    // `undefined`, and the OLD `?? ''` default would silently key every
+    // uploaded HMAC with an empty string. That silent fallback is the T16/
+    // SG13 defect this task exists to close, so there is no fallback left
+    // here: an unresolved salt on a path that constructs this class is a
+    // caller bug, surfaced immediately and loudly, never a quiet `''`.
+    const salt = opts.fingerprintSalt;
+    if (!salt || !salt.trim()) {
+      throw new TypeError(
+        'TelemetryOutbox requires a non-empty fingerprintSalt — resolve one via ' +
+          "fingerprint-salt.ts#resolveOutboxFingerprintSalt before constructing. A silent '' " +
+          'key is exactly the T16/SG13 defect this guard exists to catch (07-security.md, ux-v2 b18).',
+      );
+    }
+    this.salt = salt;
     this.fingerprintSalt = this.salt;
     this.maxRecords = Math.max(1, opts.maxRecords ?? DEFAULT_MAX_RECORDS);
     this.maxTrackedRuns = Math.max(1, opts.maxTrackedRuns ?? DEFAULT_MAX_TRACKED_RUNS);

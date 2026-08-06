@@ -192,6 +192,7 @@ import {
   type ShellRunner,
 } from '../lib/runner-enrol';
 import { telemetrySyncEnabled, TelemetryOutbox } from '../lib/telemetry-outbox';
+import { resolveOutboxFingerprintSalt } from '../lib/fingerprint-salt';
 import { findHistoryRecords, enqueueHistoryRecords, type HistoryEnqueueResult } from '../lib/telemetry-history';
 import {
   DEFAULT_MAX_REQUESTS,
@@ -1507,7 +1508,20 @@ async function enqueueConnectHistory(
     const entries = findHistoryRecords(deps.cwd);
     if (entries.length === 0) return null;
     say(`\n  Found ${entries.length} past run${entries.length === 1 ? '' : 's'} in this project.\n`);
-    const outbox = new TelemetryOutbox({ projectRoot: deps.cwd, org: auth.orgSlug, env: deps.env, now: deps.now });
+    const outbox = new TelemetryOutbox({
+      projectRoot: deps.cwd,
+      org: auth.orgSlug,
+      env: deps.env,
+      now: deps.now,
+      // b18: the per-install salt (b15), never the pre-b18 empty default —
+      // see fingerprint-salt.ts#resolveOutboxFingerprintSalt.
+      fingerprintSalt: resolveOutboxFingerprintSalt({
+        fs: deps.fs,
+        platform: deps.platform,
+        env: deps.env,
+        homedir: deps.homedir,
+      }),
+    });
     const result = enqueueHistoryRecords(entries, (payload) => outbox.enqueueStats(payload));
     say(`  ↑ uploading history… ${result.enqueued}/${result.found} queued\n`);
     if (result.skipped > 0) {

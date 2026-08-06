@@ -12,7 +12,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomBytes as realRandomBytes } from 'node:crypto';
-import { loadOrCreateInstallSalt, type InstallSaltDeps } from '../src/lib/fingerprint-salt';
+import { loadOrCreateInstallSalt, resolveOutboxFingerprintSalt, type InstallSaltDeps } from '../src/lib/fingerprint-salt';
 import { realFs, credentialDir, fingerprintSaltFilePath, type HomeContext } from '../src/lib/cloud-config';
 import type { ProtectDeps } from '../src/lib/credential-protect';
 import {
@@ -349,6 +349,75 @@ describe('run-identity.ts integration — installSalt precedence and non-leakage
       const asText = Array.isArray(value) ? value.join(',') : String(value);
       expect(asText).not.toContain(installSalt!);
     }
+  });
+});
+
+// ===========================================================================
+// resolveOutboxFingerprintSalt (ux-v2 `b18`) — the resolver every
+// `TelemetryOutbox` construction site calls so the upload-path fingerprints
+// (07-security.md T16/SG13) get the SAME salt precedence `pipeline hash
+// --project` already used for the (unwired-to-upload) project fingerprint.
+// ===========================================================================
+
+describe('resolveOutboxFingerprintSalt — precedence, never empty, never throws', () => {
+  test('resolves the per-install secret when no env override is set', () => {
+    const home = mkHome();
+    const resolved = resolveOutboxFingerprintSalt(baseDeps(home));
+    expect(resolved).toMatch(HEX64);
+    // Same value `loadOrCreateInstallSalt` itself would return — this is
+    // resolution, not a second independent generator.
+    const direct = loadOrCreateInstallSalt(baseDeps(home));
+    expect(resolved).toBe(direct);
+  });
+
+  test('PIPELINE_FINGERPRINT_SALT env wins over the per-install secret', () => {
+    const home = mkHome();
+    const resolved = resolveOutboxFingerprintSalt(
+      baseDeps(home, { env: { PIPELINE_CLOUD_HOME: home, [FINGERPRINT_SALT_ENV]: 'pinned-outbox-salt' } }),
+    );
+    expect(resolved).toBe('pinned-outbox-salt');
+    // And no salt FILE was generated — the env override short-circuits
+    // before ever touching the install-secret machinery.
+    expect(existsSync(fingerprintSaltFilePath(ctxFor(home)))).toBe(false);
+  });
+
+  test('an empty/whitespace-only env override is treated as absent, falling through to the per-install secret', () => {
+    const home = mkHome();
+    const resolved = resolveOutboxFingerprintSalt(baseDeps(home, { env: { PIPELINE_CLOUD_HOME: home, [FINGERPRINT_SALT_ENV]: '   ' } }));
+    expect(resolved).toMatch(HEX64);
+  });
+
+  test('never empty and never throws even when the install secret cannot be persisted (read-only home)', () => {
+    const home = mkHome();
+    const brokenFs: InstallSaltDeps['fs'] = {
+      ...realFs,
+      writeFileSync: () => {
+        throw new Error('EACCES (simulated read-only credential dir)');
+      },
+    };
+    let resolved: string | undefined;
+    expect(() => {
+      resolved = resolveOutboxFingerprintSalt(baseDeps(home, { fs: brokenFs }));
+    }).not.toThrow();
+    // Falls all the way through to the documented public constant — b15's
+    // own fallback contract, never a hard failure.
+    expect(resolved).toBe(DEFAULT_FINGERPRINT_SALT);
+    expect(resolved!.length).toBeGreaterThan(0);
+  });
+
+  test('the SAME install resolves the SAME salt across two independent calls (stability, not per-call random)', () => {
+    const home = mkHome();
+    const first = resolveOutboxFingerprintSalt(baseDeps(home));
+    const second = resolveOutboxFingerprintSalt(baseDeps(home));
+    expect(first).toBe(second);
+  });
+
+  test('two different installs resolve to DIFFERENT salts', () => {
+    const homeA = mkHome();
+    const homeB = mkHome();
+    const a = resolveOutboxFingerprintSalt(baseDeps(homeA));
+    const b = resolveOutboxFingerprintSalt(baseDeps(homeB));
+    expect(a).not.toBe(b);
   });
 });
 

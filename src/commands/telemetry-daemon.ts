@@ -88,6 +88,7 @@ import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { telemetryDir, telemetrySyncEnabled, TelemetryOutbox } from '../lib/telemetry-outbox';
+import { resolveOutboxFingerprintSalt } from '../lib/fingerprint-salt';
 import { cloudJsonPath, realFs, type CloudFs } from '../lib/cloud-config';
 import { resolveUploadTarget, TelemetryUploader, type UploadFetch, type UploadTarget } from '../lib/telemetry-upload';
 import type { FetchLike } from '../lib/credential-refresh';
@@ -526,7 +527,22 @@ export async function pollProjectOnce(deps: TelemetryDaemonPollDeps, projectRoot
   });
   if (target === null) return 'idle';
 
-  const outbox = new TelemetryOutbox({ projectRoot, org: target.org, env: deps.env, now: deps.now });
+  const outbox = new TelemetryOutbox({
+    projectRoot,
+    org: target.org,
+    env: deps.env,
+    now: deps.now,
+    // b18: the per-install salt (b15) — see fingerprint-salt.ts. This is the
+    // outbox whose `drainJournal()` filters every manager-driven run's event
+    // (b17), and whose `fingerprintSalt` `flushOnce()` reuses at wire time —
+    // the two places T16/SG13's actual uploaded fingerprints come from.
+    fingerprintSalt: resolveOutboxFingerprintSalt({
+      fs: deps.fs,
+      platform: deps.platform,
+      env: deps.env,
+      homedir: deps.homedir,
+    }),
+  });
   outbox.drainJournal();
   const uploader = new TelemetryUploader({
     outbox,

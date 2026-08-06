@@ -12,10 +12,10 @@
 //   - not-connected / disabled degrade honestly rather than crashing
 
 import { afterAll, describe, expect, test } from 'bun:test';
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { realFs } from '../src/lib/cloud-config';
+import { realFs, fingerprintSaltFilePath } from '../src/lib/cloud-config';
 import { telemetryDir, type OutboxRecord } from '../src/lib/telemetry-outbox';
 import { OUTBOX_STATE_SCHEMA } from '../src/lib/telemetry-outbox';
 import type { UploadFetch, UploadRequest } from '../src/lib/telemetry-upload';
@@ -227,6 +227,32 @@ describe('runStatsTelemetry — the seven J6 questions on one screen', () => {
     await runStatsTelemetry([], deps);
     expect(out()).toContain('1 record queued under a different org');
   });
+
+  // -------------------------------------------------------------------------
+  // b18 wiring proof — `buildTelemetryStatusReport`'s `TelemetryOutbox`
+  // (commands/stats.ts:201) resolves and passes the REAL per-install salt.
+  // This instance never filters anything itself (it only reads counters and
+  // `takeBatch()`), so the observable proof is that resolution genuinely ran
+  // — the salt file lands on disk — not that a payload value changed; a
+  // caller that reverted this site to omitting `fingerprintSalt` would fail
+  // this test differently: the outbox's empty-salt guard would throw and
+  // `runStatsTelemetry` would surface a crash instead of the report.
+  // -------------------------------------------------------------------------
+  test('WIRING PROOF: a connected status read resolves (and persists) a REAL per-install salt', async () => {
+    const root = mkProject();
+    boundAndCredentialed(root);
+    const saltPath = fingerprintSaltFilePath({ platform: 'linux', env: { PIPELINE_CLOUD_HOME: join(root, 'cfg') }, homedir: root });
+    expect(existsSync(saltPath)).toBe(false);
+
+    const { deps, out } = baseDeps(root);
+    const code = await runStatsTelemetry([], deps);
+    expect(code).toBe(0);
+    expect(out()).toContain('Telemetry  on'); // the report itself still succeeded
+
+    expect(existsSync(saltPath)).toBe(true);
+    const onDisk = JSON.parse(readFileSync(saltPath, 'utf-8')) as { salt: string };
+    expect(onDisk.salt).toMatch(/^[0-9a-f]{64}$/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -302,5 +328,55 @@ describe('runStatsTelemetry --drain', () => {
     const { deps } = baseDeps(root);
     const code = await runStatsTelemetry(['--drain'], deps);
     expect(code).toBe(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // b18 wiring proof — `drainTelemetryQueue`'s `TelemetryOutbox`
+  // (commands/stats.ts:271) resolves and passes the REAL per-install salt.
+  // This is the outbox `TelemetryUploader.flushOnce()` reads `.fingerprintSalt`
+  // back out of for its wire-side re-filter (`telemetry-upload.ts`'s
+  // `filterForWire`), so an unresolved salt here would silently weaken
+  // exactly the property SG13 exists to close.
+  // ---------------------------------------------------------------------------
+  test('WIRING PROOF: --drain resolves (and persists) a REAL per-install salt for the flush outbox', async () => {
+    const root = mkProject();
+    boundAndCredentialed(root);
+    plantInQueue(root, [rec({ run_id: 'run-a' })]);
+    const saltPath = fingerprintSaltFilePath({ platform: 'linux', env: { PIPELINE_CLOUD_HOME: join(root, 'cfg') }, homedir: root });
+    expect(existsSync(saltPath)).toBe(false);
+
+    const fetchImpl: UploadFetch = async () => ({ status: 200 });
+    const { deps } = baseDeps(root, { fetch: fetchImpl });
+    const code = await runStatsTelemetry(['--drain'], deps);
+    expect(code).toBe(0);
+
+    expect(existsSync(saltPath)).toBe(true);
+    const onDisk = JSON.parse(readFileSync(saltPath, 'utf-8')) as { salt: string };
+    expect(onDisk.salt).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  // b15's constraint 2, carried forward: an install that could never persist
+  // a salt file (read-only credential dir) must fall back to the documented
+  // public constant, NOT error — --drain must still complete.
+  test('predates-salt fallback (b15 constraint 2): a read-only credential dir still lets --drain complete, never throws', async () => {
+    const root = mkProject();
+    boundAndCredentialed(root);
+    plantInQueue(root, [rec({ run_id: 'run-a' })]);
+
+    // A credential dir that exists but cannot be written into — the salt
+    // file can never be created, exactly like a read-only home directory.
+    const cfgDir = join(root, 'cfg');
+    mkdirSync(cfgDir, { recursive: true });
+    const brokenFs = {
+      ...realFs,
+      writeFileSync: () => {
+        throw new Error('EACCES: read-only credential directory (simulated)');
+      },
+    };
+
+    const fetchImpl: UploadFetch = async () => ({ status: 200 });
+    const { deps } = baseDeps(root, { fetch: fetchImpl, fs: brokenFs });
+    const code = await runStatsTelemetry(['--drain'], deps);
+    expect(code).toBe(0); // no throw, no crash — falls back silently per b15's contract
   });
 });
