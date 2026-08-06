@@ -427,10 +427,14 @@ test('end-to-end: the event stream and runs.jsonl reference the SAME uuid for th
     const completed = events.filter((e) => e.type === 'iteration.completed');
     expect(started).toBeTruthy();
     expect(started.data.step_uuid).toBe(implementUuid);
-    // step_key survives, unchanged: sequential/non-concurrent events still
-    // label the iteration by its SOURCE PATH (`02` principle 3 / the v5
-    // schema's own contract — step_name only rides a CONCURRENT layer).
+    // step_key survives, unchanged: every event still labels the iteration by
+    // its SOURCE PATH (`02` principle 3), concurrent or not.
     expect(started.data.iteration_path).toBe(join(w.steps, '01-implement.md'));
+    // ux-v2 b19: a SEQUENTIAL dispatch's iteration.started now carries
+    // step_name too — it used to ride ONLY a concurrent layer (see
+    // next-step-name.test.ts for the dedicated coverage of that change and of
+    // the concurrent path staying unchanged).
+    expect(started.data.step_name).toBe('implement');
     // The FIRST iteration.completed pairs with 'implement' by fold order.
     expect(completed[0].data.step_uuid).toBe(implementUuid);
     expect(completed[0].data.iteration_path).toBe(join(w.steps, '01-implement.md'));

@@ -772,10 +772,19 @@ function emitStartedEvents(
       // Additive A2 tag (04 §retries.6): present ONLY on a retry re-dispatch,
       // the 1-based attempt number engine-set on ActionStep.retry.
       if (step.retry !== undefined) argv.push(kv('retry', step.retry));
-      // step_name ONLY on a concurrent layer (the v4 `step_id` rule, renamed
-      // in v5) — sequential/graph events omit it so older folds keep the
-      // consecutive-window behavior.
-      if (action.concurrent === true) argv.push(kv('step_name', step.step_id));
+      // step_name on EVERY dispatch, sequential/graph and concurrent-layer
+      // alike (ux-v2 b19): under a v2 manifest a step IS a named manifest
+      // entry (`step_id` is that name), so it's worth reporting regardless of
+      // concurrency. This used to be concurrent-only under the old v4
+      // `step_id` rule, when a sequential step's id was just its filename
+      // stem and cloud rollups already had a real label to bucket by
+      // (`iteration_path`) — that rule no longer holds under v2, where a
+      // step's name and its body-file basename are independent, so the cloud
+      // cannot recover the name from the path alone. The OTHER `step_name`
+      // emission, in emitCompletionEvents' `kind === 'layer'` branch above,
+      // feeds a different event (`iteration.completed`) and is untouched by
+      // this change.
+      argv.push(kv('step_name', step.step_id));
       safeEmit('iteration.started', argv);
     }
     return;
