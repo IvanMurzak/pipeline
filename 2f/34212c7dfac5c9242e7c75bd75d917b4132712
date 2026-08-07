@@ -1,0 +1,72 @@
+apps/pipeline-cli/src/lib/next.ts
+  s_f7f7392a09f46e::t_eedccb6b8c6984 226-229,231-233
+  s_f7f7392a09f46e::t_b591f4e9c5b08a 1050-1052
+apps/pipeline-ui/tests/hook-bypass-detection.test.ts
+  s_f7f7392a09f46e::t_193a135ba235c7 220-247
+apps/pipeline-cli/tests/next-render.test.ts
+  s_f7f7392a09f46e::t_fda3f1837da865 1-207,211-258,260-261,266-275,277,279-281,284-285,288-289,291-294,296-507
+  s_f7f7392a09f46e::t_4bbbdbb4003c61 208-210
+  s_f7f7392a09f46e::t_9c3b8ccd0fdb9f 259,262-265,276,278,282-283,286-287,290,295
+apps/pipeline-cli/src/commands/drive.ts
+  s_f7f7392a09f46e::t_68fe1094723bee 1014-1017
+  s_f7f7392a09f46e::t_4634502a24d437 908
+  s_f7f7392a09f46e::t_d1d509b9f3f2ca 902-907
+apps/pipeline-cli/tests/next.test.ts
+  s_f7f7392a09f46e::t_2e1e6b8fef36d9 1512-1515,1518-1522
+  s_f7f7392a09f46e::t_491f6d4f10b0e1 6
+  s_f7f7392a09f46e::t_a051cc74330e0a 1378-1384
+hooks/analytics_relay.ts
+  s_f7f7392a09f46e::t_4eacdf8257ac5c 358-368
+  s_f7f7392a09f46e::t_a94180d831f470 422-424
+apps/pipeline-cli/src/commands/next.ts
+  s_f7f7392a09f46e::t_98bdd25a6f5616 1930-1936,1940,1945,1950,1955,1957,1962-1973
+  s_f7f7392a09f46e::t_b016b9f41db2b1 669-671
+  s_f7f7392a09f46e::t_8d796f22762f16 1006-1060
+  s_f7f7392a09f46e::t_67162690b065cc 120
+  s_f7f7392a09f46e::t_23391066cac575 617-619
+  s_f7f7392a09f46e::t_49365d2078fdd5 665-668
+  s_f7f7392a09f46e::t_07c357a2de6bf4 1275-1281,1284,1290-1291
+  s_f7f7392a09f46e::t_4bca28c524d480 613-616
+  s_f7f7392a09f46e::t_7288de7844aae6 1920-1929,1937-1939,1941-1944,1946-1949,1951-1954,1956,1958-1961,1974-1977,1981-1983
+agents/pipeline-improver.md
+  s_f7f7392a09f46e::t_c26b6aa751f7ac 29,33-40
+  s_f7f7392a09f46e::t_b1e15f9c5d0363 41
+agents/pipeline-designer.md
+  s_f7f7392a09f46e::t_cb525e2fea96de 129-146
+agents/step-executor.md
+  s_f7f7392a09f46e::t_85120b776a375a 94
+  s_f7f7392a09f46e::t_6104aca46b1403 89
+agents/pipeline-manager.md
+  s_f7f7392a09f46e::t_49362bfed0ae0f 89
+  s_f7f7392a09f46e::t_f0ed7461ec19b4 135-136
+  s_f7f7392a09f46e::t_3aa2fd8af94707 190
+  s_f7f7392a09f46e::t_9bddedd2325982 145
+apps/pipeline-cli/src/lib/render.ts
+  s_f7f7392a09f46e::t_05a56d35fdb90b 219-228,231-233,239,242,249-252,255,259-260,267
+  s_f7f7392a09f46e::t_7cf6218fb59568 278-279,281-284
+  s_f7f7392a09f46e::t_3ce0874e5bb8f4 330,341,362
+  s_f7f7392a09f46e::t_9b0741ce318b01 31-37
+  s_f7f7392a09f46e::t_de2a41d8b1b2e2 181-191,193-194,201,205-208,212
+  s_f7f7392a09f46e::t_06cd68270baf1e 1-30,38-65,76-89,93-95,97-180,192,195-200,202-204,209-211,213-218,229-230,234-238,240-241,243-248,253-254,256-258,261-266,268-277,280,285-329,331-340,342-361,363-386,388-399
+  s_f7f7392a09f46e::t_d1756543204582 90-92,96
+  s_f7f7392a09f46e::t_0fe28f19ca7e68 66-75
+  s_f7f7392a09f46e::t_ed099fd6e63ac3 387
+agents/pipeline-script-creator.md
+  s_f7f7392a09f46e::t_eb3d50f00b2726 157
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "2f34212c7dfac5c9242e7c75bd75d917b4132712",
+  "prompts": {},
+  "sessions": {
+    "s_f7f7392a09f46e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6d5d57f-6526-4873-9255-59c34d4f8571",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

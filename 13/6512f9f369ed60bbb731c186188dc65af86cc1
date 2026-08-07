@@ -1,0 +1,56 @@
+agents/pipeline-manager.md
+  s_69ec513d2e61d8::t_e5aeee3316918a 147-148,195
+  s_69ec513d2e61d8::t_c66c924960475f 27,34-35,44,73
+agents/pipeline-improver.md
+  s_69ec513d2e61d8::t_ed1effd8e34b21 3,21-22,28-29,40
+skills/run/SKILL.md
+  s_69ec513d2e61d8::t_bc884ee25b5fdb 29,47,174,179
+  s_69ec513d2e61d8::t_8d990894320c05 6
+  s_69ec513d2e61d8::t_ecddcd5c652a45 11
+  s_69ec513d2e61d8::t_15d2b40fc98349 33
+  s_69ec513d2e61d8::t_b52b1d1caa88ce 58
+  s_69ec513d2e61d8::t_7ff16278706675 89-95
+  s_69ec513d2e61d8::t_a184bb9d63f323 185
+skills/design/SKILL.md
+  s_69ec513d2e61d8::t_3b25c77cfcb195 3
+  s_69ec513d2e61d8::t_6ccaf532f21a39 32-43,49-50
+skills/design/references/authoring-protocol.md
+  s_69ec513d2e61d8::t_3f5adea1462379 343-344,346-366,369,371-374,376-379,381
+  s_69ec513d2e61d8::t_8a07f08e242876 571,573,575
+  s_69ec513d2e61d8::t_f057208ee85373 333,341,436,438,444
+  s_69ec513d2e61d8::t_59d2dd9e5d9055 469-471,473-475,477-483,487-490,492-494,496-499,501-502,506,508-510,512-514,516-518,520-522,524-527,529-531
+  s_69ec513d2e61d8::t_c9540b6b585a27 674
+  s_69ec513d2e61d8::t_eb3414045d93a3 179,181-187,189,191-194,197,200,203-204,214,220,222-237,240-259,266-269,271-286
+  s_69ec513d2e61d8::t_496a533b641065 600-601
+  s_69ec513d2e61d8::t_486137c7f4ee1a 52-62,66,68,70,72-76,78-82,86-87,89-90,92-94,96-99,101-103,105-147
+  s_69ec513d2e61d8::t_ea08401ea1058d 577,588-589,592,598,619
+  s_69ec513d2e61d8::t_ca4534684d85da 391
+  s_69ec513d2e61d8::t_287231d1838895 535-538,540-543,545,547,549-557,560-562
+  s_69ec513d2e61d8::t_3c9096e4ec626f 569
+  s_69ec513d2e61d8::t_345e7fd4799cac 395,431,456,465,580,594
+  s_69ec513d2e61d8::t_b57fbdcb6a5a27 680-681
+  s_69ec513d2e61d8::t_5d5447099d5d26 691,694-727
+  s_69ec513d2e61d8::t_fda799b1a974ee 660-662,664-667,669-673
+agents/step-executor.md
+  s_69ec513d2e61d8::t_23de2f92d5285f 66,89,97-101,222,228
+  s_69ec513d2e61d8::t_6d65b778b1b849 355,364,439
+  s_69ec513d2e61d8::t_52b4644945ada8 362-363
+agents/pipeline-script-creator.md
+  s_69ec513d2e61d8::t_a9f2c1dad6b58a 251-255,257,269
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "136512f9f369ed60bbb731c186188dc65af86cc1",
+  "prompts": {},
+  "sessions": {
+    "s_69ec513d2e61d8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2333b0af-97e3-4675-85f9-28bab5ff7022",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

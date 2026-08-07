@@ -1,0 +1,79 @@
+apps/pipeline-cli/src/commands/id.ts
+  s_716a2f2d4693eb::t_4103a200ee9b1a 1-38
+apps/pipeline-ui/launcher.ts
+  s_716a2f2d4693eb::t_10a3270f50723b 45
+  s_716a2f2d4693eb::t_fe090acba1cdcc 543-546
+hooks/analytics_relay.ts
+  s_716a2f2d4693eb::t_91aca73bb18079 552
+  s_716a2f2d4693eb::t_fcc1b96ace5c3b 1054-1056,1062-1075,1078,1080
+  s_716a2f2d4693eb::t_f008b567941a2f 1159
+  s_716a2f2d4693eb::t_9e5bd38044b186 91
+apps/pipeline-cli/tests/init.test.ts
+  s_716a2f2d4693eb::t_ab8229e675e5dc 327-341
+docs/ui-subsystem.md
+  s_716a2f2d4693eb::t_7d5713274b6939 32
+apps/pipeline-ui/aifix.ts
+  s_716a2f2d4693eb::t_d44bf68d5d0c50 22-23
+  s_716a2f2d4693eb::t_ff01065da8626e 152-153
+apps/pipeline-cli/tests/id.test.ts
+  s_716a2f2d4693eb::t_e775cd62d7924e 1-79
+apps/pipeline-cli/tests/ids.test.ts
+  s_716a2f2d4693eb::t_324c4271044c81 415-545
+  s_716a2f2d4693eb::t_7e9846dc57395c 43
+apps/pipeline-ui/tests/hook-bypass-id-determinism.test.ts
+  s_716a2f2d4693eb::t_1c2564730cb1ba 59-61,65-66
+  s_716a2f2d4693eb::t_9f137c4375ecab 1-58,62-64,67-105
+apps/pipeline-ui/EVENTS.md
+  s_716a2f2d4693eb::t_f5291454a31887 99
+apps/pipeline-ui/tests/mirror-binding.test.ts
+  s_716a2f2d4693eb::t_3a6804d44bedce 214
+  s_716a2f2d4693eb::t_281c89d0b39c15 210-213
+skills/run/SKILL.md
+  s_716a2f2d4693eb::t_2be763d0022ef8 212
+  s_716a2f2d4693eb::t_707144e25ecc7f 65
+apps/pipeline-cli/src/lib/ids.ts
+  s_716a2f2d4693eb::t_119837b6c28e71 5-20
+  s_716a2f2d4693eb::t_b08cdae23145c6 86
+  s_716a2f2d4693eb::t_10d31bd7915995 211-218,223-317
+apps/pipeline-ui/server.ts
+  s_716a2f2d4693eb::t_7a51e5b67f62dd 82
+  s_716a2f2d4693eb::t_5d374c4bcdcfce 2605-2608
+apps/pipeline-cli/src/cli.ts
+  s_716a2f2d4693eb::t_5f3fed4cd96782 59-64
+  s_716a2f2d4693eb::t_178b66005f5f5b 360-361
+  s_716a2f2d4693eb::t_b1a7d520f36b19 25
+docs/worktree-hook-contract.md
+  s_716a2f2d4693eb::t_91a747e5ffad42 13
+apps/pipeline-ui/tests/hook-pretool-binding.test.ts
+  s_716a2f2d4693eb::t_1feaeb0f4c4171 194,207
+  s_716a2f2d4693eb::t_0bd2910deeee9c 167-174,182-187,192-193,201,204-206
+  s_716a2f2d4693eb::t_4d96a005eaad23 175-180
+apps/pipeline-cli/src/commands/init.ts
+  s_716a2f2d4693eb::t_d0d8e89f981e82 48
+  s_716a2f2d4693eb::t_ab157422a9cadc 440-442
+apps/pipeline-ui/tests/launcher.test.ts
+  s_716a2f2d4693eb::t_db462aef62db48 280-285
+apps/pipeline-ui/tests/hook-bypass-detection.test.ts
+  s_716a2f2d4693eb::t_4d6d88ecfecfb7 325
+  s_716a2f2d4693eb::t_fe99bb86e671df 317-319,323-324
+apps/pipeline-cli/src/lib/compose-exec.ts
+  s_716a2f2d4693eb::t_c431917b2308e2 152-162
+agents/pipeline-manager.md
+  s_716a2f2d4693eb::t_3df20c7e2d2487 21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "a116e86b88e5e4e0a39b88d9eca9e8a1b6864134",
+  "prompts": {},
+  "sessions": {
+    "s_716a2f2d4693eb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "30b2d290-214d-4259-afb7-f324c8e3daac",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

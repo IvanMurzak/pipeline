@@ -1,0 +1,19 @@
+apps/pipeline-cli/tests/drive.test.ts
+  s_0437b8a8fbb7aa::t_3888bfbdab5386 524-527,542-543
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "5998bd7aea2c168b5ddc799e61673f8f0268427e",
+  "prompts": {},
+  "sessions": {
+    "s_0437b8a8fbb7aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "aca23227-fb01-4357-947a-d2d68329d5df",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

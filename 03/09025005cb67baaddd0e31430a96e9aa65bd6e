@@ -1,0 +1,37 @@
+apps/pipeline-cli/templates/ship-feature/steps/02-implement.md
+  s_a0187f20d63fae::t_2c3826d400b0c7 1-60
+apps/pipeline-cli/templates/ship-feature/steps/06-merge.md
+  s_a0187f20d63fae::t_108a83b8d0b7fc 1-59
+apps/pipeline-cli/templates/ship-feature/PIPELINE.md
+  s_a0187f20d63fae::t_7bfc382d72bedd 5-7,17-18
+  s_a0187f20d63fae::t_3aad9d1339a20c 11,23-24
+  s_a0187f20d63fae::t_9f12221dbe54ac 1-4,8-10,14-16,20-22,26-34,41-42
+  s_a0187f20d63fae::t_de4523c7dda491 19
+  s_a0187f20d63fae::t_8bd3395a67b228 12-13,25,35-40
+apps/pipeline-cli/templates/ship-feature/steps/01-plan.md
+  s_a0187f20d63fae::t_85c3bb39efb35d 1-45
+apps/pipeline-cli/src/lib/templates.ts
+  s_a0187f20d63fae::t_1db1ca39a4aeb4 49-52
+apps/pipeline-cli/templates/ship-feature/steps/03-review.md
+  s_a0187f20d63fae::t_d1bc8f517d8ea7 1-55
+apps/pipeline-cli/templates/ship-feature/steps/05-ci-wait.md
+  s_a0187f20d63fae::t_955aac5c13b1e3 1-51
+apps/pipeline-cli/templates/ship-feature/steps/04-open-pr.md
+  s_a0187f20d63fae::t_afb2d3c944ac03 1-54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "0309025005cb67baaddd0e31430a96e9aa65bd6e",
+  "prompts": {},
+  "sessions": {
+    "s_a0187f20d63fae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "92a83b9b-471a-4dfb-a4d5-cc213d191839",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+apps/pipeline-cli/tests/drive-self-improve.test.ts
+  s_a3dd2a824c1e7f::t_d517a70a2add70 530
+apps/pipeline-cli/tests/drive.test.ts
+  s_a3dd2a824c1e7f::t_99240ea47e8495 386
+apps/pipeline-cli/tests/worktree-scoped.test.ts
+  s_a3dd2a824c1e7f::t_40e5ea29d20501 223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "b9143df9438778d91400eb4d7d20ec4238a85a9a",
+  "prompts": {},
+  "sessions": {
+    "s_a3dd2a824c1e7f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_a3dd2a824c1e7f",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,47 @@
+apps/pipeline-cli/src/lib/telemetry-outbox.ts
+  s_716a2f2d4693eb::t_b63b139a7224a3 99-109
+  s_716a2f2d4693eb::t_77788e2656aa47 557-563,567
+  s_716a2f2d4693eb::t_d67a6465d41d77 364-365
+  s_716a2f2d4693eb::t_9d7363f45db183 1249-1264
+  s_716a2f2d4693eb::t_7af7272f8cb2c3 596
+  s_716a2f2d4693eb::t_166305f2c3c304 1230-1244,1246
+  s_716a2f2d4693eb::t_b499adb4e0fc10 241-246,252
+  s_716a2f2d4693eb::t_fe5a24d101cb96 608
+  s_716a2f2d4693eb::t_bd2cbac0daf7ae 143-154
+  s_716a2f2d4693eb::t_323a2a731e0d8e 721-727
+  s_716a2f2d4693eb::t_d7ff3a2a5aa840 181-184
+  s_716a2f2d4693eb::t_d95a610aa5fa7a 1194-1201
+  s_716a2f2d4693eb::t_3cde160d51c447 770-857
+  s_716a2f2d4693eb::t_2c01174390a6d0 1247-1248
+apps/pipeline-cli/tests/telemetry-upload.test.ts
+  s_716a2f2d4693eb::t_1a04b5c06eb927 1-35,37-185,223-225,227-235,237-245,247-249,252-270,300-907,990-1306
+  s_716a2f2d4693eb::t_70d8edb0213a5b 271-299
+  s_716a2f2d4693eb::t_f3c4d70b796a4e 186-222,226,236,246,250-251
+  s_716a2f2d4693eb::t_4fa216bfd78e33 908-940,965-989
+  s_716a2f2d4693eb::t_f3775e11b61057 941-964
+  s_716a2f2d4693eb::t_e3686e249489da 36
+apps/pipeline-cli/src/lib/telemetry-upload.ts
+  s_716a2f2d4693eb::t_2770772ed0e856 1-124,126-138,146-414,421-431,433-601,608-902
+  s_716a2f2d4693eb::t_b45303fd263e12 139
+  s_716a2f2d4693eb::t_6732ed31a44b31 125
+  s_716a2f2d4693eb::t_80c788883b3b57 415-420
+  s_716a2f2d4693eb::t_0356be2fc31040 432
+  s_716a2f2d4693eb::t_3831c96d658fcc 140-145
+  s_716a2f2d4693eb::t_b4f806977ed007 602-607
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "d777f352ac17132ba0c5f4df4f2a0132718b444c",
+  "prompts": {},
+  "sessions": {
+    "s_716a2f2d4693eb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "30b2d290-214d-4259-afb7-f324c8e3daac",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

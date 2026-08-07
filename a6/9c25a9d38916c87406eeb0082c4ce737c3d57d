@@ -1,0 +1,21 @@
+agents/step-executor.md
+  s_51406d0d28b20b::t_305f9e3c3c20ca 3
+.claude-plugin/plugin.json
+  s_51406d0d28b20b::t_17f56a36bc5f30 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "a69c25a9d38916c87406eeb0082c4ce737c3d57d",
+  "prompts": {},
+  "sessions": {
+    "s_51406d0d28b20b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f9972249-d31d-4fa6-adc1-317beaeb0150",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

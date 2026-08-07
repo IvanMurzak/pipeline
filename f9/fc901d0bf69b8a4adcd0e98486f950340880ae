@@ -1,0 +1,40 @@
+hooks/pipeline_ui_relay.ts
+  s_97dc321289f58c::t_175d6403e769fa 430-432
+  s_97dc321289f58c::t_e2123b6ad47736 388-398,401-404
+  s_97dc321289f58c::t_32590b7be22141 83-88
+  s_97dc321289f58c::t_0369658365a09e 405
+apps/pipeline-ui/server.ts
+  s_97dc321289f58c::t_61f0d98ab6bb57 1161
+  s_97dc321289f58c::t_a02deed97cc2c9 1107-1113
+  s_97dc321289f58c::t_9f25264fe7d698 1124-1129
+apps/pipeline-ui/supervisor.ts
+  s_97dc321289f58c::t_b49a524af88776 211-213
+  s_97dc321289f58c::t_d8ef5786f9d8b7 30-31
+  s_97dc321289f58c::t_8389fae40935f3 44-56
+  s_97dc321289f58c::t_20b21bbd3b6995 254-257
+  s_97dc321289f58c::t_bbd64c0c2f35b2 258
+  s_97dc321289f58c::t_cbedf81e51a6a4 183-185,187-194
+  s_97dc321289f58c::t_c557f137e4647e 107-172
+apps/pipeline-ui/tests/supervisor-self-update.test.ts
+  s_97dc321289f58c::t_fd2154f46db24d 1-169
+.claude-plugin/plugin.json
+  s_97dc321289f58c::t_22ac76159020b6 3
+CHANGELOG.md
+  s_97dc321289f58c::t_6deadc9ecd3026 7-35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.19",
+  "base_commit_sha": "f9fc901d0bf69b8a4adcd0e98486f950340880ae",
+  "prompts": {},
+  "sessions": {
+    "s_97dc321289f58c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f66cede4-68f5-4bb2-89cd-c39f4197b6c5",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

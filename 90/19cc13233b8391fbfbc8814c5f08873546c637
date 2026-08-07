@@ -1,0 +1,25 @@
+apps/pipeline-cli/src/commands/department.ts
+  s_a0bb4496dc79ee::t_faab72744f02a6 119,133,1155-1157,1189-1196,1201,1462-1466,1472-1486,1512-1519,1552-1557,1559,1566-1571,1620-1625,1634,1645
+apps/pipeline-cli/src/lib/department-serve.ts
+  s_a0bb4496dc79ee::t_cd415aa05acdda 612-706,717-721,738-744,935-940,969-983,993-1007,1010-1039,1041-1049,1051-1060,1067,1082-1084
+apps/pipeline-cli/tests/department-serve.test.ts
+  s_a0bb4496dc79ee::t_90416198b9e0f2 37-38,178-187,308-321,324,1115-1117,1124-1125,1164-1172,1241-1357,1670-1674,1677-1678,1697,1700-1709,1715-1813
+docs/cli.md
+  s_a0bb4496dc79ee::t_172f577f131876 11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "9019cc13233b8391fbfbc8814c5f08873546c637",
+  "prompts": {},
+  "sessions": {
+    "s_a0bb4496dc79ee": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f02f1caa-7f85-46b5-b641-d47dad00d7de",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

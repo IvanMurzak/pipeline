@@ -1,0 +1,47 @@
+CHANGELOG.md
+  s_f7f7392a09f46e::t_ec771d4d141200 1-77
+CLAUDE.md
+  s_f7f7392a09f46e::t_4279b8f648f42b 41-43
+  s_f7f7392a09f46e::t_949949daca19ff 125-127
+docs/cli.md
+  s_f7f7392a09f46e::t_d0cab8d6c80f15 9
+  s_f7f7392a09f46e::t_62fa23ca2f4741 7
+  s_f7f7392a09f46e::t_31530b49cc02f4 18
+  s_f7f7392a09f46e::t_626ba9ea670f2f 11
+  s_f7f7392a09f46e::t_db37098db74091 10
+roadmap/script-steps/DESIGN.md
+  s_f7f7392a09f46e::t_4b8b282635e254 493-495,497-498
+  s_f7f7392a09f46e::t_9d2da9ec05103c 152-177,180-186
+  s_f7f7392a09f46e::t_177d31f7446a48 496
+  s_f7f7392a09f46e::t_fd202edd384116 72-76
+  s_f7f7392a09f46e::t_90274ff35a9554 124-128,130-132
+  s_f7f7392a09f46e::t_2ffa6c0db2e334 197-201
+  s_f7f7392a09f46e::t_7e81f1884397e3 178-179
+docs/script-steps.md
+  s_f7f7392a09f46e::t_79a8b25f00a3d6 105,107
+  s_f7f7392a09f46e::t_0541dbc938ab76 190-193
+  s_f7f7392a09f46e::t_51490ce484bcc7 124-170
+  s_f7f7392a09f46e::t_2d1e5e3401158a 342,345,351
+  s_f7f7392a09f46e::t_a9bab00e3190b5 359
+  s_f7f7392a09f46e::t_9896018fbc2f69 50
+apps/pipeline-cli/package.json
+  s_f7f7392a09f46e::t_8b6f93c1cc2c5b 3
+.claude-plugin/plugin.json
+  s_f7f7392a09f46e::t_d8e00a6bf61dcc 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "c07a54516af102e7e16b7ec65fc0a4f1b0b97cc6",
+  "prompts": {},
+  "sessions": {
+    "s_f7f7392a09f46e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6d5d57f-6526-4873-9255-59c34d4f8571",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

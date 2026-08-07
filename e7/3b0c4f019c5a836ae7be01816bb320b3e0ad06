@@ -1,0 +1,19 @@
+apps/pipeline-cli/tests/hooks.test.ts
+  s_716a2f2d4693eb::t_931ab195f09c68 973-979
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "e73b0c4f019c5a836ae7be01816bb320b3e0ad06",
+  "prompts": {},
+  "sessions": {
+    "s_716a2f2d4693eb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "30b2d290-214d-4259-afb7-f324c8e3daac",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

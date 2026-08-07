@@ -1,0 +1,45 @@
+CLAUDE.md
+  s_f7f7392a09f46e::t_c6e7af7ba5a0ef 45-46
+docs/ui-subsystem.md
+  s_f7f7392a09f46e::t_ed53e1a066d68f 36
+apps/pipeline-cli/src/lib/step-transcripts.ts
+  s_f7f7392a09f46e::t_b1e35f8e60ce64 35-37
+  s_f7f7392a09f46e::t_0ffbb2a82b0c38 17-27
+apps/pipeline-cli/package.json
+  s_f7f7392a09f46e::t_efd746e6ff4032 3
+apps/pipeline-cli/tests/packed-artifact.test.ts
+  s_f7f7392a09f46e::t_545fcd2e0ecd58 110
+  s_f7f7392a09f46e::t_42af0cc0a1497b 28
+  s_f7f7392a09f46e::t_96b29a3b465b31 1-27,29-66,91,119-146
+  s_f7f7392a09f46e::t_6bb25722175a7e 67-90,92-109,111-118
+apps/pipeline-cli/src/cli.ts
+  s_f7f7392a09f46e::t_6f05b12f204677 11-12,24-47
+apps/pipeline-cli/tests/step-transcripts.test.ts
+  s_f7f7392a09f46e::t_dd84ec7b21d1f7 10
+apps/pipeline-cli/src/lib/vendor/transcript-walk.ts
+  s_296c225bd64a6f::t_c381602ebed79c 1-378
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "6b32e8c8e087ccc9eb7e8def13f7c84502218ade",
+  "prompts": {},
+  "sessions": {
+    "s_296c225bd64a6f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-af373aa047a63cf3e",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_f7f7392a09f46e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6d5d57f-6526-4873-9255-59c34d4f8571",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

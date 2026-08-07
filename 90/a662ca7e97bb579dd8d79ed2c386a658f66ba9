@@ -1,0 +1,44 @@
+hooks/analytics_relay.ts
+  s_97dc321289f58c::t_01621fc8d1a1ac 193-199
+  s_97dc321289f58c::t_318c096baae6a7 148-176
+hooks/prompt_match_relay.ts
+  s_97dc321289f58c::t_19acf9fda7c2d2 74-102
+  s_97dc321289f58c::t_283e7f6008b72a 119-125
+apps/pipeline-cli/src/lib/event.ts
+  s_97dc321289f58c::t_e0378e5c52da94 162-191
+  s_97dc321289f58c::t_7636912b0aae52 222-230
+apps/pipeline-ui/server.ts
+  s_97dc321289f58c::t_5d2daad3683493 29
+  s_97dc321289f58c::t_03ca9ac23690a7 769-776,778-781,783
+apps/pipeline-ui/tests/registry-poll-hygiene.test.ts
+  s_97dc321289f58c::t_59098561beb0fb 15
+  s_97dc321289f58c::t_648633d2774948 39-60
+.claude-plugin/plugin.json
+  s_97dc321289f58c::t_fcbbde6660eb76 3
+apps/pipeline-ui/tests/resolve-parity.test.ts
+  s_97dc321289f58c::t_c94323f008bdbf 2-3,5-10,12-14,28,32-46,48-50,52-53,55,58,74-77,96-100,113,120-121,136-177,179-189,196-199,201-216
+CHANGELOG.md
+  s_97dc321289f58c::t_9fa5571a29972b 14-16
+  s_97dc321289f58c::t_fcbbde6660eb76 7-13,17-29
+hooks/pipeline_ui_relay.ts
+  s_97dc321289f58c::t_03adaeb98394cc 113-141
+  s_97dc321289f58c::t_b4ac6b383ed113 158-164
+apps/pipeline-ui/lib.ts
+  s_97dc321289f58c::t_e00d084d9218a7 249-281,301-307,1469-1491
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "90a662ca7e97bb579dd8d79ed2c386a658f66ba9",
+  "prompts": {},
+  "sessions": {
+    "s_97dc321289f58c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f66cede4-68f5-4bb2-89cd-c39f4197b6c5",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+apps/pipeline-cli/src/lib/stats-backfill.ts
+  s_1064643bb01a9c::t_b51dea96a4bfc1 66-71,77
+apps/pipeline-cli/src/lib/vendor/transcript-walk.ts
+  s_1064643bb01a9c::t_a8cffa7e2c082a 379-454
+apps/pipeline-cli/tests/hook-stats-relay.test.ts
+  s_1064643bb01a9c::t_845c36c07037dc 154-157,160,190,195,205-255
+apps/pipeline-cli/tests/stats-backfill.test.ts
+  s_1064643bb01a9c::t_dca4e208a755b8 355,375,381-431
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f16681e941bcd9f9e8f33474590d8dbea23f6f47",
+  "prompts": {},
+  "sessions": {
+    "s_1064643bb01a9c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_1064643bb01a9c",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

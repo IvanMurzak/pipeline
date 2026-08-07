@@ -1,0 +1,45 @@
+.claude-plugin/plugin.json
+  s_1bc29285c49336::t_47165ab4539301 3-4,17-27
+CLAUDE.md
+  s_1bc29285c49336::t_70d0896cf82d8d 25,53-57,76,81,173
+README.md
+  s_1bc29285c49336::t_00954a37b933d2 25,713-715,731-769
+apps/pipeline-cli/src/cli.ts
+  s_1bc29285c49336::t_60e66f4480bee0 243-252,326-332
+apps/pipeline-cli/src/commands/mesh.ts
+  s_1bc29285c49336::t_60c12b168c8ae1 1-189
+apps/pipeline-cli/src/lib/mesh-notify.ts
+  s_1bc29285c49336::t_8bb81b06657ee2 1-397
+apps/pipeline-cli/src/lib/os-notify.ts
+  s_1bc29285c49336::t_7e0773c9387369 1-120
+apps/pipeline-cli/tests/hook-mesh-notifier.test.ts
+  s_1bc29285c49336::t_a3811ac7b974ae 1-225
+apps/pipeline-cli/tests/mesh-notify.test.ts
+  s_1bc29285c49336::t_c7978f84b84f07 1-480
+apps/pipeline-cli/tests/mesh.test.ts
+  s_1bc29285c49336::t_839f1eaffc6c84 1-189
+apps/pipeline-cli/tests/os-notify.test.ts
+  s_1bc29285c49336::t_0bdec82f8e83a3 1-82
+docs/mesh-mcp.md
+  s_1bc29285c49336::t_288adae97f1f6a 1-179
+hooks/hooks.json
+  s_1bc29285c49336::t_3bf10287aca0f6 2,39-42
+hooks/mesh_notifier_relay.ts
+  s_1bc29285c49336::t_ec2e10216ff89f 1-228
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "65c5493bb06234b7f3901647790bea3045a5bedf",
+  "prompts": {},
+  "sessions": {
+    "s_1bc29285c49336": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_1bc29285c49336",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+skills/run/SKILL.md
+  s_0437b8a8fbb7aa::t_587c7c72c8d586 58
+  s_0437b8a8fbb7aa::t_24e77a879a1bdc 163-195
+  s_0437b8a8fbb7aa::t_e017350db39d1d 136-144
+  s_0437b8a8fbb7aa::t_fe75cf657626d0 17
+  s_0437b8a8fbb7aa::t_1b18b8379b81f8 24-25
+  s_0437b8a8fbb7aa::t_f952aa5fb301a5 6
+  s_0437b8a8fbb7aa::t_1bb9bdfcbfa6f8 77
+  s_0437b8a8fbb7aa::t_3ca718b2e5c8a1 89
+.claude-plugin/plugin.json
+  s_0437b8a8fbb7aa::t_c473c7fcfa9eaf 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "dee46757a922e4b41fad7788147bde6b051dc6c9",
+  "prompts": {},
+  "sessions": {
+    "s_0437b8a8fbb7aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "aca23227-fb01-4357-947a-d2d68329d5df",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

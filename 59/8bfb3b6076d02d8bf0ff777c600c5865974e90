@@ -1,0 +1,33 @@
+agents/pipeline-disambiguator.md
+  s_0437b8a8fbb7aa::t_241d6dc9469afd 3
+apps/pipeline-cli/src/commands/release.ts
+  s_0437b8a8fbb7aa::t_e67eb03e790385 173
+agents/pipeline-designer.md
+  s_0437b8a8fbb7aa::t_0b0334007b8dd8 3
+agents/pipeline-manager.md
+  s_0437b8a8fbb7aa::t_d1112e53232aa5 3
+  s_0437b8a8fbb7aa::t_9c70a96c0216e2 91-92
+  s_0437b8a8fbb7aa::t_359735cf6aed98 190,196
+agents/pipeline-script-creator.md
+  s_0437b8a8fbb7aa::t_947ba56d66c1de 3
+agents/pipeline-improver.md
+  s_0437b8a8fbb7aa::t_d2346a262e7893 3
+.claude-plugin/plugin.json
+  s_0437b8a8fbb7aa::t_8f1572038d2bb0 3-4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "598bfb3b6076d02d8bf0ff777c600c5865974e90",
+  "prompts": {},
+  "sessions": {
+    "s_0437b8a8fbb7aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "aca23227-fb01-4357-947a-d2d68329d5df",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

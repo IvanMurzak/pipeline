@@ -1,0 +1,21 @@
+apps/pipeline-cli/tests/stats-worktree-anchor.test.ts
+  s_97dc321289f58c::t_85f1caf8241000 37-65
+  s_97dc321289f58c::t_748af9fc84e647 90,93-96,101,105,112-114,117,127-129,137-139
+  s_97dc321289f58c::t_12774590b3885e 21-22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.19",
+  "base_commit_sha": "cce37962fb47ad31bc3fa880dba257a34b05c15c",
+  "prompts": {},
+  "sessions": {
+    "s_97dc321289f58c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f66cede4-68f5-4bb2-89cd-c39f4197b6c5",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
