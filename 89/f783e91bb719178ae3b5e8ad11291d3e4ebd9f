@@ -1,0 +1,19 @@
+package.json
+  s_2e2cfcfd629bc9::t_fd8f92a823945a 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "89f783e91bb719178ae3b5e8ad11291d3e4ebd9f",
+  "prompts": {},
+  "sessions": {
+    "s_2e2cfcfd629bc9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_2e2cfcfd629bc9",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
