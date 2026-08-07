@@ -3192,7 +3192,7 @@ export async function runDepartment(args: string[]): Promise<number> {
     case 'notify':
       // a1/a11: the background department-task notifier (lib/department-notify.ts) —
       // poll/diff/journal + OS toast, normally spawned detached by
-      // hooks/department_notifier_relay.ts. Not part of 05's nine-step serve
+      // src/hooks/department-notifier-relay.ts. Not part of 05's nine-step serve
       // flow; listed here only because it is the `department` verb.
       return await runDepartmentNotify(rest);
     case undefined:

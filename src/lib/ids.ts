@@ -8,7 +8,7 @@
 //
 // This file also hosts `uuidv5()` (RFC 9562 §5.5) — a DERIVATION, not a mint.
 // It is additive, added by ux-v2 `b2`, for exactly one CLI-side caller:
-// `hooks/analytics_relay.ts`'s `bypassRunIdFromToolUseId()` needs the SAME id
+// `src/hooks/analytics-relay.ts`'s `bypassRunIdFromToolUseId()` needs the SAME id
 // out of PreToolUse and PostToolUse for one `tool_use_id`, computed twice, in
 // two separate hook invocations, with NO shared state — the one case in this
 // product where determinism beats randomness. See `hookIdFromToolUseId()`
@@ -226,7 +226,7 @@ export function newId(): string {
 // `newId()` above is the only MINT point. `uuidv5()` below is a pure
 // DERIVATION: same (name, namespace) in, same id out, forever — the opposite
 // property to `newId()`'s CSPRNG-backed uniqueness. It exists so
-// `hooks/analytics_relay.ts` can compute the SAME run id from a PreToolUse and
+// `src/hooks/analytics-relay.ts` can compute the SAME run id from a PreToolUse and
 // a PostToolUse invocation of the SAME `tool_use_id` — two separate hook
 // processes, no shared state, only the input in common (`:1028`'s rationale
 // for why the id must stay deterministic there).
@@ -304,7 +304,7 @@ export function uuidv5(name: string, namespace: string): string {
 export const NAMESPACE_TOOL_USE = '10422061-094a-4a10-a3c5-c9edc54febb4';
 
 /**
- * Deterministic id for `hooks/analytics_relay.ts`'s `bypassRunIdFromToolUseId`
+ * Deterministic id for `src/hooks/analytics-relay.ts`'s `bypassRunIdFromToolUseId`
  * — UUIDv5 of `tool_use_id` under `NAMESPACE_TOOL_USE`. NOT a mint site: it
  * exists because PreToolUse and PostToolUse are separate processes that must
  * independently compute the SAME id from the SAME `tool_use_id`, with no

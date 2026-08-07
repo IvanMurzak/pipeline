@@ -23,7 +23,7 @@
 // account ⇒ the subsystem is ABSENT, not merely inert"), and the outbox's org
 // tag drawn from the SAME non-secret source the run link is composed from.
 // Neither caller is a hot per-tool-call hook (that constraint applies only to
-// `hooks/analytics_relay.ts`), so importing the outbox chain here costs
+// `src/hooks/analytics-relay.ts`), so importing the outbox chain here costs
 // nothing neither of them wasn't already about to pay for its own reasons.
 //
 // COEXISTENCE WITH A CONCURRENTLY-RUNNING DAEMON: `drainJournal()` already

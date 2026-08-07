@@ -14,7 +14,7 @@
 // ── ONE DAEMON PER PROJECT, STARTED CHEAPLY, EXITING ON ITS OWN ────────────
 //
 // "Started cheaply" is the OTHER half of this task and it does NOT live here
-// — it lives in `hooks/analytics_relay.ts`'s `ensureTelemetryDaemonRunning`,
+// — it lives in `src/hooks/analytics-relay.ts`'s `ensureTelemetryDaemonRunning`,
 // which is called once per pipeline-manager spawn (a run's start). That is a
 // deliberate split, not an oversight:
 //
@@ -26,7 +26,7 @@
 //     daemon already running". So the hook does NOT import this file at all.
 //     It duplicates the ONE-LINE lock path formula (`telemetryDaemonLockPath`
 //     below) and implements its own copy of the acquire/reclaim/spawn
-//     sequence, exactly the way `hooks/analytics_relay.ts`'s own header
+//     sequence, exactly the way `src/hooks/analytics-relay.ts`'s own header
 //     already duplicates `submoduleWorktreeOf` from `lib/event.ts`
 //     rather than importing it — "hooks cannot import a sibling at runtime"
 //     is that file's own stated reason; the reason here is the same shape
@@ -100,7 +100,7 @@ import { recordLastFlush } from '../lib/telemetry-status';
 
 /** `<project>/.pipeline/.runtime/telemetry/daemon.lock`.
  *
- *  DUPLICATED (not imported) in `hooks/analytics_relay.ts` — see this file's
+ *  DUPLICATED (not imported) in `src/hooks/analytics-relay.ts` — see this file's
  *  header. Both copies resolve to the same path because both build it from
  *  the same three literal segments; `<superrepo>/tests/cross-repo/telemetry-daemon-lock-parity.test.ts`
  *  asserts the two functions agree on a sample path so that guarantee is
@@ -127,7 +127,7 @@ export function releaseDaemonLock(lockPath: string): void {
 
 // ---------------------------------------------------------------------------
 // Ensure-running (ux-v2 `b12`) — the headless-drive counterpart of
-// `hooks/analytics_relay.ts`'s own `ensureTelemetryDaemonRunning`.
+// `src/hooks/analytics-relay.ts`'s own `ensureTelemetryDaemonRunning`.
 //
 // WHY THIS EXISTS HERE TOO, AND WHY IT IS A SEPARATE COPY: `pipeline drive`
 // is a headless, hookless process. None of the PreToolUse/Agent-spawn
@@ -369,7 +369,7 @@ export const DEFAULT_MAX_WALL_CLOCK_MS = 30 * 60_000; // 30 minutes
  *  `releaseDaemonLock` to run) so a live, spec-compliant daemon's lock is
  *  NEVER reclaimed out from under it purely by age; age-based reclaim exists
  *  only for the pid-reuse case pid-liveness alone cannot catch. See
- *  `hooks/analytics_relay.ts`'s duplicate of this same value and
+ *  `src/hooks/analytics-relay.ts`'s duplicate of this same value and
  *  `<superrepo>/tests/cross-repo/telemetry-daemon-lock-parity.test.ts`, which pins the two equal. */
 export const LOCK_STALE_AGE_MS = DEFAULT_MAX_WALL_CLOCK_MS + 5 * 60_000; // 35 minutes
 
@@ -607,7 +607,7 @@ const USAGE =
   'Usage: pipeline telemetry-daemon --project-root <path> [--poll-interval-ms <n>]\n' +
   '           [--idle-exit-ms <n>] [--max-wall-clock-ms <n>] [--once]\n' +
   '  The detached telemetry uploader for ONE project (ux-v2 b11). Not meant to\n' +
-  '  be run by hand — spawned detached by hooks/analytics_relay.ts, which holds\n' +
+  '  be run by hand — spawned detached by src/hooks/analytics-relay.ts, which holds\n' +
   '  the `wx` single-instance lock BEFORE spawning. Polls `flushOnce()`\n' +
   '  (lib/telemetry-upload.ts) on an interval and exits on its own once the\n' +
   '  queue has been idle for --idle-exit-ms or --max-wall-clock-ms has elapsed,\n' +

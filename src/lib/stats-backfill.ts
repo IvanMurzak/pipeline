@@ -33,7 +33,7 @@
 //     manager transcript by run_id (`findTranscriptByRunId`) and fold it +
 //     its in-window subagents (`foldRunStatsFromTranscript`,
 //     lib/vendor/transcript-walk.ts) — the exact walk the pre-refactor
-//     stats_relay hook used inline.
+//     stats-relay hook used inline.
 //   - `transcriptHint` + `hintMode:'always'` overrides BOTH branches: every
 //     in-window tokens-null record is folded against the hint, regardless of
 //     `runner` — byte-compatible with the pre-refactor SubagentStop relay,

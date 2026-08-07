@@ -5,7 +5,7 @@
 // best-effort OS-level toast (../lib/os-notify.ts) for every newly-detected
 // INPUT_REQUIRED/AUTH_REQUIRED or terminal transition, alongside writing it
 // to the durable pending-notification journal that
-// hooks/department_notifier_relay.ts drains at the next SessionStart (any
+// src/hooks/department-notifier-relay.ts drains at the next SessionStart (any
 // project — department tasks are org-scoped, not project-scoped).
 //
 // RENAME NOTE (a11, simplified-onboarding — 08-terminology.md / D10 / D31):
@@ -15,7 +15,7 @@
 // definitions and scripts written against `pipeline mesh notify` keep
 // working; it is deliberately not listed in `cli.ts`'s `--help`.
 //
-// Normally spawned DETACHED by hooks/department_notifier_relay.ts, not run
+// Normally spawned DETACHED by src/hooks/department-notifier-relay.ts, not run
 // interactively — but every path here also works standalone for `--once`
 // smoke-testing (`pipeline department notify --once --json`) and manual
 // debugging.

@@ -2,14 +2,17 @@
 // pipeline — the unified Claude-Pipeline CLI.
 //
 // Commands: `plan`, `match`, `event`, `route`, `next`, `gc`, `ci-wait`,
-// `logs`, `fix`.
+// `logs`, `fix`, `hook`.
 // Each is a deterministic, LLM-free computation the agents shell out to
 // instead of doing in-context — keeping per-iteration token cost near zero.
 // (`logs` is a read-only terminal tail of the event journal and `gc` a git
 // worktree/branch janitor, rather than pure computations. `fix` and `drive`
 // are the two exceptions that SPAWN A CLAUDE SESSION against the user's
 // files — see their own headers for the trust level that makes that
-// defensible.)
+// defensible. `hook` is the odd one out in a different direction: it is not
+// called by an agent at all, but by the Pipeline plugin's hooks.json through
+// hooks/run-hook.sh — the five Claude Code hook relays live here since
+// plugin-thin `p6`, so a hook's version is this CLI's version.)
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -381,9 +384,20 @@ function usage(): string {
     '      Detached per-project telemetry uploader (ux-v2 b11): polls `flushOnce`',
     '      (lib/telemetry-upload.ts) and exits on its own once the queue has been',
     '      idle for --idle-exit-ms or --max-wall-clock-ms has elapsed, whichever',
-    '      is first. Not meant to be run by hand — hooks/analytics_relay.ts',
-    '      spawns it detached, holding a `wx`-locked single-instance guard',
-    '      BEFORE spawning. --once runs a single poll cycle and exits.',
+    '      is first. Not meant to be run by hand — `pipeline hook',
+    '      analytics-relay` spawns it detached, holding a `wx`-locked',
+    '      single-instance guard BEFORE spawning. --once runs a single poll',
+    '      cycle and exits.',
+    '',
+    '  hook <name>',
+    '      Run ONE Claude Code hook relay: analytics-relay · stats-relay ·',
+    '      session-relay · department-notifier-relay · prompt-match-relay.',
+    "      Reads the hook's JSON payload on stdin, writes any hook output on",
+    '      stdout, and ALWAYS exits 0 — a relay must never block the session it',
+    '      observes. Not meant to be run by hand: the Pipeline plugin registers',
+    '      these in hooks/hooks.json and invokes them through hooks/run-hook.sh,',
+    '      which resolves this binary for the non-interactive shell Claude Code',
+    '      runs hooks in. Exit 0 always (2 on an unknown/missing name).',
     '',
     '  step run <iteration.md> [--param <name>=<value> ...]',
     '           [--var NAME=value ...] [--vars-file <path>] [--json]',
@@ -497,9 +511,17 @@ async function main(argv: string[]): Promise<number> {
       // Lazy import (mirrors `cloud`/`department`): pulls in the outbox/upload
       // machinery (and, through it, vendor/privacy.ts) — keep the hot `next`
       // loop's per-spawn startup cost unchanged. This command is normally
-      // spawned detached by hooks/analytics_relay.ts, never run inline.
+      // spawned detached by src/hooks/analytics-relay.ts, never run inline.
       const { runTelemetryDaemon } = await import('./commands/telemetry-daemon');
       return runTelemetryDaemon(rest);
+    }
+    case 'hook': {
+      // Lazy import, and then a SECOND lazy import inside `runHook` — one per
+      // relay. `analytics-relay` fires on nearly every tool call Claude Code
+      // makes, so it must not load the BM25 matcher or the credential store
+      // just to reach its own dispatcher. See commands/hook.ts's header.
+      const { runHook } = await import('./commands/hook');
+      return runHook(rest);
     }
     case 'step':
       return runStep(rest);

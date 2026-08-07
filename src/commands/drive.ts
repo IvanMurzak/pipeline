@@ -1284,7 +1284,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
   // feature's ≤15ms budget is measured against pays nothing beyond this one
   // env read) and THEN on a connected project (`03` F7: no `.pipeline/
   // cloud.json` at all ⇒ no line, nothing spawned, nothing queued — the
-  // telemetry subsystem is ABSENT here, matching `hooks/analytics_relay.ts`'s
+  // telemetry subsystem is ABSENT here, matching `src/hooks/analytics-relay.ts`'s
   // OWN "no cloud account" gate exactly, so drive agrees with the hook about
   // what "has a cloud account" means rather than inventing a second notion).
   const telemetrySyncOn = telemetrySyncEnabled(process.env);
@@ -1363,7 +1363,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
    *  Every headless spawn below pins its own session UUID and passes it as
    *  `claude --session-id` (or `--resume`). Claude Code hands that same value to
    *  every hook that fires INSIDE the child, so a record keyed by it lets
-   *  `resolveBindingFromEnvOrSession` (hooks/analytics_relay.ts) name the run
+   *  `resolveBindingFromEnvOrSession` (src/hooks/analytics-relay.ts) name the run
    *  AND the step for a `tool.called` / `turn.usage` / `manager.stopped` that
    *  the hook itself has no other way to attribute. Before this, those events
    *  stamped `run_id: null` on the whole driven path: `PIPELINE_RUN_ID` is

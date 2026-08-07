@@ -582,7 +582,7 @@ export function runLogsChat(runId: string, opts: LogsArgs, homeOverride?: string
 // ---------------------------------------------------------------------------
 
 /** Read bytes [from, to) from a file via a positioned read (no whole-file load
- *  on each follow tick). Mirrors analytics_relay.ts:readTail. */
+ *  on each follow tick). Mirrors analytics-relay.ts:readTail. */
 function readRange(path: string, from: number, to: number): string {
   const len = to - from;
   if (len <= 0) return '';
