@@ -24,11 +24,22 @@
 //       - wire#7:  raw absolute path at payload.data.iteration_path
 //       - wire#12: raw absolute path at payload.data.iteration_path
 //
-// NEGATIVE CONTROL. Every assertion here is red on `main`. `pipeline-outbox`'s
-// own pre-`b22` behaviour is reproduced in the last describe block by calling
-// the vendored filter DIRECTLY, with no scrub — so this file also demonstrates,
-// in the same run, that the check it applies really does catch the defect and
-// is not vacuous.
+// NON-VACUITY. The last describe block applies the SAME check to the RAW
+// production journal, before any filtering, and pins the exact four findings
+// `i1` reported — so this file demonstrates, in the same run, that the check it
+// applies really does catch the defect and is not vacuous.
+//
+// ── ux-v2 `b23` ─────────────────────────────────────────────────────────────
+//
+// `b22` closed this by COMPOSING `src/lib/path-privacy.ts` over the vendored
+// filter at the outbox and wire seams, because its specification required the
+// rule to land upstream first. `b23` landed it in `pipeline-runner`, re-vendored
+// the filter, and DELETED that module. Nothing about the machinery under test
+// changed — same outbox, same uploader, same production bytes — but the scrub is
+// now the FILTER'S OWN, which is why `SG4_PATH_RE` is imported from
+// `vendor/privacy` below and why the control block at the bottom was rewritten:
+// it used to reproduce the leak by calling the vendored filter directly, and
+// calling the vendored filter directly IS the fix now.
 
 import { afterAll, describe, expect, test } from 'bun:test';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
@@ -46,8 +57,7 @@ import {
   type UploadRequest,
   type UploadTarget,
 } from '../src/lib/telemetry-upload';
-import { SG4_PATH_RE } from '../src/lib/path-privacy';
-import { filterEventForTier } from '../src/lib/vendor/privacy';
+import { SG4_PATH_RE, filterEventForTier } from '../src/lib/vendor/privacy';
 
 // ---------------------------------------------------------------------------
 // The production bytes
@@ -377,24 +387,53 @@ describe('b22 §2b — the rule holds on `b21`\'s run-exit STATS path too', () =
 });
 
 // ---------------------------------------------------------------------------
-// The control: the same bytes with the scrub removed
+// The control: the check, applied to the RAW production journal
 // ---------------------------------------------------------------------------
 
-describe('b22 §2 control — the SAME check, applied to the pre-`b22` filter, FAILS', () => {
-  test('the vendored allowlist alone leaves all four production findings in place', () => {
-    // This is exactly what `TelemetryOutbox.filterPayload` did before `b22`:
-    // the vendored filter, and nothing after it.
+describe('b22 §2 control — the SAME check finds the defect in the raw production bytes', () => {
+  test('the unfiltered journal carries exactly the four findings i1 reported, plus the envelope roots', () => {
+    // Non-vacuity, without needing a broken filter on hand to compare against.
+    //
+    // Before `b23` this block called `filterEventForTier` directly to reproduce
+    // `TelemetryOutbox.filterPayload`'s pre-`b22` behaviour — the allowlist with
+    // nothing after it. That is no longer the pre-fix behaviour: the scrub is
+    // INSIDE the filter now, so calling it directly is calling the fix. What the
+    // block was really asserting is that these four fields carried absolute
+    // paths and that this check sees them, so it asserts exactly that, against
+    // the bytes.
+    //
+    // The four `data` findings are the ones `keep` copied VERBATIM, which is why
+    // they reached production. The five `project_root`s beside them were ALWAYS
+    // fingerprinted — same payloads, same filter, two dispositions, and only one
+    // of them was ever looked at. That is why a spot check passed.
+    const findings = productionJournal().flatMap((e, i) => sg4Findings(e, `raw#${i + 1}`));
+    const inData = findings.filter((f) => f.includes('payload.data.'));
+    const inEnvelope = findings.filter((f) => f.includes('payload.project_root'));
+    console.log(
+      `\n[b22 §2 control — the RAW journal, unfiltered]\nSG4: ${findings.length} problem(s)\n  - ${findings.join('\n  - ')}\n`,
+    );
+    expect(inData).toHaveLength(4); // wire#6 twice, #7 once, #12 once — the i1 count
+    expect(inEnvelope).toHaveLength(5); // one per envelope, and always fingerprinted
+    expect(findings.every((f) => f.includes(PROD_ACCOUNT))).toBe(true);
+    expect(inData.filter((f) => f.includes('next_iteration_path'))).toHaveLength(1);
+    expect(inData.filter((f) => f.includes('.iteration_path'))).toHaveLength(3);
+  });
+
+  test('…and the vendored filter ALONE — nothing composed over it — clears every one of them', () => {
+    // The proof that `b23` MOVED the rule rather than duplicating it: nothing is
+    // layered over `filterEventForTier` here, and there is nothing left to
+    // layer. Before `b23` this exact call produced the four findings above.
     const findings = productionJournal().flatMap((e, i) =>
-      sg4Findings(filterEventForTier(e, 'metadata', { fingerprintSalt: TEST_SALT }), `unfixed#${i + 1}`),
+      sg4Findings(filterEventForTier(e, 'metadata', { fingerprintSalt: TEST_SALT }), `filtered#${i + 1}`),
     );
     console.log(
-      `\n[b22 §2 control — filter WITHOUT the scrub]\nSG4: ${findings.length} problem(s)\n  - ${findings.join('\n  - ')}\n`,
+      `\n[b23 — the vendored filter alone]\n` +
+        (findings.length === 0
+          ? 'SG4: PASS — no prohibited field found'
+          : `SG4: ${findings.length} problem(s)\n  - ${findings.join('\n  - ')}`) +
+        '\n',
     );
-    // The i1 count, reproduced exactly: #6 twice, #7 once, #12 once.
-    expect(findings).toHaveLength(4);
-    expect(findings.every((f) => f.includes(PROD_ACCOUNT))).toBe(true);
-    expect(findings.filter((f) => f.includes('next_iteration_path'))).toHaveLength(1);
-    expect(findings.filter((f) => f.includes('.iteration_path'))).toHaveLength(3);
+    expect(findings).toEqual([]);
   });
 });
 

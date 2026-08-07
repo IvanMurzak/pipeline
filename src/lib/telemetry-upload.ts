@@ -137,7 +137,6 @@ import {
 } from './cloud-config';
 import { ensureFreshCredential, type FetchLike, type RefreshDeps } from './credential-refresh';
 import { telemetryDir, telemetrySyncEnabled, type OutboxRecord, type TelemetryOutbox } from './telemetry-outbox';
-import { scrubFilteredPayload } from './path-privacy';
 import {
   filterEventForTier,
   fingerprintString,
@@ -377,22 +376,29 @@ export interface TelemetryUploaderOptions {
  * for it is exactly `fingerprintString(thatValue, salt)`. Any other difference
  * — a dropped field, a placeholder, a truncation — stands.
  *
- * ── SG4 (`b22`) ────────────────────────────────────────────────────────────
+ * ── SG4 (`b22` → `b23`) ─────────────────────────────────────────────────────
  *
- * The path scrub (`lib/path-privacy.ts`) runs LAST, at the metadata tier, over
- * the restored payload — so the bytes that reach `JSON.stringify` are the ones
- * it approved. It runs here as well as in `b9`'s `filterPayload` for exactly
- * the reason the allowlist does: this function is the last thing between a
- * payload and the socket, and a record that reached the queue file by some
- * other route (a hand-edited queue, an older CLI's queue drained by a newer
- * one, `statsEnvelope`'s freshly-built envelope, which never passed through
- * the outbox filter at all) must not be trusted to have been scrubbed already.
- * It is idempotent: a relativized value is not absolute, and a `fp:<hash>` is
- * not path-shaped, so the second pass is a no-op over the first.
+ * SG4 — no absolute machine path and no OS account name on the wire, whatever
+ * field carries it — is now enforced INSIDE `filterEventForTier`, so it applies
+ * here for exactly the reason the allowlist does: this function is the last
+ * thing between a payload and the socket, and a record that reached the queue
+ * file by some other route (a hand-edited queue, an older CLI's queue drained
+ * by a newer one, `statsEnvelope`'s freshly-built envelope, which never passed
+ * through the outbox filter at all) must not be trusted to have been scrubbed
+ * already. The rule is idempotent by construction — a relativized value is not
+ * absolute, and a `fp:<hash>` is not path-shaped — so the second pass is a
+ * no-op over the first.
  *
- * `roots` is what the caller knows that the payload no longer does — by the
- * time a record is read back off the queue, its `project_root` is already a
- * fingerprint.
+ * `b22` composed that rule over the filter from here, in `lib/path-privacy.ts`,
+ * because its specification required the fix to land upstream first and this
+ * package may not edit a byte-identical vendored copy. `b23` landed it in
+ * `pipeline-runner`, re-vendored the copy, and deleted the composition.
+ *
+ * `roots` survives that deletion, and is not a second rule: it is what the
+ * CALLER knows that the payload no longer does — by the time a record is read
+ * back off the queue, its `project_root` is already a fingerprint and names
+ * nothing, so without this the filter would fingerprint a path it could have
+ * relativized.
  */
 export function filterForWire(
   payload: Record<string, unknown>,
@@ -400,10 +406,8 @@ export function filterForWire(
   salt: string,
   roots: readonly (string | null | undefined)[] = [],
 ): Record<string, unknown> {
-  const filtered = filterEventForTier(payload, tier, { fingerprintSalt: salt });
-  const restored = undoDoubleFingerprint(payload, filtered, salt) as Record<string, unknown>;
-  if (tier !== 'metadata') return restored;
-  return scrubFilteredPayload(restored, payload, { fingerprintSalt: salt, extraRoots: roots });
+  const filtered = filterEventForTier(payload, tier, { fingerprintSalt: salt, pathRoots: roots });
+  return undoDoubleFingerprint(payload, filtered, salt) as Record<string, unknown>;
 }
 
 function undoDoubleFingerprint(before: unknown, after: unknown, salt: string): unknown {
