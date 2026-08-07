@@ -331,10 +331,12 @@ describe('vendored privacy filter — tier resolution (fail-closed)', () => {
 
 describe('vendored privacy filter — v5 step-key rename', () => {
   // `step_name` (v5) replaced `step_id` (v4) as the iteration events' step
-  // identity. Both must survive the metadata tier: the tier's own doc calls
-  // pipeline-RELATIVE step identity metadata, and the product's per-step
-  // dashboards are built on it. Allowlisting only the new name would silently
-  // strip the identity out of every journal written before the rename.
+  // identity. Both must survive the metadata tier: step identity is metadata
+  // the product's per-step dashboards are built on. Allowlisting only the new
+  // name would silently strip the identity out of every journal written before
+  // the rename. (`b23`: a step NAME is a name, not a path — it is not
+  // path-shaped and the SG4 scrub does not touch it. The step's PATH is covered
+  // in the SG4 section at the bottom of this file.)
   test.each(['iteration.started', 'iteration.resumed', 'iteration.completed'])(
     '%s keeps BOTH step_name (v5) and step_id (v4) at metadata tier',
     (type) => {
