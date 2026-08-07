@@ -12,7 +12,7 @@
 // after the run, which a late write would also satisfy.
 //
 // The READ half (the hook recovering { run_id, step_uuid } from this record)
-// lives in apps/pipeline-cli/tests/hook-step-binding.test.ts, which also
+// lives in <superrepo>/tests/cross-repo/hook-step-binding.test.ts, which also
 // round-trips this writer against the hook.
 
 import { test, expect, afterEach } from 'bun:test';

@@ -32,7 +32,7 @@
 //     is that file's own stated reason; the reason here is the same shape
 //     (keep a hot path's import graph light), applied to a heavier
 //     dependency (this whole module, not a single function).
-//   - `tests/telemetry-daemon-lock-parity.test.ts` pins the ONE constant that
+//   - `<superrepo>/tests/cross-repo/telemetry-daemon-lock-parity.test.ts` pins the ONE constant that
 //     must not drift between the two copies — `LOCK_STALE_AGE_MS` — by
 //     importing both this module and the hook and asserting equality, so a
 //     future edit to either side that forgets the other fails a test instead
@@ -102,7 +102,7 @@ import { recordLastFlush } from '../lib/telemetry-status';
  *
  *  DUPLICATED (not imported) in `hooks/analytics_relay.ts` — see this file's
  *  header. Both copies resolve to the same path because both build it from
- *  the same three literal segments; `tests/telemetry-daemon-lock-parity.test.ts`
+ *  the same three literal segments; `<superrepo>/tests/cross-repo/telemetry-daemon-lock-parity.test.ts`
  *  asserts the two functions agree on a sample path so that guarantee is
  *  checked, not just asserted in prose. */
 export function telemetryDaemonLockPath(projectRoot: string): string {
@@ -149,9 +149,9 @@ export function releaseDaemonLock(lockPath: string): void {
 // reclaimed on a dead pid (immediate) or once it outlives `LOCK_STALE_AGE_MS`
 // (the pid-reuse defense). `tests/telemetry-daemon-ensure.test.ts` exercises
 // the race + reclaim directly against this copy; the hook's own copy is
-// proven by `apps/pipeline-cli/tests/hook-telemetry-daemon-lock*.test.ts`, and
+// proven by `<plugin-root>/tests/hook-telemetry-daemon-lock*.test.ts`, and
 // the ONE constant both copies must agree on is pinned by
-// `tests/telemetry-daemon-lock-parity.test.ts` above.
+// `<superrepo>/tests/cross-repo/telemetry-daemon-lock-parity.test.ts` above.
 // ---------------------------------------------------------------------------
 
 interface DaemonLockRecord {
@@ -225,7 +225,7 @@ export type DaemonAcquireResult =
  *  read taken immediately before its own unlink+retry. Exported for
  *  `tests/telemetry-daemon-ensure.test.ts` — the race and the stale-lock
  *  reclaim are proven directly against a real filesystem, mirroring
- *  `apps/pipeline-cli/tests/hook-telemetry-daemon-lock.test.ts`'s coverage of
+ *  `<plugin-root>/tests/hook-telemetry-daemon-lock.test.ts`'s coverage of
  *  the hook's own copy. */
 export function acquireDaemonLock(lockPath: string, now: number, selfPid: number): DaemonAcquireResult {
   const snapshot = readDaemonLockRecord(lockPath);
@@ -370,7 +370,7 @@ export const DEFAULT_MAX_WALL_CLOCK_MS = 30 * 60_000; // 30 minutes
  *  NEVER reclaimed out from under it purely by age; age-based reclaim exists
  *  only for the pid-reuse case pid-liveness alone cannot catch. See
  *  `hooks/analytics_relay.ts`'s duplicate of this same value and
- *  `tests/telemetry-daemon-lock-parity.test.ts`, which pins the two equal. */
+ *  `<superrepo>/tests/cross-repo/telemetry-daemon-lock-parity.test.ts`, which pins the two equal. */
 export const LOCK_STALE_AGE_MS = DEFAULT_MAX_WALL_CLOCK_MS + 5 * 60_000; // 35 minutes
 
 // ---------------------------------------------------------------------------

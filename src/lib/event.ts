@@ -178,7 +178,7 @@ export interface ResolvedRoot {
  *
  *  This is the CANONICAL copy of submoduleWorktreeOf — this package publishes
  *  standalone to npm and cannot import a sibling app at runtime.
- *  apps/pipeline-cli/tests/resolve-parity.test.ts fails on drift. */
+ *  <superrepo>/tests/cross-repo/resolve-parity.test.ts fails on drift. */
 function submoduleWorktreeOf(commonDir: string): string | null {
   try {
     const config = readFileSync(join(commonDir, 'config'), 'utf-8');

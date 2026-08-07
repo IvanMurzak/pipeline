@@ -417,7 +417,7 @@ describe('the --target=node bundle', () => {
 //
 // `uuidv5` is additive: it exists so `hooks/analytics_relay.ts` can derive a
 // DETERMINISTIC id from `tool_use_id` (see `hookIdFromToolUseId` below and
-// `tests/hook-bypass-id-determinism.test.ts` for the
+// `<plugin-root>/tests/hook-bypass-id-determinism.test.ts` for the
 // cross-PROCESS version of the determinism check — calling a function twice
 // in one test process proves less than it looks like it proves).
 //
@@ -538,7 +538,7 @@ describe('hookIdFromToolUseId (hooks/analytics_relay.ts bypassRunIdFromToolUseId
   // NOTE: the test that actually matters for the DoD — "a PreToolUse/
   // PostToolUse pair for the same tool_use_id still resolves to the same
   // id" across two SEPARATE PROCESSES with no shared state — lives in
-  // apps/pipeline-cli/tests/hook-bypass-id-determinism.test.ts. A same-process
+  // <plugin-root>/tests/hook-bypass-id-determinism.test.ts. A same-process
   // determinism test (above) is necessary but not sufficient: it would pass
   // even if the real hook relied on in-process module state that does not
   // survive across the two independent hook invocations Claude Code performs.

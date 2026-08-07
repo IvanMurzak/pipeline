@@ -5,7 +5,7 @@
 // The lock ACQUIRE/reclaim scheme itself — the atomic `wx` race fix and its
 // stale-lock reclamation — lives in `hooks/analytics_relay.ts`
 // (`ensureTelemetryDaemonRunning` / `acquireTelemetryDaemonLock`), tested in
-// `apps/pipeline-cli/tests/hook-telemetry-daemon-lock.test.ts` (that file also
+// `<plugin-root>/tests/hook-telemetry-daemon-lock.test.ts` (that file also
 // carries the mutation check for the race fix). This file covers everything
 // downstream of "a daemon process now exists": the pure idle/wall-clock loop
 // (`runTelemetryDaemonLoop`), one real poll cycle (`pollProjectOnce`), the
@@ -210,7 +210,7 @@ describe('documented bounds', () => {
     expect(DEFAULT_MAX_WALL_CLOCK_MS).toBe(30 * 60_000);
     // The hook's stale-reclaim bound must sit comfortably above the
     // daemon's own wall-clock cap — see hooks/analytics_relay.ts and
-    // tests/telemetry-daemon-lock-parity.test.ts.
+    // <superrepo>/tests/cross-repo/telemetry-daemon-lock-parity.test.ts.
     expect(LOCK_STALE_AGE_MS).toBe(DEFAULT_MAX_WALL_CLOCK_MS + 5 * 60_000);
   });
 });
