@@ -542,6 +542,15 @@ const SECRETS = {
   questionContext: 'SECRET_CONTEXT_the-diff-touches-billing.ts-lines-40-90',
   absolutePath: 'C:/Users/ivan/very-secret-client-project',
   worktreePath: 'C:/Users/ivan/very-secret-client-project/.worktrees/run-1',
+  // `b23`: absolute paths planted in `keep`-CLASSIFIED fields. This scan had
+  // the same blind spot every other copy of it did — every absolute path it
+  // planted went into a field the allowlist already FINGERPRINTS, and
+  // `iteration_path` was planted already-relative. `filterForWire` is the last
+  // thing between a payload and the socket, so it is exactly where a
+  // hand-planted queue record has to be caught.
+  keepFieldPathInRoot: 'C:/Users/ivan/very-secret-client-project/.pipeline/release/steps/03-review.md',
+  keepFieldPathOffRoot: 'C:/Users/ivan/Documents/another-client/hand-off.md',
+  statsStepPath: 'C:/Users/ivan/very-secret-client-project/.pipeline/release/steps/02-build.md',
   toolArgs: 'SECRET_TOOL_ARGS_rm -rf /var/secrets --force',
   toolOutput: 'SECRET_TOOL_OUTPUT_stdout-dump-with-customer-data',
   errorExcerpt: 'SECRET_ERROR_EXCERPT_stack-trace-with-code-and-paths',
@@ -575,7 +584,9 @@ function hostileEnvelope(type: string, runId: string, data: Record<string, unkno
  */
 function plantHostileQueue(root: string, org = 'acme'): void {
   const payloads: Array<{ kind: 'event' | 'stats'; payload: Record<string, unknown> }> = [
-    { kind: 'event', payload: hostileEnvelope('iteration.completed', 'run-a', { iteration_path: 'steps/03-review.md', outcome: 'completed', prompt: SECRETS.prompt, file_content: SECRETS.apiKey }) },
+    { kind: 'event', payload: hostileEnvelope('iteration.completed', 'run-a', { iteration_path: SECRETS.keepFieldPathInRoot, next_iteration_path: SECRETS.keepFieldPathOffRoot, outcome: 'completed', prompt: SECRETS.prompt, file_content: SECRETS.apiKey }) },
+    // …and the same field ALREADY RELATIVE, which must survive untouched.
+    { kind: 'event', payload: hostileEnvelope('improver.completed', 'run-a', { iteration_path: 'steps/03-review.md', applied: false }) },
     { kind: 'event', payload: hostileEnvelope('awaiting_input', 'run-a', { run_id: 'run-a', iteration: 3, question_id: 'q-77', question: { text: SECRETS.questionText, context: SECRETS.questionContext, options: ['yes'] } }) },
     { kind: 'event', payload: hostileEnvelope('tool.called', 'run-a', { tool_name: 'Bash', success: true, tool_use_id: 't-1', args: SECRETS.toolArgs, output: SECRETS.toolOutput }) },
     { kind: 'event', payload: hostileEnvelope('worktree.created', 'run-b', { ok: false, worktree_path: SECRETS.worktreePath, detail: SECRETS.hookDetail }) },
@@ -592,8 +603,10 @@ function plantHostileQueue(root: string, org = 'acme'): void {
         outcome: 'halted',
         halt_reason: 'build failed',
         project_root: SECRETS.absolutePath,
-        failures: [{ ts: '2026-08-05T12:00:00.000Z', tool: 'Bash', step: '02-build', error: SECRETS.errorExcerpt }],
-        steps: [{ id: '01-plan', outcome: 'completed', notes: SECRETS.prompt }],
+        // `b23`: `failures[].step` and `steps[].id` are `keep`-classified and
+        // NOT `*_path`-named, so no field-name rule would ever reach them.
+        failures: [{ ts: '2026-08-05T12:00:00.000Z', tool: 'Bash', step: SECRETS.statsStepPath, error: SECRETS.errorExcerpt }],
+        steps: [{ id: SECRETS.statsStepPath, outcome: 'completed', notes: SECRETS.prompt }],
       },
     },
   ];
@@ -634,7 +647,7 @@ describe('upload — ON-WIRE BYTE SCAN: no prohibited field appears in any reque
     const cap = captureFetch(200);
     const result = await uploader(root, { fetch: cap.fetch }).flushOnce();
 
-    expect(result.records_sent).toBe(8);
+    expect(result.records_sent).toBe(9);
     expect(cap.requests.length).toBeGreaterThan(0);
     scanWire(cap.requests, 'on-wire byte scan (planted straight into the queue file)');
 
@@ -647,20 +660,41 @@ describe('upload — ON-WIRE BYTE SCAN: no prohibited field appears in any reque
 
     // NOT VACUOUS: the metadata the product runs on really did survive.
     const all = cap.requests.flatMap((r) => (JSON.parse(r.body) as { events: Array<{ seq: number; payload: Record<string, unknown> }> }).events);
-    expect(all.length).toBe(8);
+    expect(all.length).toBe(9);
     const byType = new Map(all.map((e) => [String(e.payload.type), e.payload]));
     expect((byType.get('tool.called')!.data as Record<string, unknown>).tool_name).toBe('Bash');
     expect((byType.get('awaiting_input')!.data as Record<string, unknown>).question_id).toBe('q-77');
     expect(byType.get('chat.message')!.data).toEqual({});
     expect(byType.get('tool.called')!.project_root).toMatch(/^fp:[0-9a-f]{16}$/);
+    // `b23`: an ALREADY-RELATIVE step label survives the wire filter untouched…
+    expect((byType.get('improver.completed')!.data as Record<string, unknown>).iteration_path).toBe(
+      'steps/03-review.md',
+    );
+    // …while the ABSOLUTE ones planted beside it do not reach the wire. These
+    // records were hand-planted into the queue, unfiltered, so their envelope
+    // still names its raw `project_root`: the path under it is RELATIVIZED (the
+    // label survives), and the one under no root at all fails CLOSED to a
+    // fingerprint. Both dispositions, in one payload, from the last function
+    // between a payload and the socket.
+    const completed = byType.get('iteration.completed')!.data as Record<string, unknown>;
+    expect(completed.iteration_path).toBe('.pipeline/release/steps/03-review.md');
+    expect(completed.next_iteration_path).toMatch(/^fp:[0-9a-f]{16}$/);
     // The stats record arrived as the envelope the control plane derives from.
     const stats = byType.get('stats.run_record')!;
     expect((stats.data as Record<string, unknown>).outcome).toBe('halted');
-    expect(((stats.data as Record<string, unknown>).failures as Array<Record<string, unknown>>)[0]).toEqual({
-      ts: '2026-08-05T12:00:00.000Z',
-      tool: 'Bash',
-      step: '02-build',
-    });
+    const failure = ((stats.data as Record<string, unknown>).failures as Array<Record<string, unknown>>)[0]!;
+    expect(failure.ts).toBe('2026-08-05T12:00:00.000Z');
+    expect(failure.tool).toBe('Bash');
+    // `failures[].step` and `steps[].id` are `keep`-classified and NEITHER is
+    // `*_path`-named, so no field-name rule would ever have reached them — and
+    // both are scrubbed anyway, because the rule is about the value's SHAPE
+    // (`b23`). This planted record carries its own `project_root`, so they
+    // relativize against it rather than fingerprinting; either way the raw path
+    // is gone, which is what the byte scan above independently confirms.
+    expect(failure.step).toBe('.pipeline/release/steps/02-build.md');
+    expect((stats.data as Record<string, unknown>).steps).toEqual([
+      { id: '.pipeline/release/steps/02-build.md', outcome: 'completed' },
+    ]);
   });
 
   test('the same corpus arriving the REAL way (b9 drains the journal) is equally clean', async () => {
