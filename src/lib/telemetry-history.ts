@@ -46,18 +46,25 @@
 // already-shipped record is a harmless replay: the server's revision guard
 // (`03` F3 — "(run_id, seq) dedup plus the revision guard make replay a
 // no-op") no-ops an equal-or-older revision regardless of the fresh `seq`
-// a second enqueue assigns it, and every history record ships at the implicit
-// revision 1 (never set explicitly here).
+// a second enqueue assigns it. Since ux-v2 `b21` the revision is set
+// EXPLICITLY here, from the record's own completeness
+// (`telemetry-ship.ts#runRecordRevision`) rather than left implicit at 1 — a
+// re-scan of the same record therefore recomputes the same number (replay is
+// still a no-op) while an ENRICHED record can still supersede the
+// revision-1 snapshot the run-exit ship queued when the run finished.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { findRunsFiles, parseRunRecords, type RunRecord } from './stats';
 import type { OutboxRecord } from './telemetry-outbox';
+import { RUN_RECORD_ORIGIN_LOCAL, runRecordRevision } from './telemetry-ship';
 
 /** `RunRecordStatsSchema.origin`'s `"local"` value (protocol D18) — a run that
  *  started on THIS machine, as opposed to the absent-default `"dispatched"`
- *  (cloud-dispatched). Every record this module enqueues carries it. */
-export const HISTORY_ORIGIN = 'local';
+ *  (cloud-dispatched). Every record this module enqueues carries it.
+ *  Re-exported from `telemetry-ship.ts` (ux-v2 `b21`) so the history scan and
+ *  the run-exit ship cannot drift apart on the tag they send. */
+export const HISTORY_ORIGIN = RUN_RECORD_ORIGIN_LOCAL;
 
 /** `<project>/.pipeline/.stats` — the tree `findHistoryRecords` walks. Mirrors
  *  `lib/stats.ts:statsLocation`'s own `.pipeline/.stats` anchor, but computed
@@ -127,7 +134,17 @@ export function enqueueHistoryRecords(
   let enqueued = 0;
   for (const entry of entries) {
     try {
-      const rec = enqueue({ ...entry.record, origin: HISTORY_ORIGIN });
+      const rec = enqueue({
+        ...entry.record,
+        origin: HISTORY_ORIGIN,
+        // ux-v2 `b21`: the SAME content-derived revision the run-exit ship
+        // stamps. Without it every history record ships at the implicit 1, so
+        // an ENRICHED record re-discovered by a later `cloud connect` is
+        // refused by `applyRunStats`'s compare-and-swap on a run whose
+        // revision-1 finalize ship already landed — and its tokens would never
+        // arrive by any route.
+        revision: runRecordRevision(entry.record as unknown as Record<string, unknown>),
+      });
       if (rec) enqueued++;
     } catch {
       // One record's failure — real (a disk fault) or injected (a test) —
