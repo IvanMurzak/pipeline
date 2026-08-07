@@ -21,6 +21,18 @@
 // off disk AS BYTES and scans for each planted value. Modelled on `e1`'s
 // conformance test (tests/vendor-privacy.test.ts), which does the same for the
 // filter itself.
+//
+// ⚠ (5) WAS VACUOUS FOR THE `keep`-CLASSIFIED PATH FIELDS UNTIL ux-v2 `b22`.
+// Every absolute path it planted went into a field the allowlist already
+// FINGERPRINTS (`project_root`, `worktree_path`), while `iteration_path` was
+// planted as an already-relative `'steps/03-review.md'` — so the suite proved
+// the fingerprint rule and said nothing about the `keep` rule, which is the one
+// that shipped `C:\Users\<account>\…` to production for three weeks (SG4, found
+// by i1 2026-08-07). `b22` plants an absolute path in `iteration_path` and
+// `next_iteration_path` too: one INSIDE the project root, which must come back
+// relativized, and one outside it, which must come back fingerprinted. The rule
+// itself, and its own reproduction of the production payloads, live in
+// `tests/path-privacy.test.ts` and `tests/sg4-production-repro.test.ts`.
 
 import { afterAll, describe, expect, test } from 'bun:test';
 import {
@@ -575,6 +587,12 @@ const SECRETS = {
   questionContext: 'SECRET_CONTEXT_the-diff-touches-billing.ts-lines-40-90',
   absolutePath: 'C:/Users/ivan/very-secret-client-project',
   worktreePath: 'C:/Users/ivan/very-secret-client-project/.worktrees/run-1',
+  // `b22` / SG4: absolute paths in `keep`-classified fields — the ones the
+  // allowlist copies VERBATIM because it assumes the emitter already made them
+  // pipeline-relative. It does not. One inside the project root (must come back
+  // relativized) and one outside every root (must come back fingerprinted).
+  keepFieldPathInRoot: 'C:/Users/ivan/very-secret-client-project/.pipeline/release/steps/03-review.md',
+  keepFieldPathOffRoot: 'C:/Users/ivan/another-client/handoff/steps/01-intake.md',
   toolArgs: 'SECRET_TOOL_ARGS_rm -rf /var/secrets --force',
   toolOutput: 'SECRET_TOOL_OUTPUT_stdout-dump-with-customer-data',
   errorExcerpt: 'SECRET_ERROR_EXCERPT_stack-trace-with-code-and-paths',
@@ -603,9 +621,12 @@ function telemetryFilesOnDisk(root: string): Array<{ name: string; bytes: Buffer
 /** Drive a hostile journal through the real queue. */
 function plantAndDrain(root: string, over: Record<string, unknown> = {}): TelemetryOutbox {
   writeJournal(root, [
-    // Prompt-like text on a KNOWN type, in fields its allowlist does not name.
+    // Prompt-like text on a KNOWN type, in fields its allowlist does not name —
+    // and (`b22`) absolute paths in the two fields its allowlist DOES name and
+    // copies verbatim, which is the SG4 defect i1 found in production.
     evt('iteration.completed', 'run-a', {
-      iteration_path: 'steps/03-review.md',
+      iteration_path: SECRETS.keepFieldPathInRoot,
+      next_iteration_path: SECRETS.keepFieldPathOffRoot,
       outcome: 'completed',
       prompt: SECRETS.prompt,
       file_content: SECRETS.apiKey,
@@ -702,6 +723,12 @@ describe('outbox — ON-DISK BYTE SCAN: no prohibited field appears in any outbo
     // Absolute paths survive only as fingerprints, so telemetry still
     // correlates without the path ever leaving the machine.
     expect(byType.get('tool.called')!.project_root).toMatch(/^fp:[0-9a-f]{16}$/);
+    // `b22`/SG4: the `keep`-classified step-identity fields still NAME the step
+    // — relative to the run's own root when it is under one, fingerprinted when
+    // it is not. Neither carries the machine layout.
+    const completed = byType.get('iteration.completed')!.data as Record<string, unknown>;
+    expect(completed.iteration_path).toBe('.pipeline/release/steps/03-review.md');
+    expect(completed.next_iteration_path).toMatch(/^fp:[0-9a-f]{16}$/);
     const stats = records.find((r) => r.kind === 'stats')!;
     expect((stats.payload.failures as Array<Record<string, unknown>>)[0]).toEqual({
       ts: '2026-08-05T12:00:00.000Z',

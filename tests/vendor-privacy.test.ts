@@ -160,6 +160,54 @@ describe('vendored privacy filter — metadata tier is the trust boundary', () =
     expect(fingerprintString('x', 'a')).not.toBe(fingerprintString('x', 'b'));
   });
 
+  /**
+   * ux-v2 `b22` / SG4 — THE GAP THIS FILE USED TO HIDE, pinned deliberately.
+   *
+   * The test above proves the `fingerprint` rule. This one records what the
+   * `keep` rule does, which nothing here asserted before: the vendored filter
+   * copies a `keep`-classified path field VERBATIM, absolute or not. Its own
+   * module doc says why — "Pipeline-RELATIVE step identity (`iteration_path`,
+   * `step_name` … `script_path`, pipeline/branch names, tool names) is
+   * metadata" — but RELATIVE there is an assumption about the emitter, and in
+   * this CLI it is false: `PlanStep.path` is absolute by construction
+   * (`lib/plan.ts`), so `commands/next.ts` hands the filter an absolute path
+   * and this rule ships it. That is exactly what reached the production
+   * `events` table between 2026-07-19 and 2026-08-07 (17 rows; i1's SG4 check).
+   *
+   * Note the second half: the surrounding conformance test above plants
+   * `iteration_path: 'steps/03-review.md'` — already relative — and asserts it
+   * SURVIVES, which encodes the false assumption as the contract. A spot check
+   * reading either test concludes the filter handles paths.
+   *
+   * `b22` closes this CLI-side by composing `lib/path-privacy.ts` over this
+   * filter at both of the CLI's filtering seams, WITHOUT touching this
+   * byte-identical vendored copy (the parent monorepo's
+   * `scripts/check-privacy-filter-drift.mjs` compares three copies of it, and
+   * `b22`'s specification requires the rule to land upstream first, as its own
+   * change in `pipeline-runner`).
+   *
+   * SO: WHEN THIS TEST GOES RED, THAT IS THE SIGNAL THAT UPSTREAM SHIPPED THE
+   * RULE. Re-vendor, then delete this test and the CLI-side composition
+   * together — not one without the other.
+   */
+  test('KNOWN GAP (`b22`): a `keep`-classified path field ships VERBATIM, absolute or not — the CLI closes this over the filter, upstream must close it in it', () => {
+    const absolute = 'C:/Users/ivan/very-secret-client-project/.pipeline/release/steps/03-review.md';
+    const filtered = filterEventForTier(
+      journalEvent('iteration.completed', 'r1', {
+        iteration_path: absolute,
+        next_iteration_path: absolute,
+        outcome: 'completed',
+      }),
+      'metadata',
+    ) as Record<string, unknown>;
+    const data = filtered.data as Record<string, unknown>;
+    expect(data.iteration_path).toBe(absolute);
+    expect(data.next_iteration_path).toBe(absolute);
+    // …while the envelope path beside it IS fingerprinted. Same payload, same
+    // filter, two dispositions — which is precisely why a spot check passes.
+    expect(filtered.project_root).toMatch(/^fp:[0-9a-f]{16}$/);
+  });
+
   test('error excerpts inside a stats record are stripped by stripStatsFailureExcerpts AND absent from the metadata-tier allowlist', () => {
     const record: Record<string, unknown> = {
       run_id: 'r1',

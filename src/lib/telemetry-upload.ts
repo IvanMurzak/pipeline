@@ -137,6 +137,7 @@ import {
 } from './cloud-config';
 import { ensureFreshCredential, type FetchLike, type RefreshDeps } from './credential-refresh';
 import { telemetryDir, telemetrySyncEnabled, type OutboxRecord, type TelemetryOutbox } from './telemetry-outbox';
+import { scrubFilteredPayload } from './path-privacy';
 import {
   filterEventForTier,
   fingerprintString,
@@ -375,14 +376,34 @@ export interface TelemetryUploaderOptions {
  * that value was already a well-formed `fp:<16 hex>` AND the filter's output
  * for it is exactly `fingerprintString(thatValue, salt)`. Any other difference
  * — a dropped field, a placeholder, a truncation — stands.
+ *
+ * ── SG4 (`b22`) ────────────────────────────────────────────────────────────
+ *
+ * The path scrub (`lib/path-privacy.ts`) runs LAST, at the metadata tier, over
+ * the restored payload — so the bytes that reach `JSON.stringify` are the ones
+ * it approved. It runs here as well as in `b9`'s `filterPayload` for exactly
+ * the reason the allowlist does: this function is the last thing between a
+ * payload and the socket, and a record that reached the queue file by some
+ * other route (a hand-edited queue, an older CLI's queue drained by a newer
+ * one, `statsEnvelope`'s freshly-built envelope, which never passed through
+ * the outbox filter at all) must not be trusted to have been scrubbed already.
+ * It is idempotent: a relativized value is not absolute, and a `fp:<hash>` is
+ * not path-shaped, so the second pass is a no-op over the first.
+ *
+ * `roots` is what the caller knows that the payload no longer does — by the
+ * time a record is read back off the queue, its `project_root` is already a
+ * fingerprint.
  */
 export function filterForWire(
   payload: Record<string, unknown>,
   tier: PrivacyTier,
   salt: string,
+  roots: readonly (string | null | undefined)[] = [],
 ): Record<string, unknown> {
   const filtered = filterEventForTier(payload, tier, { fingerprintSalt: salt });
-  return undoDoubleFingerprint(payload, filtered, salt) as Record<string, unknown>;
+  const restored = undoDoubleFingerprint(payload, filtered, salt) as Record<string, unknown>;
+  if (tier !== 'metadata') return restored;
+  return scrubFilteredPayload(restored, payload, { fingerprintSalt: salt, extraRoots: roots });
 }
 
 function undoDoubleFingerprint(before: unknown, after: unknown, salt: string): unknown {
@@ -493,6 +514,9 @@ export function buildIngestBody(
       rec.kind === 'stats' ? statsEnvelope(rec, fallbackTs, projectRoot) : rec.payload,
       tier,
       salt,
+      // `b22`: the one root a queued record can no longer name itself — its
+      // own `project_root` was fingerprinted on the way into the queue.
+      [projectRoot],
     ),
   }));
   return JSON.stringify({ run_id: runId, events });

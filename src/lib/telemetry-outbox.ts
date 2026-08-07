@@ -139,6 +139,7 @@ import {
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { ensureGeneratedDir } from './generated-dir';
+import { scrubFilteredPayload } from './path-privacy';
 import {
   filterEventForTier,
   filterStatsRecordMetadata,
@@ -1131,15 +1132,40 @@ export class TelemetryOutbox {
    * - `stats`: `RunFailureDetail.error` excerpts are stripped at EVERY tier
    *   (design D16 / G-sec-2), then the nested metadata allowlist applies at
    *   the metadata tier.
+   * - BOTH, at the metadata tier: the SG4 path scrub (`b22`,
+   *   `lib/path-privacy.ts`). The allowlist above disposes of a path by the
+   *   NAME of its field, so the `keep`-classified step-identity fields
+   *   (`iteration_path`, `next_iteration_path`, `first_iteration_path`,
+   *   `script_path`, `parent_iteration_path`) shipped whatever the emitter
+   *   handed them — and the engine hands them `PlanStep.path`, which is
+   *   absolute by construction. The scrub makes the SHAPE of the value the
+   *   rule instead: relativized against this run's own roots where possible,
+   *   fingerprinted where not, never raw. Read `path-privacy.ts`'s header for
+   *   the full derivation and for why it is composed over the vendored filter
+   *   rather than written into it.
+   *
+   *   The roots come from the UNFILTERED payload — after the allowlist,
+   *   `project_root` is already `fp:<hash>` and names nothing — plus this
+   *   outbox's own project root, which is the only root a bare `stats` record
+   *   (no envelope) has.
    */
   private filterPayload(kind: OutboxKind, payload: Record<string, unknown>): Record<string, unknown> {
+    const scrub = (filtered: Record<string, unknown>): Record<string, unknown> =>
+      this.tier === 'metadata'
+        ? scrubFilteredPayload(filtered, payload, {
+            fingerprintSalt: this.salt,
+            extraRoots: [this.projectRoot],
+          })
+        : filtered;
     if (kind === 'stats') {
       const stripped = stripStatsFailureExcerpts(payload);
-      return this.tier === 'metadata'
-        ? filterStatsRecordMetadata(stripped, { fingerprintSalt: this.salt })
-        : stripped;
+      return scrub(
+        this.tier === 'metadata'
+          ? filterStatsRecordMetadata(stripped, { fingerprintSalt: this.salt })
+          : stripped,
+      );
     }
-    return filterEventForTier(payload, this.tier, { fingerprintSalt: this.salt });
+    return scrub(filterEventForTier(payload, this.tier, { fingerprintSalt: this.salt }));
   }
 
   /** Per-run monotonic `seq`, demultiplexed out of the interleaved journal and
