@@ -1,0 +1,192 @@
+# Cuts a release of @baizor/pipeline from this repo: verify, publish, tag.
+#
+# MANUAL ONLY. It does not fire on a pushed tag or a published GitHub Release —
+# that is deliberate and was learned the hard way in the repo this package was
+# extracted from: someone cut a Release by hand and the workflow ran afterwards,
+# so the tag was already public while the suite was still running, and a red run
+# left a released version nobody could unrelease.
+#
+# ⚠ THE FILENAME IS LOAD-BEARING. npm Trusted Publishing matches the OIDC claim
+# against BOTH the repository and this workflow's filename, registered on
+# npmjs.com as `release.yml` for `IvanMurzak/pipeline`. Renaming this file
+# breaks every publish with a 404 that reads like a permissions problem, until
+# the Trusted Publisher config is edited by hand. That exact failure — a
+# repository RENAME invalidating the claim — is why this package now lives in
+# its own repo (plugin-thin B.8); do not reintroduce the trap from the other
+# side by renaming the file.
+#
+# ONE ARTIFACT lives here, which is why there is no `target` input: the Claude
+# Code plugin stayed behind in `pipeline-claude` and releases on its own tags.
+# That separation is the whole point of the extraction — a shared package must
+# not inherit a plugin repository's identity.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release. Must match package.json exactly — a mismatch fails the run."
+        required: true
+      dry_run:
+        description: "Rehearse: run every check, publish and tag NOTHING."
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write # OIDC token for npm Trusted Publishing
+  contents: write # create the git tag + GitHub Release
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # ── Gate ────────────────────────────────────────────────────────────────────
+  # Everything that can say NO lives here, and it publishes nothing.
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need tags + history
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Ensure npm >= 11.5.1 (required for Trusted Publishing/OIDC)
+        run: npm install -g npm@^11.5.1
+
+      - name: Commit is on main
+        run: |
+          git fetch origin main --quiet
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$GITHUB_SHA is not an ancestor of origin/main"; exit 1; }
+
+      # The input is intent; the manifest is fact. Disagreement means the
+      # operator believes they are shipping something they are not.
+      - name: Version matches package.json
+        id: version
+        run: |
+          IN="${{ inputs.version }}"; IN="${IN#v}"
+          ACTUAL="$(node -p "require('./package.json').version")"
+          if [ "$ACTUAL" != "$IN" ]; then
+            echo "::error::input version '$IN' != package.json '$ACTUAL'"; exit 1
+          fi
+          echo "value=$ACTUAL" >> "$GITHUB_OUTPUT"
+          echo "tag=v$ACTUAL" >> "$GITHUB_OUTPUT"
+          echo "releasing $ACTUAL as v$ACTUAL"
+
+      - name: Tag does not exist and the version is not on npm
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::tag $TAG already exists"; exit 1
+          fi
+          V="${{ steps.version.outputs.value }}"
+          if npm view "@baizor/pipeline@$V" version >/dev/null 2>&1; then
+            echo "::error::@baizor/pipeline@$V is already on npm"; exit 1
+          fi
+
+      - name: Install dependencies
+        run: bun install
+
+      # Sequential on purpose: CI runners are uncontended, unlike local dev
+      # machines where the parallel `test` script is used (and where the
+      # git-worktree suites flake under 8-worker load).
+      - name: Test
+        run: bun run test:seq
+
+      # The lesson this package actually learned: a green release job is not
+      # proof the artifact is usable. `npm pack` produces the EXACT tarball
+      # publish would upload — unpack it and assert what a consumer runs is
+      # inside. This package's `bin` points straight at raw TypeScript under
+      # src/, so a `files` mistake is invisible until someone's `bun add -g`
+      # fails.
+      - name: Pack and inspect the real tarball
+        run: |
+          TARBALL="$(npm pack --silent)"
+          echo "packed $TARBALL"
+          mkdir -p /tmp/verify && tar -xzf "$TARBALL" -C /tmp/verify
+          node -e '
+            const fs = require("fs"), path = require("path");
+            const pkg = require("./package.json");
+            const root = "/tmp/verify/package";
+            const bins = typeof pkg.bin === "string" ? { [pkg.name]: pkg.bin } : (pkg.bin ?? {});
+            const missing = Object.entries(bins).filter(([, p]) => !fs.existsSync(path.join(root, p)));
+            if (missing.length) {
+              console.error("::error::bin entries missing from the tarball: " + JSON.stringify(missing));
+              process.exit(1);
+            }
+            // Templates ship INSIDE the package and are resolved against the
+            // CLI source, so a tarball without them makes `pipeline init` fail
+            // on a fresh install while working perfectly from a checkout.
+            const templates = path.join(root, "templates");
+            if (!fs.existsSync(templates) || fs.readdirSync(templates).length === 0) {
+              console.error("::error::templates/ is missing or empty in the tarball");
+              process.exit(1);
+            }
+            console.log("bins + templates present:", fs.readdirSync(templates).join(", "));
+          '
+
+  # ── Release ─────────────────────────────────────────────────────────────────
+  release:
+    name: Publish + tag
+    needs: verify
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Ensure npm >= 11.5.1
+        run: npm install -g npm@^11.5.1
+
+      - name: Install dependencies
+        run: bun install
+
+      # No build step: this package's bin ships straight from src (package.json
+      # "bin" -> ./src/cli.ts), so there is no dist/ to compile first.
+      # No NODE_AUTH_TOKEN — auth is OIDC Trusted Publishing.
+      - name: Publish to npm (Trusted Publishing / OIDC)
+        run: npm publish --provenance --access public
+
+      # Cut AFTER a successful publish: a tag with no package behind it is a
+      # release nobody can install, and the harder one to clean up.
+      - name: Tag and create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            --target "$GITHUB_SHA"
+
+      - name: Verify the published version resolves
+        env:
+          V: ${{ needs.verify.outputs.version }}
+        run: |
+          for i in 1 2 3 4 5 6; do
+            if npm view "@baizor/pipeline@$V" version >/dev/null 2>&1; then
+              echo "npm serves $V"; exit 0
+            fi
+            echo "not visible yet, retrying ($i)"; sleep 10
+          done
+          echo "::error::published, but npm does not serve $V"; exit 1

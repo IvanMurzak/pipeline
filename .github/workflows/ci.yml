@@ -1,0 +1,51 @@
+# CI for @baizor/pipeline — the standalone CLI.
+#
+# Two platforms, because this package has been bitten by platform differences
+# before: an npm/bun shim divergence on Windows, and path handling that behaved
+# differently under a non-interactive shell. `fail-fast: false` so a failure on
+# one OS still reports the other rather than hiding it.
+#
+# The suite is run SEQUENTIALLY here (`bun test tests/`), not through the
+# parallel runner used locally: CI runners are uncontended, while the
+# git-worktree and subprocess-spawning suites flake under 8-worker load on a
+# developer machine.
+#
+# ⚠ Never gate anything on a PIPED test command. `bun test … | tail -n` exits
+# with TAIL's status, so a red suite reports success. Read the runner's own exit
+# code — which is exactly what these steps do by not piping at all.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - ".gitignore"
+      - ".gitattributes"
+      - "LICENSE"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - ".gitignore"
+      - ".gitattributes"
+      - "LICENSE"
+
+jobs:
+  test:
+    name: Pipeline CLI
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install
+      - name: Run unit tests
+        run: bun test tests/
+      - name: CLI smoke (version + Node bundle build)
+        run: |
+          bun src/cli.ts --version
+          bun run build
