@@ -263,14 +263,14 @@ describe('upload — org refusal: records queued under A are never sent to B (ma
 
   test('GATE 2 alone: buildIngestBody — the only producer of wire bytes — refuses a foreign record', () => {
     expect(() =>
-      buildIngestBody('run-a', [rec({ org: 'acme' }), rec({ org: 'org-a', seq: 2 })], 'acme', 'metadata', '', 'ts'),
+      buildIngestBody('run-a', [rec({ org: 'acme' }), rec({ org: 'org-a', seq: 2 })], 'acme', 'metadata', '', 'ts', '/proj'),
     ).toThrow(OrgRefusalError);
     // …and refuses even a single foreign record with no company.
-    expect(() => buildIngestBody('run-a', [rec({ org: 'evil' })], 'acme', 'metadata', '', 'ts')).toThrow(
+    expect(() => buildIngestBody('run-a', [rec({ org: 'evil' })], 'acme', 'metadata', '', 'ts', '/proj')).toThrow(
       /refusing to send telemetry queued under org 'evil' to org 'acme'/,
     );
     // The happy case still works, so the guard is not simply "always throw".
-    expect(buildIngestBody('run-a', [rec()], 'acme', 'metadata', '', 'ts')).toContain('"run_id":"run-a"');
+    expect(buildIngestBody('run-a', [rec()], 'acme', 'metadata', '', 'ts', '/proj')).toContain('"run_id":"run-a"');
   });
 
   test('GATE 1 alone: the uploader does not trust b9 — a broken partition still ships only our org', async () => {

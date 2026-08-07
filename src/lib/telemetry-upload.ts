@@ -408,10 +408,34 @@ function undoDoubleFingerprint(before: unknown, after: unknown, salt: string): u
  *
  * The control plane derives stats from an event whose `type` is
  * `stats.run_record` (`ingest.ts:732`), so the queue's bare record has to be
- * wrapped. The envelope carries NO machine path: `project_root` is omitted
- * outright rather than fingerprinted, because at flush time the raw path is not
- * in hand (`b9` never queued it on this record) and inventing one would be the
- * only way a path could re-enter here.
+ * wrapped.
+ *
+ * ── `project_root` (ux-v2 `b21`) ────────────────────────────────────────────
+ *
+ * This envelope used to OMIT `project_root`, on the reasoning that "at flush
+ * time the raw path is not in hand". BOTH halves of that were wrong, and the
+ * cost was total: `AnyEventEnvelope` (`@baizor/pipeline-protocol`,
+ * `src/events/envelope.ts` — `eventEnvelopeBaseShape`) declares
+ * `project_root: z.string().min(1)`, REQUIRED, and `ingest.ts:523-524`
+ * `safeParse`s every record against it and `continue`s on failure. So every
+ * `stats.run_record` this CLI has ever shipped was stored in `events` and
+ * derived NOTHING — no `ended_at`, no `outcome`, no `stats_*`. Production
+ * evidence (i1, 2026-08-07): 10 of 10 stats records lacked the key; 4 of 4
+ * runs were stuck at `status=running` forever.
+ *
+ * The path IS in hand: `TelemetryUploader` holds `this.outbox.projectRoot`,
+ * a public readonly field, and passes it here — which is why this takes it as
+ * a REQUIRED parameter rather than defaulting, so no future call site can
+ * reintroduce the omission by accident.
+ *
+ * It is not an SG4 leak. `project_root` is a `fingerprint`-rule field in the
+ * ENVELOPE_ALLOWLIST (`vendor/privacy.ts`), so at the DEFAULT `metadata` tier
+ * `filterForWire` (called on the result of this function) turns it into
+ * `fp:<16 hex>` — the same fingerprint the run's own `iteration.*` /
+ * `tool.called` / `turn.usage` events already carry, which is what restores
+ * correlation between the two halves of one local run. At the opt-in
+ * `events`/`full` tiers it travels raw, exactly as every other envelope in the
+ * same batch already does: the TIER is the control here, not this one field.
  *
  * `stripStatsFailureExcerpts` runs here as well as in `b9`, because D16 / `07`
  * G-sec-2 requires failure excerpts gone at EVERY tier and the tier filter
@@ -419,12 +443,17 @@ function undoDoubleFingerprint(before: unknown, after: unknown, salt: string): u
  * passes the envelope verbatim, so a record that reached the queue file
  * unfiltered would carry its stack traces onto the wire.
  */
-export function statsEnvelope(record: OutboxRecord, fallbackTs: string): Record<string, unknown> {
+export function statsEnvelope(
+  record: OutboxRecord,
+  fallbackTs: string,
+  projectRoot: string,
+): Record<string, unknown> {
   const endedAt = record.payload.ended_at;
   return {
     schema: STATS_ENVELOPE_SCHEMA,
     ts: typeof endedAt === 'string' && endedAt ? endedAt : fallbackTs,
     type: STATS_EVENT_TYPE,
+    project_root: projectRoot,
     worktree: null,
     run_id: record.run_id,
     parent_run_id: null,
@@ -438,6 +467,11 @@ export function statsEnvelope(record: OutboxRecord, fallbackTs: string): Record<
  * wire bytes — which is why the org gate lives here, after filtering and
  * immediately before `JSON.stringify`.
  *
+ * `projectRoot` is the machine path every envelope in the batch is keyed to —
+ * `statsEnvelope` needs it to build a COMPLETE envelope (`b21`), and it never
+ * reaches the wire raw at the default tier because `filterForWire` runs after
+ * it (see `statsEnvelope`'s own doc).
+ *
  * @throws OrgRefusalError if any record was queued under a different org.
  */
 export function buildIngestBody(
@@ -447,6 +481,7 @@ export function buildIngestBody(
   tier: PrivacyTier,
   salt: string,
   fallbackTs: string,
+  projectRoot: string,
 ): string {
   for (const rec of records) {
     if (rec.org !== org) throw new OrgRefusalError(org, rec.org);
@@ -455,7 +490,7 @@ export function buildIngestBody(
   const events = records.map((rec) => ({
     seq: rec.seq,
     payload: filterForWire(
-      rec.kind === 'stats' ? statsEnvelope(rec, fallbackTs) : rec.payload,
+      rec.kind === 'stats' ? statsEnvelope(rec, fallbackTs, projectRoot) : rec.payload,
       tier,
       salt,
     ),
@@ -698,6 +733,9 @@ export class TelemetryUploader {
         tier,
         salt,
         new Date(this.now()).toISOString(),
+        // `b21`: the envelope field the stats path used to omit. Public on the
+        // outbox precisely so the wire side can reach it.
+        this.outbox.projectRoot,
       );
     } catch (e) {
       if (e instanceof OrgRefusalError) {

@@ -34,6 +34,7 @@ import {
 } from 'node:fs';
 import { ensureGeneratedDir } from './generated-dir';
 import { resolveProjectRoot } from './event';
+import { shipFinishedRunRecord } from './telemetry-ship';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 
 // ---------------------------------------------------------------------------
@@ -117,6 +118,39 @@ export function statsLocation(pipelineRoot: string): StatsLocation {
     dir = parent;
   }
   return { base: join(dirname(root), '.stats'), rel: basename(root) };
+}
+
+/**
+ * The consumer PROJECT root a `.stats` base belongs to — `<project>` for the
+ * canonical `<project>/.pipeline/.stats`, else null.
+ *
+ * That is where `.pipeline/cloud.json` lives, so it is the only argument
+ * `lib/telemetry-ship.ts` needs, and it is derived from `statsLocation` rather
+ * than re-walked so the worktree→main-checkout mapping that anchors the
+ * `.stats` tree also decides which project's outbox a worktree run ships to.
+ * `statsLocation`'s non-canonical fallback (`<parent-of-root>/.stats`, no
+ * `.pipeline` ancestor at all) has no project to speak of and returns null —
+ * nothing is shipped rather than something guessed.
+ */
+export function statsProjectRoot(base: string): string | null {
+  const pipelineDir = dirname(resolve(base));
+  if (basename(pipelineDir) !== '.pipeline') return null;
+  return dirname(pipelineDir);
+}
+
+/** ux-v2 `b21`: hand a run record that just changed state to the outbox, so a
+ *  run that ends is ENDED server-side without anyone running `pipeline cloud
+ *  connect` afterwards. Gated, local-only and never-throwing inside
+ *  `shipFinishedRunRecord`; the extra `try` keeps even a path-resolution
+ *  surprise out of the caller. */
+function shipRecord(base: string, record: RunRecord): void {
+  try {
+    const projectRoot = statsProjectRoot(base);
+    if (projectRoot === null) return;
+    shipFinishedRunRecord(projectRoot, record as unknown as Record<string, unknown>);
+  } catch {
+    // best-effort — measurement must never fail because telemetry did
+  }
 }
 
 function bufferPath(loc: StatsLocation, runId: string): string {
@@ -447,7 +481,10 @@ export function renderRunLog(rec: RunRecord): string {
 }
 
 /** Finalize a run: fold its buffer, append runs.jsonl, write the .log, delete
- *  the buffer, regenerate SUMMARY.md. Idempotent per run_id. Never throws. */
+ *  the buffer, regenerate SUMMARY.md, and — ux-v2 `b21` — hand the record to
+ *  the telemetry outbox so the control plane can END the run. Idempotent per
+ *  run_id (the already-finalized early return covers the ship too, so a
+ *  repeated terminal action does not re-queue). Never throws. */
 export function statsFinalizeRun(
   pipelineRoot: string,
   runId: string,
@@ -476,6 +513,9 @@ export function statsFinalizeRun(
     writeFileSync(join(loc.base, loc.rel, 'runs', `${runId}.log`), renderRunLog(rec), 'utf8');
     if (existsSync(buf)) unlinkSync(buf);
     renderSummary(loc.base);
+    // b21 — AFTER the record is durable on disk, so a crash between the two
+    // leaves a record to re-ship rather than a shipped record with no source.
+    shipRecord(loc.base, rec);
   } catch {
     // best-effort
   }
@@ -619,7 +659,9 @@ export function renderFailureLogSection(failures: RunFailureDetail[], totalFaile
 
 /** Enrich a finished run with folded token stats: rewrite its runs.jsonl line,
  *  append a tokens line (and, when provided, a tool-fails section) to its
- *  .log, regenerate SUMMARY.md. `failed_tools` is derived here from the
+ *  .log, regenerate SUMMARY.md, and — ux-v2 `b21` — re-ship the now-complete
+ *  record at a SUPERSEDING revision so the cloud's compare-and-swap accepts
+ *  the tokens it refused at revision 1. `failed_tools` is derived here from the
  *  failures list — callers pass the raw details once, not the counts too.
  *  Never throws. */
 export function statsEnrichTokens(
@@ -653,6 +695,11 @@ export function statsEnrichTokens(
       }
     }
     renderSummary(base);
+    // b21 — the enriched snapshot, from the file we just wrote (never a
+    // re-derivation), so what ships is exactly what a later `cloud connect`
+    // re-scan would find and therefore computes the SAME revision.
+    const enriched = parseRunRecords(next).find((r) => r.run_id === runId);
+    if (enriched) shipRecord(base, enriched);
     return true;
   } catch {
     return false;
