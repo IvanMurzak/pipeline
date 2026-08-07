@@ -106,8 +106,8 @@ function cannedStructured(root: string, stepId: string, record: unknown): void {
 
 function drive(root: string, runId: string, extra: string[] = []) {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.PIPELINE_UI_RUN_ID;
-  delete env.PIPELINE_UI_PARENT_RUN_ID;
+  delete env.PIPELINE_RUN_ID;
+  delete env.PIPELINE_PARENT_RUN_ID;
   delete env.CLAUDE_SESSION_ID;
   delete env.PIPELINE_DRIVE_EXECUTOR_CMD;
   delete env.PIPELINE_DRIVE_IMPROVER_CMD;

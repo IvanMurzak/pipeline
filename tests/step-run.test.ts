@@ -107,8 +107,8 @@ function scaffold(): string {
 /** Run `pipeline step run` as a subprocess (isolated home; cwd = fixture). */
 function stepRun(root: string, iterationRel: string, extra: string[] = []) {
   const env: NodeJS.ProcessEnv = { ...process.env, USERPROFILE: root, HOME: root };
-  delete env.PIPELINE_UI_RUN_ID;
-  delete env.PIPELINE_UI_PARENT_RUN_ID;
+  delete env.PIPELINE_RUN_ID;
+  delete env.PIPELINE_PARENT_RUN_ID;
   // Deterministic PP_* environment for the variable tests: a stray PP_* var in
   // the developer's shell must never satisfy (or fail) a fixture resolution.
   for (const k of Object.keys(env)) if (k.startsWith('PP_')) delete env[k];

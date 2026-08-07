@@ -69,14 +69,14 @@ beforeEach(() => {
   process.env.HOME = homeRoot;
   bindingsPath = mirrorBindingsPath();
   mkdirSync(join(homeRoot, ".claude", "pipeline-ui"), { recursive: true });
-  delete process.env.PIPELINE_UI_RUN_ID;
+  delete process.env.PIPELINE_RUN_ID;
   delete process.env.CLAUDE_SESSION_ID;
 });
 
 afterEach(() => {
   delete process.env.USERPROFILE;
   delete process.env.HOME;
-  delete process.env.PIPELINE_UI_RUN_ID;
+  delete process.env.PIPELINE_RUN_ID;
   delete process.env.CLAUDE_SESSION_ID;
 });
 
@@ -149,7 +149,7 @@ describe("handleSubagentStop — manager.stopped emission", () => {
   });
 
   test("manager.stopped resolves run_id via the env var when set", () => {
-    process.env.PIPELINE_UI_RUN_ID = "run-from-env";
+    process.env.PIPELINE_RUN_ID = "run-from-env";
     handleSubagentStop(
       {
         hook_event_name: "SubagentStop",
@@ -204,7 +204,7 @@ describe("(d) depth-2 worker tool.called resolves run_id via the shared-session 
     // session_id is shared across depths: the supervisor (depth 0) wrote a
     // binding keyed on sess-shared → run-shared. A depth-2 worker's internal
     // tool call carries the SAME session_id, so the session lookup recovers
-    // the run_id even though PIPELINE_UI_RUN_ID never propagated.
+    // the run_id even though PIPELINE_RUN_ID never propagated.
     writeBinding({ run_id: "run-shared", session_id: "sess-shared" });
     handlePostToolUse(
       {

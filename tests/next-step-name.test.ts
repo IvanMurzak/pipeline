@@ -91,13 +91,13 @@ function mkParallelWorld(): World {
 
 function inProject<T>(w: World, fn: () => T): T {
   const prevCwd = process.cwd();
-  const keys = ['PIPELINE_UI_RUN_ID', 'PIPELINE_UI_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'USERPROFILE', 'HOME'];
+  const keys = ['PIPELINE_RUN_ID', 'PIPELINE_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'USERPROFILE', 'HOME'];
   const saved: Record<string, string | undefined> = {};
   for (const k of keys) saved[k] = process.env[k];
   try {
     process.chdir(w.project);
-    delete process.env.PIPELINE_UI_RUN_ID;
-    delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+    delete process.env.PIPELINE_RUN_ID;
+    delete process.env.PIPELINE_PARENT_RUN_ID;
     delete process.env.CLAUDE_SESSION_ID;
     process.env.USERPROFILE = w.home;
     process.env.HOME = w.home;

@@ -1366,7 +1366,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
    *  `resolveBindingFromEnvOrSession` (hooks/analytics_relay.ts) name the run
    *  AND the step for a `tool.called` / `turn.usage` / `manager.stopped` that
    *  the hook itself has no other way to attribute. Before this, those events
-   *  stamped `run_id: null` on the whole driven path: `PIPELINE_UI_RUN_ID` is
+   *  stamped `run_id: null` on the whole driven path: `PIPELINE_RUN_ID` is
    *  not exported into the child, and no other binding is keyed by the child's
    *  session.
    *

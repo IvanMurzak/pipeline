@@ -19,7 +19,7 @@ import {
   emitEvent,
   parseKvArgs,
   registerMirrorBinding,
-  pipelineUiTranscriptsEnabled,
+  journalTranscriptsEnabled,
 } from '../src/lib/event';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -81,10 +81,10 @@ const EVENTS_REL = join('.pipeline', '.runtime', 'events.jsonl');
  *  at `home`, and keeps PATH so git/bun resolve. */
 function controlledEnv(home: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.PIPELINE_UI_RUN_ID;
-  delete env.PIPELINE_UI_PARENT_RUN_ID;
+  delete env.PIPELINE_RUN_ID;
+  delete env.PIPELINE_PARENT_RUN_ID;
   delete env.CLAUDE_SESSION_ID;
-  delete env.PIPELINE_UI_DEBUG;
+  delete env.PIPELINE_JOURNAL_DEBUG;
   env.USERPROFILE = home;
   env.HOME = home;
   return { ...env, ...extra };
@@ -97,16 +97,16 @@ function runTs(fn: () => number, cwd: string, env: Record<string, string | undef
   const saved: Record<string, string | undefined> = {};
   for (const k of Object.keys(env)) saved[k] = process.env[k];
   // Also save the keys we explicitly clear so they restore correctly.
-  for (const k of ['PIPELINE_UI_RUN_ID', 'PIPELINE_UI_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'PIPELINE_UI_DEBUG', 'USERPROFILE', 'HOME']) {
+  for (const k of ['PIPELINE_RUN_ID', 'PIPELINE_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'PIPELINE_JOURNAL_DEBUG', 'USERPROFILE', 'HOME']) {
     if (!(k in saved)) saved[k] = process.env[k];
   }
   try {
     process.chdir(cwd);
     // Clear the writer's envelope env vars, then apply overrides.
-    delete process.env.PIPELINE_UI_RUN_ID;
-    delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+    delete process.env.PIPELINE_RUN_ID;
+    delete process.env.PIPELINE_PARENT_RUN_ID;
     delete process.env.CLAUDE_SESSION_ID;
-    delete process.env.PIPELINE_UI_DEBUG;
+    delete process.env.PIPELINE_JOURNAL_DEBUG;
     for (const [k, v] of Object.entries(env)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
@@ -341,16 +341,16 @@ describe('golden — worktree detection', () => {
 });
 
 // ---------------------------------------------------------------------------
-// PIPELINE_UI_TRANSCRIPTS — the transcript-mirroring opt-out (Path-B binding).
+// PIPELINE_JOURNAL_TRANSCRIPTS — the transcript-mirroring opt-out (Path-B binding).
 //
 // register-mirror-binding (the /pipeline:run supervisor's binding writer) must
 // withhold the transcript pointer when the switch is off, while still recording
 // the binding (run_id/session_id) for run correlation. Default ON keeps the
-// pointer. Same falsy parse as PIPELINE_UI_ENABLED; orthogonal to
+// pointer. Same falsy parse as PIPELINE_JOURNAL_ENABLED; orthogonal to
 // PIPELINE_STATS_ENABLED.
 // ---------------------------------------------------------------------------
 
-describe('PIPELINE_UI_TRANSCRIPTS — register-mirror-binding pointer gate', () => {
+describe('PIPELINE_JOURNAL_TRANSCRIPTS — register-mirror-binding pointer gate', () => {
   const BIND_REL = join('.claude', 'pipeline-ui', 'active-mirror-bindings.jsonl');
 
   function readBinding(home: string): Record<string, unknown> {
@@ -360,19 +360,19 @@ describe('PIPELINE_UI_TRANSCRIPTS — register-mirror-binding pointer gate', () 
   }
 
   test('three-way reader parse (default ON)', () => {
-    const prev = process.env.PIPELINE_UI_TRANSCRIPTS;
+    const prev = process.env.PIPELINE_JOURNAL_TRANSCRIPTS;
     try {
-      delete process.env.PIPELINE_UI_TRANSCRIPTS;
-      expect(pipelineUiTranscriptsEnabled()).toBe(true);
-      process.env.PIPELINE_UI_TRANSCRIPTS = '1';
-      expect(pipelineUiTranscriptsEnabled()).toBe(true);
+      delete process.env.PIPELINE_JOURNAL_TRANSCRIPTS;
+      expect(journalTranscriptsEnabled()).toBe(true);
+      process.env.PIPELINE_JOURNAL_TRANSCRIPTS = '1';
+      expect(journalTranscriptsEnabled()).toBe(true);
       for (const v of ['0', 'false', 'no', 'off', 'OFF']) {
-        process.env.PIPELINE_UI_TRANSCRIPTS = v;
-        expect(pipelineUiTranscriptsEnabled()).toBe(false);
+        process.env.PIPELINE_JOURNAL_TRANSCRIPTS = v;
+        expect(journalTranscriptsEnabled()).toBe(false);
       }
     } finally {
-      if (prev === undefined) delete process.env.PIPELINE_UI_TRANSCRIPTS;
-      else process.env.PIPELINE_UI_TRANSCRIPTS = prev;
+      if (prev === undefined) delete process.env.PIPELINE_JOURNAL_TRANSCRIPTS;
+      else process.env.PIPELINE_JOURNAL_TRANSCRIPTS = prev;
     }
   });
 
@@ -388,7 +388,7 @@ describe('PIPELINE_UI_TRANSCRIPTS — register-mirror-binding pointer gate', () 
           'pipeline_name=demo',
         ]),
       root,
-      controlledEnv(home, { PIPELINE_UI_TRANSCRIPTS: '1' }),
+      controlledEnv(home, { PIPELINE_JOURNAL_TRANSCRIPTS: '1' }),
     );
     const b = readBinding(home);
     expect(b.run_id).toBe('runA');
@@ -396,7 +396,7 @@ describe('PIPELINE_UI_TRANSCRIPTS — register-mirror-binding pointer gate', () 
     expect(b.transcript_path).toBe('/tmp/sessA.jsonl');
   });
 
-  test('PIPELINE_UI_TRANSCRIPTS=0: binding written, transcript_path nulled', () => {
+  test('PIPELINE_JOURNAL_TRANSCRIPTS=0: binding written, transcript_path nulled', () => {
     const root = mkGitRepo();
     const home = mkTmp('bind-home-');
     runTs(
@@ -408,7 +408,7 @@ describe('PIPELINE_UI_TRANSCRIPTS — register-mirror-binding pointer gate', () 
           'pipeline_name=demo',
         ]),
       root,
-      controlledEnv(home, { PIPELINE_UI_TRANSCRIPTS: '0' }),
+      controlledEnv(home, { PIPELINE_JOURNAL_TRANSCRIPTS: '0' }),
     );
     const b = readBinding(home);
     // Binding still exists (run correlation preserved) …

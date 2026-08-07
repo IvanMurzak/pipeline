@@ -131,8 +131,8 @@ test('drive park journals awaiting_input in the exact cloud-consumed shape', () 
   const run = 'contractpark';
 
   const env: NodeJS.ProcessEnv = { ...process.env, USERPROFILE: root, HOME: root };
-  delete env.PIPELINE_UI_RUN_ID;
-  delete env.PIPELINE_UI_PARENT_RUN_ID;
+  delete env.PIPELINE_RUN_ID;
+  delete env.PIPELINE_PARENT_RUN_ID;
   delete env.CLAUDE_SESSION_ID;
   delete env.PIPELINE_DRIVE_EXECUTOR_CMD;
   const r = spawnSync(

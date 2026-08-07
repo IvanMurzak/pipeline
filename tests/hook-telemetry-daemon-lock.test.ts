@@ -117,7 +117,7 @@ describe("telemetryDaemonLockPath", () => {
 
 // ---------------------------------------------------------------------------
 // telemetryDaemonSyncEnabled — same falsy-parse convention as the file's
-// other switches (pipelineUiEnabled / awaitingInputEnabled).
+// other switches (journalEnabled / awaitingInputEnabled).
 // ---------------------------------------------------------------------------
 
 describe("telemetryDaemonSyncEnabled", () => {

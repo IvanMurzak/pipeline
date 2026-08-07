@@ -5,8 +5,9 @@
 // Tail the project's event journal (.runtime/events.jsonl) to the terminal,
 // pretty-printing each event as a readable one-liner. This is the
 // terminal-visible counterpart to the browser dashboard — it answers "show me
-// the pipeline events as they appear" WITHOUT running the UI daemon, so it
-// works regardless of PIPELINE_UI_ENABLED (even when the UI/daemon is opted out).
+// the pipeline events as they appear" WITHOUT running the browser dashboard, so
+// it works regardless of PIPELINE_JOURNAL_ENABLED (even when the journal hooks
+// are opted out).
 //
 // Deliberately READ-ONLY: it never writes the journal, never spawns the daemon,
 // and never emits events. It just resolves the journal path (project root via

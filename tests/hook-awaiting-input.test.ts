@@ -35,7 +35,7 @@ afterAll(() => {
 });
 
 afterEach(() => {
-  delete process.env.PIPELINE_UI_RUN_ID;
+  delete process.env.PIPELINE_RUN_ID;
 });
 
 function makeProject(): string {
@@ -66,7 +66,7 @@ function spawnHookVerbose(
 ): { status: number | null; stderr: string } {
   const r = spawnSync(process.execPath, [HOOK_PATH], {
     cwd: root,
-    env: { ...process.env, PIPELINE_UI_DEBUG: "1", ...env },
+    env: { ...process.env, PIPELINE_JOURNAL_DEBUG: "1", ...env },
     input: JSON.stringify(payload),
     encoding: "utf-8",
     timeout: 30_000,
@@ -115,7 +115,7 @@ describe("classifyNotification", () => {
 describe("handleNotification", () => {
   test("writes one run.awaiting_input with kind, excerpt and the resolved run id", () => {
     const root = makeProject();
-    process.env.PIPELINE_UI_RUN_ID = "run-42";
+    process.env.PIPELINE_RUN_ID = "run-42";
     handleNotification(
       { message: "Claude needs your permission to use Bash", session_id: "sess-1" },
       root,
@@ -158,7 +158,7 @@ describe("gate ordering (the load-bearing case)", () => {
   function spawnHook(root: string, env: Record<string, string | undefined>): number | null {
     const r = spawnSync(process.execPath, [HOOK_PATH], {
       cwd: root,
-      env: { ...process.env, PIPELINE_UI_RUN_ID: "run-gate", ...env },
+      env: { ...process.env, PIPELINE_RUN_ID: "run-gate", ...env },
       input: JSON.stringify({
         hook_event_name: "Notification",
         message: "Claude needs your permission to use Bash",
@@ -172,7 +172,7 @@ describe("gate ordering (the load-bearing case)", () => {
 
   test("UI opted OUT + awaiting gate ON ⇒ the event is STILL written", () => {
     const root = makeProject();
-    expect(spawnHook(root, { PIPELINE_UI_ENABLED: "0" })).toBe(0);
+    expect(spawnHook(root, { PIPELINE_JOURNAL_ENABLED: "0" })).toBe(0);
     const events = readEvents(root);
     expect(events).toHaveLength(1);
     expect(events[0]!.type).toBe("run.awaiting_input");
@@ -180,14 +180,14 @@ describe("gate ordering (the load-bearing case)", () => {
 
   test("awaiting gate OFF ⇒ nothing is written, even with the UI on", () => {
     const root = makeProject();
-    expect(spawnHook(root, { PIPELINE_AWAITING_INPUT_ENABLED: "0", PIPELINE_UI_ENABLED: "1" })).toBe(0);
+    expect(spawnHook(root, { PIPELINE_AWAITING_INPUT_ENABLED: "0", PIPELINE_JOURNAL_ENABLED: "1" })).toBe(0);
     expect(readEvents(root)).toHaveLength(0);
   });
 
   test("default (both unset) ⇒ written", () => {
     const root = makeProject();
     expect(
-      spawnHook(root, { PIPELINE_AWAITING_INPUT_ENABLED: undefined, PIPELINE_UI_ENABLED: undefined }),
+      spawnHook(root, { PIPELINE_AWAITING_INPUT_ENABLED: undefined, PIPELINE_JOURNAL_ENABLED: undefined }),
     ).toBe(0);
     expect(readEvents(root)).toHaveLength(1);
   });
@@ -202,7 +202,7 @@ describe("gate ordering (the load-bearing case)", () => {
 /**
  * The ordering has a SECOND requirement, easy to lose: the Notification branch
  * needs the payload before the UI gate, but the FILESYSTEM work must stay
- * behind it. `pipelineUiEnabled()` promises an opt-out costs ~zero per call,
+ * behind it. `journalEnabled()` promises an opt-out costs ~zero per call,
  * and this hook runs twice per tool call — so an opted-out user must never pay
  * `resolveProjectRoot` + `hasPipelineDirUpTo`.
  *
@@ -220,9 +220,9 @@ describe("gate ordering — the opt-out short-circuit stays cheap", () => {
 
   test("UI opted out ⇒ a tool event returns BEFORE any filesystem walk", () => {
     const bare = mkdtempSync(join(tmpRoot, "cheap-"));
-    const r = spawnHookVerbose(bare, { PIPELINE_UI_ENABLED: "0" }, toolPayload);
+    const r = spawnHookVerbose(bare, { PIPELINE_JOURNAL_ENABLED: "0" }, toolPayload);
     expect(r.status).toBe(0);
-    expect(r.stderr).toContain("PIPELINE_UI_ENABLED explicitly opted out");
+    expect(r.stderr).toContain("PIPELINE_JOURNAL_ENABLED explicitly opted out");
     // The cwd gate logs this line whenever it runs and finds nothing. Its
     // absence is the assertion: the walk never happened.
     expect(r.stderr).not.toContain("no .pipeline from");
@@ -230,7 +230,7 @@ describe("gate ordering — the opt-out short-circuit stays cheap", () => {
 
   test("UI enabled ⇒ the same event DOES reach the cwd gate", () => {
     const bare = mkdtempSync(join(tmpRoot, "cheap-on-"));
-    const r = spawnHookVerbose(bare, { PIPELINE_UI_ENABLED: "1" }, toolPayload);
+    const r = spawnHookVerbose(bare, { PIPELINE_JOURNAL_ENABLED: "1" }, toolPayload);
     expect(r.status).toBe(0);
     expect(r.stderr).toContain("no .pipeline from");
   });
@@ -239,11 +239,11 @@ describe("gate ordering — the opt-out short-circuit stays cheap", () => {
     const root = makeProject();
     const r = spawnHookVerbose(
       root,
-      { PIPELINE_UI_ENABLED: "0" },
+      { PIPELINE_JOURNAL_ENABLED: "0" },
       { hook_event_name: "Notification", message: "Claude needs your permission to use Bash" },
     );
     expect(r.status).toBe(0);
-    expect(r.stderr).not.toContain("PIPELINE_UI_ENABLED explicitly opted out");
+    expect(r.stderr).not.toContain("PIPELINE_JOURNAL_ENABLED explicitly opted out");
     expect(readEvents(root)).toHaveLength(1);
   });
 });

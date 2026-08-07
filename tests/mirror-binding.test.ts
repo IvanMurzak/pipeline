@@ -76,8 +76,8 @@ beforeEach(() => {
   mkdirSync(runtimeDir, { recursive: true });
   eventsPath = join(runtimeDir, "events.jsonl");
   bindingsPath = join(homeDir, ".claude", "pipeline-ui", "active-mirror-bindings.jsonl");
-  delete process.env.PIPELINE_UI_RUN_ID;
-  delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+  delete process.env.PIPELINE_RUN_ID;
+  delete process.env.PIPELINE_PARENT_RUN_ID;
   delete process.env.CLAUDE_SESSION_ID;
 });
 

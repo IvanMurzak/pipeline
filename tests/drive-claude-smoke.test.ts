@@ -75,8 +75,8 @@ test.skipIf(SKIP)(
     const run = `smoke-${Date.now().toString(36)}`;
     const env: NodeJS.ProcessEnv = { ...process.env };
     // Journal isolation vars only — HOME stays REAL (claude auth + plugin).
-    delete env.PIPELINE_UI_RUN_ID;
-    delete env.PIPELINE_UI_PARENT_RUN_ID;
+    delete env.PIPELINE_RUN_ID;
+    delete env.PIPELINE_PARENT_RUN_ID;
     delete env.CLAUDE_SESSION_ID;
     delete env.PIPELINE_DRIVE_EXECUTOR_CMD;
 

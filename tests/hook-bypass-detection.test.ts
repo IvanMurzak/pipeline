@@ -68,14 +68,14 @@ beforeEach(() => {
   runtimeDir = join(projectRoot, ".pipeline", ".runtime");
   mkdirSync(runtimeDir, { recursive: true });
   eventsPath = join(runtimeDir, "events.jsonl");
-  delete process.env.PIPELINE_UI_RUN_ID;
-  delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+  delete process.env.PIPELINE_RUN_ID;
+  delete process.env.PIPELINE_PARENT_RUN_ID;
   delete process.env.CLAUDE_SESSION_ID;
 });
 
 afterEach(() => {
-  delete process.env.PIPELINE_UI_RUN_ID;
-  delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+  delete process.env.PIPELINE_RUN_ID;
+  delete process.env.PIPELINE_PARENT_RUN_ID;
   delete process.env.CLAUDE_SESSION_ID;
 });
 
@@ -457,7 +457,7 @@ describe("handlePostToolUse synthesizes Path-C RUN-LEVEL lifecycle (manager anch
   });
 
   test("stale env vars (PARENT_RUN_ID, CLAUDE_SESSION_ID) are NOT inherited", () => {
-    process.env.PIPELINE_UI_PARENT_RUN_ID = "stale-parent";
+    process.env.PIPELINE_PARENT_RUN_ID = "stale-parent";
     process.env.CLAUDE_SESSION_ID = "stale-session";
     const iter = iterationPath("demo");
     handlePostToolUse(makeManagerPayload({ iter }), projectRoot, null);

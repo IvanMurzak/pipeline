@@ -179,15 +179,15 @@ function scaffold(
  *  (P2/b3) has its own suite: tests/worktree-scoped.test.ts. */
 function inProject<T>(project: string, home: string, fn: (realProjectRoot: string) => T): T {
   const prevCwd = process.cwd();
-  const keys = ['PIPELINE_UI_RUN_ID', 'PIPELINE_UI_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'PIPELINE_UI_DEBUG', 'USERPROFILE', 'HOME', 'PIPELINE_WORKTREE_SCOPED'];
+  const keys = ['PIPELINE_RUN_ID', 'PIPELINE_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'PIPELINE_JOURNAL_DEBUG', 'USERPROFILE', 'HOME', 'PIPELINE_WORKTREE_SCOPED'];
   const saved: Record<string, string | undefined> = {};
   for (const k of keys) saved[k] = process.env[k];
   try {
     process.chdir(project);
-    delete process.env.PIPELINE_UI_RUN_ID;
-    delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+    delete process.env.PIPELINE_RUN_ID;
+    delete process.env.PIPELINE_PARENT_RUN_ID;
     delete process.env.CLAUDE_SESSION_ID;
-    delete process.env.PIPELINE_UI_DEBUG;
+    delete process.env.PIPELINE_JOURNAL_DEBUG;
     process.env.USERPROFILE = home;
     process.env.HOME = home;
     process.env.PIPELINE_WORKTREE_SCOPED = '0';

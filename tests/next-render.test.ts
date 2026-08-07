@@ -77,7 +77,7 @@ function mkWorld(manifest: string): World {
  *  the developer's shell must never satisfy or alter a fixture resolution). */
 function inProject<T>(w: World, fn: () => T): T {
   const prevCwd = process.cwd();
-  const keys = ['PIPELINE_UI_RUN_ID', 'PIPELINE_UI_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'PIPELINE_UI_DEBUG', 'USERPROFILE', 'HOME'];
+  const keys = ['PIPELINE_RUN_ID', 'PIPELINE_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'PIPELINE_JOURNAL_DEBUG', 'USERPROFILE', 'HOME'];
   const saved: Record<string, string | undefined> = {};
   for (const k of keys) saved[k] = process.env[k];
   const savedPp: Record<string, string | undefined> = {};
@@ -89,10 +89,10 @@ function inProject<T>(w: World, fn: () => T): T {
   }
   try {
     process.chdir(w.project);
-    delete process.env.PIPELINE_UI_RUN_ID;
-    delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+    delete process.env.PIPELINE_RUN_ID;
+    delete process.env.PIPELINE_PARENT_RUN_ID;
     delete process.env.CLAUDE_SESSION_ID;
-    delete process.env.PIPELINE_UI_DEBUG;
+    delete process.env.PIPELINE_JOURNAL_DEBUG;
     process.env.USERPROFILE = w.home;
     process.env.HOME = w.home;
     return fn();

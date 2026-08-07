@@ -2,7 +2,7 @@
 //
 // Every step drive runs is a headless `claude -p` with a session id drive pins
 // itself. The plugin's hooks fire inside that child and have no way to know
-// which run — let alone which step — it belongs to: `PIPELINE_UI_RUN_ID` is not
+// which run — let alone which step — it belongs to: `PIPELINE_RUN_ID` is not
 // exported into it, and before b7 nothing was keyed by the child's session.
 //
 // So drive writes the binding FIRST and spawns SECOND. The order is the whole
@@ -109,12 +109,12 @@ function journal(root: string): Record<string, any>[] {
 
 function drive(root: string, runId: string, extraEnv: NodeJS.ProcessEnv = {}) {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.PIPELINE_UI_RUN_ID;
-  delete env.PIPELINE_UI_PARENT_RUN_ID;
+  delete env.PIPELINE_RUN_ID;
+  delete env.PIPELINE_PARENT_RUN_ID;
   delete env.CLAUDE_SESSION_ID;
   delete env.PIPELINE_DRIVE_EXECUTOR_CMD;
   delete env.PIPELINE_DRIVE_SELF_IMPROVE;
-  delete env.PIPELINE_UI_ENABLED;
+  delete env.PIPELINE_JOURNAL_ENABLED;
   env.USERPROFILE = root;
   env.HOME = root;
   Object.assign(env, extraEnv);
@@ -224,10 +224,10 @@ test("every binding shares the run's id, so the run's terminal event retires the
   expect(recs.some((b) => b.event === 'terminal')).toBe(false);
 }, 60000);
 
-test('PIPELINE_UI_ENABLED=0 writes no binding — the master opt-out still means no bindings', () => {
+test('PIPELINE_JOURNAL_ENABLED=0 writes no binding — the master opt-out still means no bindings', () => {
   const root = scaffold(1);
   canned(root, '01-step', { kind: 'step', outcome: 'completed', next_iteration: 'PIPELINE_COMPLETE' });
-  const r = drive(root, 'run-bind-off', { PIPELINE_UI_ENABLED: '0' });
+  const r = drive(root, 'run-bind-off', { PIPELINE_JOURNAL_ENABLED: '0' });
   expect(r.status).toBe(0);
 
   const snap = spawnSnapshot(root, '01-step');

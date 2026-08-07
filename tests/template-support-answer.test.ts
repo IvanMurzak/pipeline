@@ -273,13 +273,13 @@ function mkWorld(autoClean = true): World {
 function inProject<T>(w: World, fn: () => T): T {
   const prevCwd = process.cwd();
   const home = mkTmp('sa-e2e-home-');
-  const keys = ['PIPELINE_UI_RUN_ID', 'PIPELINE_UI_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'USERPROFILE', 'HOME'];
+  const keys = ['PIPELINE_RUN_ID', 'PIPELINE_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'USERPROFILE', 'HOME'];
   const saved: Record<string, string | undefined> = {};
   for (const k of keys) saved[k] = process.env[k];
   try {
     process.chdir(w.project);
-    delete process.env.PIPELINE_UI_RUN_ID;
-    delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+    delete process.env.PIPELINE_RUN_ID;
+    delete process.env.PIPELINE_PARENT_RUN_ID;
     delete process.env.CLAUDE_SESSION_ID;
     process.env.USERPROFILE = home;
     process.env.HOME = home;

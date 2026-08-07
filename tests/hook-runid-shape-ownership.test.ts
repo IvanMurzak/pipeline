@@ -94,8 +94,8 @@ beforeEach(() => {
   mkdirSync(join(projectRoot, ".pipeline", ".runtime"), { recursive: true });
   eventsPath = join(projectRoot, ".pipeline", ".runtime", "events.jsonl");
   bindingsPath = join(homeDir, ".claude", "pipeline-ui", "active-mirror-bindings.jsonl");
-  delete process.env.PIPELINE_UI_RUN_ID;
-  delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+  delete process.env.PIPELINE_RUN_ID;
+  delete process.env.PIPELINE_PARENT_RUN_ID;
   delete process.env.CLAUDE_SESSION_ID;
 });
 
@@ -104,8 +104,8 @@ afterEach(() => {
   else process.env.HOME = prevHome;
   if (prevUserProfile === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = prevUserProfile;
-  delete process.env.PIPELINE_UI_RUN_ID;
-  delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+  delete process.env.PIPELINE_RUN_ID;
+  delete process.env.PIPELINE_PARENT_RUN_ID;
   delete process.env.CLAUDE_SESSION_ID;
 });
 

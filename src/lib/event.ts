@@ -16,7 +16,7 @@
 // here, not imported, to keep pipeline-cli self-contained.
 //
 // Every entry point ALWAYS returns 0 (never block the caller). Debug logging
-// goes to stderr only when PIPELINE_UI_DEBUG=1.
+// goes to stderr only when PIPELINE_JOURNAL_DEBUG=1.
 
 import {
   existsSync,
@@ -49,24 +49,24 @@ export const SCHEMA_VERSION = 5;
 // lookup; the dashboard's MirrorService that first consumed it is deleted.
 export const MIRROR_BINDING_SCHEMA = 1;
 
-const DEBUG = process.env.PIPELINE_UI_DEBUG === '1';
+const DEBUG = process.env.PIPELINE_JOURNAL_DEBUG === '1';
 
 function log(msg: string): void {
-  if (DEBUG) process.stderr.write(`[pipeline-ui-writer] ${msg}\n`);
+  if (DEBUG) process.stderr.write(`[pipeline-event] ${msg}\n`);
 }
 
-/** Transcript opt-out switch (`PIPELINE_UI_TRANSCRIPTS`, default ON). Gates
+/** Transcript opt-out switch (`PIPELINE_JOURNAL_TRANSCRIPTS`, default ON). Gates
  *  ONLY the transcript pointer this writer records on the Path-B supervisor
  *  mirror binding: when off, `registerMirrorBinding` writes `transcript_path:
  *  null` so nothing downstream can reach the session transcript through the
  *  binding, while the binding still carries run_id/session_id for correlation. Same falsy parse as
- *  `PIPELINE_UI_ENABLED`. Orthogonal to `PIPELINE_STATS_ENABLED`. */
-export function pipelineUiTranscriptsEnabled(): boolean {
-  const v = (process.env.PIPELINE_UI_TRANSCRIPTS ?? '').trim().toLowerCase();
+ *  `PIPELINE_JOURNAL_ENABLED`. Orthogonal to `PIPELINE_STATS_ENABLED`. */
+export function journalTranscriptsEnabled(): boolean {
+  const v = (process.env.PIPELINE_JOURNAL_TRANSCRIPTS ?? '').trim().toLowerCase();
   return v !== '0' && v !== 'false' && v !== 'no' && v !== 'off';
 }
 
-/** Master UI opt-out switch (`PIPELINE_UI_ENABLED`, default ON) — the same
+/** Master journal opt-out switch (`PIPELINE_JOURNAL_ENABLED`, default ON) — the same
  *  first-statement gate `hooks/analytics_relay.ts` and `hooks/session_relay.ts`
  *  apply. Only an explicit falsy value (`0`/`false`/`no`/`off`) disables; unset,
  *  empty and every other value leave it enabled.
@@ -81,8 +81,8 @@ export function pipelineUiTranscriptsEnabled(): boolean {
  *  and drive writes its bindings unprompted, so the gate belongs on that path.
  *  `emitEvent`/`registerMirrorBinding` deliberately stay ungated — they are
  *  called explicitly by `/pipeline:run` and journal what `pipeline logs` reads. */
-export function pipelineUiEnabled(): boolean {
-  const v = (process.env.PIPELINE_UI_ENABLED ?? '').trim().toLowerCase();
+export function journalEnabled(): boolean {
+  const v = (process.env.PIPELINE_JOURNAL_ENABLED ?? '').trim().toLowerCase();
   return v !== '0' && v !== 'false' && v !== 'no' && v !== 'off';
 }
 
@@ -475,9 +475,9 @@ export function emitEvent(eventType: string, argv: string[]): number {
   const sessionIdOverride = popKey(data, 'session_id');
 
   const runIdValue =
-    normEnvelope(runIdOverride) ?? envOrNull('PIPELINE_UI_RUN_ID');
+    normEnvelope(runIdOverride) ?? envOrNull('PIPELINE_RUN_ID');
   const parentRunIdValue =
-    normEnvelope(parentRunIdOverride) ?? envOrNull('PIPELINE_UI_PARENT_RUN_ID');
+    normEnvelope(parentRunIdOverride) ?? envOrNull('PIPELINE_PARENT_RUN_ID');
   const sessionIdValue =
     normEnvelope(sessionIdOverride) ?? envOrNull('CLAUDE_SESSION_ID');
 
@@ -511,7 +511,7 @@ export function emitEvent(eventType: string, argv: string[]): number {
 // ---------------------------------------------------------------------------
 
 export interface EmitEventJsonOpts {
-  /** Envelope run_id override (else the PIPELINE_UI_RUN_ID env fallback). */
+  /** Envelope run_id override (else the PIPELINE_RUN_ID env fallback). */
   runId?: string | null;
   parentRunId?: string | null;
   sessionId?: string | null;
@@ -528,8 +528,8 @@ export interface EmitEventJsonOpts {
  * `AwaitingInputData` schema, consumed by the control plane's runs/ingest).
  *
  * Envelope shape and resolution are identical to emitEvent: same schema
- * version, same field order, same env fallbacks (PIPELINE_UI_RUN_ID /
- * PIPELINE_UI_PARENT_RUN_ID / CLAUDE_SESSION_ID), same project_root/worktree
+ * version, same field order, same env fallbacks (PIPELINE_RUN_ID /
+ * PIPELINE_PARENT_RUN_ID / CLAUDE_SESSION_ID), same project_root/worktree
  * detection (shared resolveEnvelopeRoot), same rotation. `data`
  * is journalled as passed (caller owns the payload shape). Always returns 0 —
  * never blocks the caller.
@@ -539,9 +539,9 @@ export function emitEventJson(
   data: Record<string, unknown>,
   opts: EmitEventJsonOpts = {},
 ): number {
-  const runIdValue = normEnvelope(opts.runId ?? undefined) ?? envOrNull('PIPELINE_UI_RUN_ID');
+  const runIdValue = normEnvelope(opts.runId ?? undefined) ?? envOrNull('PIPELINE_RUN_ID');
   const parentRunIdValue =
-    normEnvelope(opts.parentRunId ?? undefined) ?? envOrNull('PIPELINE_UI_PARENT_RUN_ID');
+    normEnvelope(opts.parentRunId ?? undefined) ?? envOrNull('PIPELINE_PARENT_RUN_ID');
   const sessionIdValue = normEnvelope(opts.sessionId ?? undefined) ?? envOrNull('CLAUDE_SESSION_ID');
 
   const { projectRoot, worktree } = resolveEnvelopeRoot(opts.projectRoot ?? null);
@@ -620,7 +620,7 @@ export function registerMirrorBinding(argv: string[]): number {
     worktree = resolved.worktree;
   }
 
-  const runId = dataStrOr(data, 'run_id') || envOrNull('PIPELINE_UI_RUN_ID');
+  const runId = dataStrOr(data, 'run_id') || envOrNull('PIPELINE_RUN_ID');
   if (!runId) {
     log('register-mirror-binding: no run_id; skipping');
     return 0;
@@ -629,10 +629,10 @@ export function registerMirrorBinding(argv: string[]): number {
   const iterationPath = dataStrOr(data, 'iteration_path') || '';
   const pipelineName = dataStrOr(data, 'pipeline_name') || '';
   const sessionId = dataStrOr(data, 'session_id') || envOrNull('CLAUDE_SESSION_ID');
-  // PIPELINE_UI_TRANSCRIPTS off: withhold the transcript pointer (and skip the
+  // PIPELINE_JOURNAL_TRANSCRIPTS off: withhold the transcript pointer (and skip the
   // filesystem derivation) so nothing downstream can reach this session's
   // transcript; the binding still carries run_id/session_id for correlation.
-  const transcriptPath = pipelineUiTranscriptsEnabled()
+  const transcriptPath = journalTranscriptsEnabled()
     ? (dataStrOr(data, 'transcript_path') ||
        deriveMainTranscriptPath(projectRoot, sessionId))
     : null;
@@ -716,7 +716,7 @@ export interface DriveSessionBinding {
  */
 export function registerDriveSessionBinding(b: DriveSessionBinding): void {
   // Master opt-out: "no events, no mirror bindings" (docs/journal-and-hooks.md).
-  if (!pipelineUiEnabled()) return;
+  if (!journalEnabled()) return;
   if (!b.runId || !b.sessionId) return;
 
   const { projectRoot, worktree } = resolveEnvelopeRoot(b.projectRoot ?? null);
@@ -798,7 +798,7 @@ function resolveRootForSubcommand(argv: string[]): SubcommandRoot {
  *  writer.py:_write_liveness. */
 export function writeLiveness(argv: string[]): number {
   const { projectRoot, data } = resolveRootForSubcommand(argv);
-  const runId = dataStrOr(data, 'run_id') || envOrNull('PIPELINE_UI_RUN_ID');
+  const runId = dataStrOr(data, 'run_id') || envOrNull('PIPELINE_RUN_ID');
   const pid = data['pid'];
   // Python `isinstance(pid, int)` — kv coercion gives a number for a pure int
   // string, and bools are NOT ints here (bool kv values are true/false). In JS
@@ -825,7 +825,7 @@ export function writeLiveness(argv: string[]): number {
  *  writer.py:_clear_liveness. */
 export function clearLiveness(argv: string[]): number {
   const { projectRoot, data } = resolveRootForSubcommand(argv);
-  const runId = dataStrOr(data, 'run_id') || envOrNull('PIPELINE_UI_RUN_ID');
+  const runId = dataStrOr(data, 'run_id') || envOrNull('PIPELINE_RUN_ID');
   if (!runId) return 0;
   try {
     const f = join(runsLivenessDir(projectRoot), `${runId}.alive`);

@@ -99,8 +99,8 @@ function scaffold(): { projectRoot: string; pipelineRoot: string; staleRunId: st
 
 function nextInit(pipelineRoot: string, runId: string, envOverrides: NodeJS.ProcessEnv = {}) {
   const env: NodeJS.ProcessEnv = { ...process.env, ...envOverrides };
-  delete env.PIPELINE_UI_RUN_ID;
-  delete env.PIPELINE_UI_PARENT_RUN_ID;
+  delete env.PIPELINE_RUN_ID;
+  delete env.PIPELINE_PARENT_RUN_ID;
   delete env.CLAUDE_SESSION_ID;
   env.USERPROFILE = pipelineRoot;
   env.HOME = pipelineRoot;

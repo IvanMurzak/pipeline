@@ -37,7 +37,7 @@ export {
   emitEvent,
   registerMirrorBinding,
   registerDriveSessionBinding,
-  pipelineUiEnabled,
+  journalEnabled,
   writeLiveness,
   clearLiveness,
   parseKvArgs,

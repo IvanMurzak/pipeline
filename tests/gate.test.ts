@@ -99,13 +99,13 @@ function agentStepMd(stepId: string): string {
 async function inSandbox<T>(w: World, fn: () => T | Promise<T>): Promise<T> {
   const prevCwd = process.cwd();
   const savedEnv: Record<string, string | undefined> = {};
-  const envKeys = ['HOME', 'USERPROFILE', 'PIPELINE_UI_RUN_ID', 'PIPELINE_UI_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'PIPELINE_STATS_RUNNER'];
+  const envKeys = ['HOME', 'USERPROFILE', 'PIPELINE_RUN_ID', 'PIPELINE_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'PIPELINE_STATS_RUNNER'];
   for (const k of envKeys) savedEnv[k] = process.env[k];
   process.chdir(w.project);
   process.env.HOME = w.project;
   process.env.USERPROFILE = w.project;
-  delete process.env.PIPELINE_UI_RUN_ID;
-  delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+  delete process.env.PIPELINE_RUN_ID;
+  delete process.env.PIPELINE_PARENT_RUN_ID;
   delete process.env.CLAUDE_SESSION_ID;
   try {
     return await fn();

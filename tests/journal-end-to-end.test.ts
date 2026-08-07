@@ -85,18 +85,20 @@ function hookEnv(): Record<string, string> {
     USERPROFILE: homeDir,
     CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT,
     CLAUDE_SESSION_ID: 'sess-e2e',
-    PIPELINE_UI_DEBUG: '0',
+    PIPELINE_JOURNAL_DEBUG: '0',
     // Never let a real telemetry daemon be spawned by the hook under test.
     PIPELINE_SYNC_LOCAL_STATS: '0',
   } as Record<string, string>;
 }
 
 /** Run a hook script exactly as `run-hook.sh` does: `bun <script>`, hook JSON
- *  on stdin, cwd inside the project. */
-function runHook(script: string, payload: unknown): number {
+ *  on stdin, cwd inside the project. `envOverrides` layers on top of the base
+ *  hook environment — used to drive the gating switches for a single call
+ *  without touching the fixtures every other test in this file relies on. */
+function runHook(script: string, payload: unknown, envOverrides: Record<string, string> = {}): number {
   const r = spawnSync(process.execPath, [script], {
     cwd: projectRoot,
-    env: hookEnv(),
+    env: { ...hookEnv(), ...envOverrides },
     input: JSON.stringify(payload),
     encoding: 'utf-8',
   });
@@ -228,6 +230,60 @@ describe('the journal is still written by every surviving writer', () => {
     // dashboard, but the lookup it feeds is `analytics_relay.ts`'s own. Without
     // it this event stamps run_id: null and the run's tool counts vanish.
     expect(journalLines().find((e) => e.type === 'tool.called')?.run_id).toBe('run-e2e');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1b. The rename (plugin-thin p4) — same gate, new name, no alias
+// ---------------------------------------------------------------------------
+//
+// PIPELINE_UI_ENABLED was the master opt-out for every writer above; it is now
+// PIPELINE_JOURNAL_ENABLED, with no back-compat shim (owner decision: a clean
+// break, since there were no users yet to break). Two things must both be
+// true, through the REAL subprocesses, not a unit test of the parsing helper:
+//   1. the new name still gates the SAME writers the old name gated.
+//   2. the old name is now inert — setting it does nothing, proving this is a
+//      rename and not merely an additional accepted spelling.
+
+describe('the master switch survived the rename with its gate intact', () => {
+  test('PIPELINE_JOURNAL_ENABLED=0 silences the SessionStart writer', () => {
+    expect(
+      runHook(SESSION_HOOK, { hook_event_name: 'SessionStart', source: 'startup' }, { PIPELINE_JOURNAL_ENABLED: '0' }),
+    ).toBe(0);
+    expect(journalLines().find((e) => e.type === 'session.opened')).toBeUndefined();
+  });
+
+  test('PIPELINE_JOURNAL_ENABLED=0 silences the analytics writer (no tool.called, no binding)', () => {
+    expect(
+      runHook(
+        ANALYTICS_HOOK,
+        {
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Read',
+          tool_input: { file_path: join(projectRoot, 'x.ts') },
+          tool_response: { content: 'ok' },
+          tool_use_id: 'toolu_e2e_gate',
+          session_id: 'sess-e2e',
+        },
+        { PIPELINE_JOURNAL_ENABLED: '0' },
+      ),
+    ).toBe(0);
+    expect(types()).not.toContain('tool.called');
+  });
+
+  test('the OLD name, PIPELINE_UI_ENABLED=0, is inert — the journal keeps recording (no alias)', () => {
+    expect(
+      runHook(
+        SESSION_HOOK,
+        { hook_event_name: 'SessionStart', source: 'startup' },
+        // The pre-p4 name. If this still disabled the hook, the rename would
+        // really be an additive alias, contradicting the owner's clean-break
+        // decision and DEFEATING the point of dropping PIPELINE_UI_ from the
+        // repository.
+        { PIPELINE_UI_ENABLED: '0' },
+      ),
+    ).toBe(0);
+    expect(journalLines().find((e) => e.type === 'session.opened')).toBeDefined();
   });
 });
 

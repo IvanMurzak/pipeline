@@ -190,7 +190,7 @@ function usage(): string {
     '       [--project <path>]',
     '      Tail the event journal (.runtime/events.jsonl) to the terminal,',
     '      pretty-printing each event as it appears. Read-only and daemon-free —',
-    '      works regardless of PIPELINE_UI_ENABLED (even when the hooks are',
+    '      works regardless of PIPELINE_JOURNAL_ENABLED (even when the hooks are',
     '      opted out).',
     '',
     '  logs --chat <run-id> [--project <path>] [--json] [--no-color]',

@@ -6,7 +6,7 @@
  * Regression coverage for the "RUN_ANALYTICS panel always shows zero"
  * bug. The PostToolUse and Stop hooks emit tool.called and turn.usage
  * events that the UI folds into RunState.stats. Before this fix, both
- * relied solely on `process.env.PIPELINE_UI_RUN_ID` for run correlation
+ * relied solely on `process.env.PIPELINE_RUN_ID` for run correlation
  * — but /pipeline:run exports that variable inside a Bash subshell that
  * never propagates back to Claude Code's parent process, so the env var
  * was always unset when these hook subprocesses ran. The result: every
@@ -83,16 +83,16 @@ beforeEach(() => {
   bindingsPath = mirrorBindingsPath();
   mkdirSync(join(homeRoot, ".claude", "pipeline-ui"), { recursive: true });
 
-  delete process.env.PIPELINE_UI_RUN_ID;
-  delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+  delete process.env.PIPELINE_RUN_ID;
+  delete process.env.PIPELINE_PARENT_RUN_ID;
   delete process.env.CLAUDE_SESSION_ID;
 });
 
 afterEach(() => {
   delete process.env.USERPROFILE;
   delete process.env.HOME;
-  delete process.env.PIPELINE_UI_RUN_ID;
-  delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+  delete process.env.PIPELINE_RUN_ID;
+  delete process.env.PIPELINE_PARENT_RUN_ID;
   delete process.env.CLAUDE_SESSION_ID;
 });
 
@@ -185,7 +185,7 @@ describe("findRunIdForSession", () => {
 describe("resolveRunIdFromEnvOrSession", () => {
   test("env var wins over a session binding when both exist", () => {
     writeBinding({ run_id: "run-from-binding", session_id: "sess-1" });
-    process.env.PIPELINE_UI_RUN_ID = "run-from-env";
+    process.env.PIPELINE_RUN_ID = "run-from-env";
     expect(resolveRunIdFromEnvOrSession("sess-1", projectRoot)).toBe("run-from-env");
   });
 
@@ -203,7 +203,7 @@ describe("handlePostToolUse — tool.called run_id attribution", () => {
   test("non-Agent tool inherits run_id from session binding when env is unset", () => {
     // Simulate the Path-B chain controller: /pipeline:run wrote a
     // mirror binding at chain start with run_id=run-b1 + session=sess-1,
-    // but exporting PIPELINE_UI_RUN_ID happened in a bash subshell so
+    // but exporting PIPELINE_RUN_ID happened in a bash subshell so
     // the env var is NOT set in this hook subprocess.
     writeBinding({ run_id: "run-b1", session_id: "sess-1" });
     handlePostToolUse(
@@ -243,7 +243,7 @@ describe("handlePostToolUse — tool.called run_id attribution", () => {
 
   test("env var still wins when set", () => {
     writeBinding({ run_id: "run-from-binding", session_id: "sess-1" });
-    process.env.PIPELINE_UI_RUN_ID = "run-from-env";
+    process.env.PIPELINE_RUN_ID = "run-from-env";
     handlePostToolUse(
       {
         tool_name: "Read",
@@ -413,10 +413,10 @@ describe("pathsMatch — Windows drive-letter casing tolerance", () => {
   });
 });
 
-describe("resolveRunIdFromEnvOrSession — empty PIPELINE_UI_RUN_ID is treated as unset", () => {
+describe("resolveRunIdFromEnvOrSession — empty PIPELINE_RUN_ID is treated as unset", () => {
   test("empty env string falls through to session lookup (does not leak as run_id='')", () => {
     writeBinding({ run_id: "run-from-binding", session_id: "sess-1" });
-    process.env.PIPELINE_UI_RUN_ID = "";
+    process.env.PIPELINE_RUN_ID = "";
     expect(resolveRunIdFromEnvOrSession("sess-1", projectRoot)).toBe("run-from-binding");
   });
 });

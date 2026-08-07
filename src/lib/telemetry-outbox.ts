@@ -166,7 +166,7 @@ import {
 export const OUTBOX_STATE_SCHEMA = 1;
 
 /** Master telemetry opt-out (`03` F1). Same falsy parse as
- *  `PIPELINE_UI_ENABLED` in `event.ts`. */
+ *  `PIPELINE_JOURNAL_ENABLED` in `event.ts`. */
 export const TELEMETRY_ENV = 'PIPELINE_SYNC_LOCAL_STATS';
 
 /** Default queue bound, in records. */
@@ -397,7 +397,7 @@ export function telemetryDir(projectRoot: string): string {
 /**
  * Master telemetry opt-out (`03` F1: "`PIPELINE_SYNC_LOCAL_STATS=0` disables
  * telemetry outright"). Default ON; only an explicit falsy value disables,
- * matching `pipelineUiEnabled`'s parse in `event.ts`.
+ * matching `journalEnabled`'s parse in `event.ts`.
  *
  * Enforced at ENQUEUE, which is the strongest place: opted out means nothing
  * is queued at all, not that something queued is later declined.

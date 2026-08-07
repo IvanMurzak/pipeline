@@ -6,7 +6,7 @@
  * `pipeline drive` spawns every step as a headless `claude -p` with a session
  * id IT pins. The plugin's hooks fire inside that child, but nothing there
  * knows which run — let alone which step — the child belongs to: the child
- * inherits no `PIPELINE_UI_RUN_ID`, and before b7 no binding was keyed by the
+ * inherits no `PIPELINE_RUN_ID`, and before b7 no binding was keyed by the
  * child's session either. Measured on a live `pipeline drive` run, 100% of the
  * hook events emitted from inside the child stamped `run_id: null`.
  *
@@ -75,19 +75,19 @@ beforeEach(() => {
   bindingsPath = mirrorBindingsPath();
   mkdirSync(join(homeRoot, ".claude", "pipeline-ui"), { recursive: true });
 
-  delete process.env.PIPELINE_UI_RUN_ID;
-  delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+  delete process.env.PIPELINE_RUN_ID;
+  delete process.env.PIPELINE_PARENT_RUN_ID;
   delete process.env.CLAUDE_SESSION_ID;
-  delete process.env.PIPELINE_UI_ENABLED;
+  delete process.env.PIPELINE_JOURNAL_ENABLED;
 });
 
 afterEach(() => {
   delete process.env.USERPROFILE;
   delete process.env.HOME;
-  delete process.env.PIPELINE_UI_RUN_ID;
-  delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+  delete process.env.PIPELINE_RUN_ID;
+  delete process.env.PIPELINE_PARENT_RUN_ID;
   delete process.env.CLAUDE_SESSION_ID;
-  delete process.env.PIPELINE_UI_ENABLED;
+  delete process.env.PIPELINE_JOURNAL_ENABLED;
 });
 
 interface JournalEvent {
@@ -203,16 +203,16 @@ describe("findBindingForSession — the step rides along with the run", () => {
 });
 
 describe("resolveBindingFromEnvOrSession — env precedence is unchanged", () => {
-  test("PIPELINE_UI_RUN_ID still wins for the run id", () => {
+  test("PIPELINE_RUN_ID still wins for the run id", () => {
     writeDriveBinding({ run_id: "run-binding", session_id: "sess-1", step_uuid: newId() });
-    process.env.PIPELINE_UI_RUN_ID = "run-env";
+    process.env.PIPELINE_RUN_ID = "run-env";
     expect(resolveBindingFromEnvOrSession("sess-1", projectRoot).runId).toBe("run-env");
   });
 
   test("a step is adopted from the binding only when it agrees with the env run", () => {
     const step = newId();
     writeDriveBinding({ run_id: "run-same", session_id: "sess-1", step_uuid: step });
-    process.env.PIPELINE_UI_RUN_ID = "run-same";
+    process.env.PIPELINE_RUN_ID = "run-same";
     expect(resolveBindingFromEnvOrSession("sess-1", projectRoot)).toEqual({
       runId: "run-same",
       stepUuid: step,
@@ -221,17 +221,17 @@ describe("resolveBindingFromEnvOrSession — env precedence is unchanged", () =>
 
   test("a step from a DIFFERENT run is refused — a wrong step is worse than none", () => {
     writeDriveBinding({ run_id: "run-other", session_id: "sess-1", step_uuid: newId() });
-    process.env.PIPELINE_UI_RUN_ID = "run-env";
+    process.env.PIPELINE_RUN_ID = "run-env";
     expect(resolveBindingFromEnvOrSession("sess-1", projectRoot)).toEqual({
       runId: "run-env",
       stepUuid: null,
     });
   });
 
-  test('PIPELINE_UI_RUN_ID="" is still treated as unset', () => {
+  test('PIPELINE_RUN_ID="" is still treated as unset', () => {
     const step = newId();
     writeDriveBinding({ run_id: "run-binding", session_id: "sess-1", step_uuid: step });
-    process.env.PIPELINE_UI_RUN_ID = "";
+    process.env.PIPELINE_RUN_ID = "";
     expect(resolveBindingFromEnvOrSession("sess-1", projectRoot)).toEqual({
       runId: "run-binding",
       stepUuid: step,
@@ -378,8 +378,8 @@ describe("round trip — the CLI writes it, the hook reads it", () => {
     expect(rec.event).toBe("bound");
   });
 
-  test("PIPELINE_UI_ENABLED=0 writes no binding at all (master opt-out)", () => {
-    process.env.PIPELINE_UI_ENABLED = "0";
+  test("PIPELINE_JOURNAL_ENABLED=0 writes no binding at all (master opt-out)", () => {
+    process.env.PIPELINE_JOURNAL_ENABLED = "0";
     const sessionId = newId();
     registerDriveSessionBinding({
       runId: newId(),

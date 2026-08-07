@@ -1105,8 +1105,8 @@ function next(root: string, runId: string, extra: string[], envVars?: Record<str
   // the journal lands inside the temp dir), HOME/USERPROFILE = the temp dir too
   // (so the writer's daemon-lock/mirror paths never touch the real ~/.claude).
   const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.PIPELINE_UI_RUN_ID;
-  delete env.PIPELINE_UI_PARENT_RUN_ID;
+  delete env.PIPELINE_RUN_ID;
+  delete env.PIPELINE_PARENT_RUN_ID;
   delete env.CLAUDE_SESSION_ID;
   // Deterministic PP_* environment for the variable tests: a stray PP_* var in
   // the developer's shell must never satisfy (or fail) a fixture resolution.

@@ -134,10 +134,10 @@ function scaffold(opts: { baseBranch?: string } = {}): Fixture {
 function inProject<T>(f: Fixture, fn: (realProjectRoot: string) => T): T {
   const prevCwd = process.cwd();
   const keys = [
-    'PIPELINE_UI_RUN_ID',
-    'PIPELINE_UI_PARENT_RUN_ID',
+    'PIPELINE_RUN_ID',
+    'PIPELINE_PARENT_RUN_ID',
     'CLAUDE_SESSION_ID',
-    'PIPELINE_UI_DEBUG',
+    'PIPELINE_JOURNAL_DEBUG',
     'USERPROFILE',
     'HOME',
     'PIPELINE_WORKTREE_SCOPED',
@@ -146,10 +146,10 @@ function inProject<T>(f: Fixture, fn: (realProjectRoot: string) => T): T {
   for (const k of keys) saved[k] = process.env[k];
   try {
     process.chdir(f.project);
-    delete process.env.PIPELINE_UI_RUN_ID;
-    delete process.env.PIPELINE_UI_PARENT_RUN_ID;
+    delete process.env.PIPELINE_RUN_ID;
+    delete process.env.PIPELINE_PARENT_RUN_ID;
     delete process.env.CLAUDE_SESSION_ID;
-    delete process.env.PIPELINE_UI_DEBUG;
+    delete process.env.PIPELINE_JOURNAL_DEBUG;
     delete process.env.PIPELINE_WORKTREE_SCOPED;
     process.env.USERPROFILE = f.home;
     process.env.HOME = f.home;

@@ -1,5 +1,5 @@
 /**
- * PIPELINE_UI_TRANSCRIPTS — the transcript opt-out split.
+ * PIPELINE_JOURNAL_TRANSCRIPTS — the transcript opt-out split.
  *
  *   bun test tests/transcript-opt-out.test.ts
  *
@@ -7,16 +7,16 @@
  * transcript work: the transcript POINTER recorded on a mirror binding (which
  * is what makes a session's transcript reachable by anything downstream) and
  * the Stop hook's transcript token tail (analytics_relay.ts handleStop). It is
- * orthogonal to the MASTER switch PIPELINE_UI_ENABLED and to
+ * orthogonal to the MASTER switch PIPELINE_JOURNAL_ENABLED and to
  * PIPELINE_STATS_ENABLED.
  *
  * Semantics matrix under test:
  *   • both unset (default)                    → FULL (unchanged behaviour)
- *   • PIPELINE_UI_TRANSCRIPTS=0, master on    → basic lifecycle events + run
+ *   • PIPELINE_JOURNAL_TRANSCRIPTS=0, master on    → basic lifecycle events + run
  *                                               correlation stay; NO transcript
  *                                               pointer on the binding, NO
  *                                               turn.usage tail
- *   • PIPELINE_UI_ENABLED=0 (master off)      → the hook no-ops entirely
+ *   • PIPELINE_JOURNAL_ENABLED=0 (master off)      → the hook no-ops entirely
  *
  * The local dashboard's MirrorService — the third consumer this switch used to
  * gate, which copied transcript content into a browser chat panel — is deleted
@@ -49,10 +49,10 @@ import { tmpdir } from "node:os";
 import {
   handlePreToolUse,
   handleStop,
-  pipelineUiEnabled,
-  pipelineUiTranscriptsEnabled as hookTranscriptsEnabled,
+  journalEnabled,
+  journalTranscriptsEnabled as hookTranscriptsEnabled,
 } from "../../../hooks/analytics_relay.ts";
-import { pipelineUiTranscriptsEnabled as cliTranscriptsEnabled } from "../src/lib/event.ts";
+import { journalTranscriptsEnabled as cliTranscriptsEnabled } from "../src/lib/event.ts";
 
 const HOOK_PATH = join(import.meta.dir, "..", "..", "..", "hooks", "analytics_relay.ts");
 
@@ -63,14 +63,14 @@ const HOOK_PATH = join(import.meta.dir, "..", "..", "..", "hooks", "analytics_re
 //    both go through). The daemon's third copy died with the dashboard.
 // --------------------------------------------------------------------
 
-describe("pipelineUiTranscriptsEnabled — three-way parse (default ON)", () => {
+describe("journalTranscriptsEnabled — three-way parse (default ON)", () => {
   let prev: string | undefined;
   beforeEach(() => {
-    prev = process.env.PIPELINE_UI_TRANSCRIPTS;
+    prev = process.env.PIPELINE_JOURNAL_TRANSCRIPTS;
   });
   afterEach(() => {
-    if (prev === undefined) delete process.env.PIPELINE_UI_TRANSCRIPTS;
-    else process.env.PIPELINE_UI_TRANSCRIPTS = prev;
+    if (prev === undefined) delete process.env.PIPELINE_JOURNAL_TRANSCRIPTS;
+    else process.env.PIPELINE_JOURNAL_TRANSCRIPTS = prev;
   });
 
   const readers: Array<[string, () => boolean]> = [
@@ -80,37 +80,37 @@ describe("pipelineUiTranscriptsEnabled — three-way parse (default ON)", () => 
 
   for (const [label, reader] of readers) {
     test(`${label}: unset → ON`, () => {
-      delete process.env.PIPELINE_UI_TRANSCRIPTS;
+      delete process.env.PIPELINE_JOURNAL_TRANSCRIPTS;
       expect(reader()).toBe(true);
     });
     test(`${label}: empty → ON`, () => {
-      process.env.PIPELINE_UI_TRANSCRIPTS = "";
+      process.env.PIPELINE_JOURNAL_TRANSCRIPTS = "";
       expect(reader()).toBe(true);
     });
     test(`${label}: unrelated value (e.g. "1"/"yes") → ON`, () => {
-      process.env.PIPELINE_UI_TRANSCRIPTS = "1";
+      process.env.PIPELINE_JOURNAL_TRANSCRIPTS = "1";
       expect(reader()).toBe(true);
-      process.env.PIPELINE_UI_TRANSCRIPTS = "yes";
+      process.env.PIPELINE_JOURNAL_TRANSCRIPTS = "yes";
       expect(reader()).toBe(true);
     });
     for (const falsy of ["0", "false", "no", "off", "OFF", " Off "]) {
       test(`${label}: ${JSON.stringify(falsy)} → OFF`, () => {
-        process.env.PIPELINE_UI_TRANSCRIPTS = falsy;
+        process.env.PIPELINE_JOURNAL_TRANSCRIPTS = falsy;
         expect(reader()).toBe(false);
       });
     }
   }
 
-  test("master reader (PIPELINE_UI_ENABLED) is independent and also default-ON", () => {
-    const prevMaster = process.env.PIPELINE_UI_ENABLED;
+  test("master reader (PIPELINE_JOURNAL_ENABLED) is independent and also default-ON", () => {
+    const prevMaster = process.env.PIPELINE_JOURNAL_ENABLED;
     try {
-      delete process.env.PIPELINE_UI_ENABLED;
-      expect(pipelineUiEnabled()).toBe(true);
-      process.env.PIPELINE_UI_ENABLED = "0";
-      expect(pipelineUiEnabled()).toBe(false);
+      delete process.env.PIPELINE_JOURNAL_ENABLED;
+      expect(journalEnabled()).toBe(true);
+      process.env.PIPELINE_JOURNAL_ENABLED = "0";
+      expect(journalEnabled()).toBe(false);
     } finally {
-      if (prevMaster === undefined) delete process.env.PIPELINE_UI_ENABLED;
-      else process.env.PIPELINE_UI_ENABLED = prevMaster;
+      if (prevMaster === undefined) delete process.env.PIPELINE_JOURNAL_ENABLED;
+      else process.env.PIPELINE_JOURNAL_ENABLED = prevMaster;
     }
   });
 });
@@ -127,7 +127,7 @@ interface Binding {
   kind: string;
 }
 
-describe("hook: PIPELINE_UI_TRANSCRIPTS gates ONLY transcript work", () => {
+describe("hook: PIPELINE_JOURNAL_TRANSCRIPTS gates ONLY transcript work", () => {
   let tmpRoot: string;
   let homeDir: string;
   let projectRoot: string;
@@ -149,14 +149,14 @@ describe("hook: PIPELINE_UI_TRANSCRIPTS gates ONLY transcript work", () => {
     homeDir = mkdtempSync(join(tmpRoot, "home-"));
     prevHome = process.env.HOME;
     prevUserProfile = process.env.USERPROFILE;
-    prevTranscripts = process.env.PIPELINE_UI_TRANSCRIPTS;
-    prevMaster = process.env.PIPELINE_UI_ENABLED;
+    prevTranscripts = process.env.PIPELINE_JOURNAL_TRANSCRIPTS;
+    prevMaster = process.env.PIPELINE_JOURNAL_ENABLED;
     process.env.HOME = homeDir;
     process.env.USERPROFILE = homeDir;
     // These handler-level tests run with the MASTER switch ON (default); the
     // handlers themselves never consult it (main() does), so we assert the
     // transcript switch in isolation.
-    delete process.env.PIPELINE_UI_ENABLED;
+    delete process.env.PIPELINE_JOURNAL_ENABLED;
     projectRoot = mkdtempSync(join(tmpRoot, "proj-"));
     mkdirSync(join(projectRoot, ".pipeline", ".runtime"), { recursive: true });
     eventsPath = join(projectRoot, ".pipeline", ".runtime", "events.jsonl");
@@ -170,8 +170,8 @@ describe("hook: PIPELINE_UI_TRANSCRIPTS gates ONLY transcript work", () => {
     };
     restore("HOME", prevHome);
     restore("USERPROFILE", prevUserProfile);
-    restore("PIPELINE_UI_TRANSCRIPTS", prevTranscripts);
-    restore("PIPELINE_UI_ENABLED", prevMaster);
+    restore("PIPELINE_JOURNAL_TRANSCRIPTS", prevTranscripts);
+    restore("PIPELINE_JOURNAL_ENABLED", prevMaster);
   });
 
   function readBindings(): Binding[] {
@@ -221,7 +221,7 @@ describe("hook: PIPELINE_UI_TRANSCRIPTS gates ONLY transcript work", () => {
   }
 
   test("DEFAULT (unset): binding carries the transcript pointer + Stop emits turn.usage", () => {
-    delete process.env.PIPELINE_UI_TRANSCRIPTS;
+    delete process.env.PIPELINE_JOURNAL_TRANSCRIPTS;
     const transcript = writeUsageTranscript();
 
     handlePreToolUse(managerPre("/tmp/session-abc.jsonl"), projectRoot, null);
@@ -235,8 +235,8 @@ describe("hook: PIPELINE_UI_TRANSCRIPTS gates ONLY transcript work", () => {
     expect(readEventTypes()).toContain("turn.usage");
   });
 
-  test("PIPELINE_UI_TRANSCRIPTS=0: basic events survive, pointer nulled, NO turn.usage", () => {
-    process.env.PIPELINE_UI_TRANSCRIPTS = "0";
+  test("PIPELINE_JOURNAL_TRANSCRIPTS=0: basic events survive, pointer nulled, NO turn.usage", () => {
+    process.env.PIPELINE_JOURNAL_TRANSCRIPTS = "0";
     const transcript = writeUsageTranscript();
 
     handlePreToolUse(managerPre("/tmp/session-abc.jsonl"), projectRoot, null);
@@ -258,11 +258,11 @@ describe("hook: PIPELINE_UI_TRANSCRIPTS gates ONLY transcript work", () => {
 });
 
 // --------------------------------------------------------------------
-// 3. Master switch PIPELINE_UI_ENABLED=0 → the hook no-ops entirely
+// 3. Master switch PIPELINE_JOURNAL_ENABLED=0 → the hook no-ops entirely
 //    (all-off). Driven end-to-end through the hook's stdin entry point.
 // --------------------------------------------------------------------
 
-describe("hook master switch PIPELINE_UI_ENABLED=0 → all off", () => {
+describe("hook master switch PIPELINE_JOURNAL_ENABLED=0 → all off", () => {
   let tmpRoot: string;
   beforeAll(() => {
     tmpRoot = mkdtempSync(join(tmpdir(), "pp-master-"));
@@ -298,8 +298,8 @@ describe("hook master switch PIPELINE_UI_ENABLED=0 → all off", () => {
         ...process.env,
         HOME: homeDir,
         USERPROFILE: homeDir,
-        PIPELINE_UI_ENABLED: master,
-        PIPELINE_UI_DEBUG: "0",
+        PIPELINE_JOURNAL_ENABLED: master,
+        PIPELINE_JOURNAL_DEBUG: "0",
       },
       stdin: new Blob([payload]),
       stdout: "ignore",
