@@ -139,7 +139,6 @@ import {
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { ensureGeneratedDir } from './generated-dir';
-import { scrubFilteredPayload } from './path-privacy';
 import {
   filterEventForTier,
   filterStatsRecordMetadata,
@@ -1128,44 +1127,35 @@ export class TelemetryOutbox {
    *
    * - `event`: the whole envelope + per-type `data` allowlist
    *   (`filterEventForTier`). Unknown type ⇒ `data: {}`; unknown field within a
-   *   known type ⇒ dropped; absolute paths ⇒ fingerprints.
+   *   known type ⇒ dropped; root paths ⇒ fingerprints; and, at the metadata
+   *   tier, SG4: no absolute path and no OS account name survives in any
+   *   field, whatever its name.
    * - `stats`: `RunFailureDetail.error` excerpts are stripped at EVERY tier
    *   (design D16 / G-sec-2), then the nested metadata allowlist applies at
-   *   the metadata tier.
-   * - BOTH, at the metadata tier: the SG4 path scrub (`b22`,
-   *   `lib/path-privacy.ts`). The allowlist above disposes of a path by the
-   *   NAME of its field, so the `keep`-classified step-identity fields
-   *   (`iteration_path`, `next_iteration_path`, `first_iteration_path`,
-   *   `script_path`, `parent_iteration_path`) shipped whatever the emitter
-   *   handed them — and the engine hands them `PlanStep.path`, which is
-   *   absolute by construction. The scrub makes the SHAPE of the value the
-   *   rule instead: relativized against this run's own roots where possible,
-   *   fingerprinted where not, never raw. Read `path-privacy.ts`'s header for
-   *   the full derivation and for why it is composed over the vendored filter
-   *   rather than written into it.
+   *   the metadata tier — SG4 included, which is what reaches
+   *   `failures[].step`.
    *
-   *   The roots come from the UNFILTERED payload — after the allowlist,
-   *   `project_root` is already `fp:<hash>` and names nothing — plus this
-   *   outbox's own project root, which is the only root a bare `stats` record
-   *   (no envelope) has.
+   * `pathRoots` is the ONE thing this seam has to tell the filter: the roots an
+   * absolute path may be relativized against. The filter reads the payload's
+   * own (`project_root`, `worktree`, `pipeline_root`, …) itself; this adds the
+   * outbox's project root, which is the only root a bare `stats` record — no
+   * envelope — has at all.
+   *
+   * ux-v2 `b23`: SG4 used to be COMPOSED here, as `lib/path-privacy.ts` layered
+   * over the vendored filter, because `b22`'s specification required the rule
+   * to land upstream first and this file could not touch a byte-identical
+   * vendored copy. It has landed (`pipeline-runner`), the copy is re-vendored,
+   * and the composition is deleted. There is one rule and it lives in the
+   * filter — which is also why `tests/path-privacy.test.ts` and
+   * `tests/sg4-production-repro.test.ts` now drive the filter alone.
    */
   private filterPayload(kind: OutboxKind, payload: Record<string, unknown>): Record<string, unknown> {
-    const scrub = (filtered: Record<string, unknown>): Record<string, unknown> =>
-      this.tier === 'metadata'
-        ? scrubFilteredPayload(filtered, payload, {
-            fingerprintSalt: this.salt,
-            extraRoots: [this.projectRoot],
-          })
-        : filtered;
+    const options = { fingerprintSalt: this.salt, pathRoots: [this.projectRoot] };
     if (kind === 'stats') {
       const stripped = stripStatsFailureExcerpts(payload);
-      return scrub(
-        this.tier === 'metadata'
-          ? filterStatsRecordMetadata(stripped, { fingerprintSalt: this.salt })
-          : stripped,
-      );
+      return this.tier === 'metadata' ? filterStatsRecordMetadata(stripped, options) : stripped;
     }
-    return scrub(filterEventForTier(payload, this.tier, { fingerprintSalt: this.salt }));
+    return filterEventForTier(payload, this.tier, options);
   }
 
   /** Per-run monotonic `seq`, demultiplexed out of the interleaved journal and

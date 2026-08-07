@@ -33,6 +33,12 @@
 // relativized, and one outside it, which must come back fingerprinted. The rule
 // itself, and its own reproduction of the production payloads, live in
 // `tests/path-privacy.test.ts` and `tests/sg4-production-repro.test.ts`.
+//
+// ux-v2 `b23` moved that rule from `b22`'s CLI-side composition INTO the
+// vendored filter and deleted `src/lib/path-privacy.ts`. The assertions below
+// are unchanged and still pass, which is the point: this suite drives the real
+// `TelemetryOutbox`, so it measures the SEAM's behaviour and does not care
+// which side of the seam enforces the rule.
 
 import { afterAll, describe, expect, test } from 'bun:test';
 import {
