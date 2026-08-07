@@ -1,7 +1,7 @@
 /**
  * `commands/telemetry-daemon.ts`'s own `ensureTelemetryDaemonRunning` /
  * `acquireDaemonLock` (ux-v2 b12) — the headless-`drive` counterpart of
- * `hooks/analytics_relay.ts`'s `ensureTelemetryDaemonRunning`, exercised the
+ * `src/hooks/analytics-relay.ts`'s `ensureTelemetryDaemonRunning`, exercised the
  * same two-layer way `<plugin-root>/tests/hook-telemetry-daemon-lock.test.ts`
  * exercises the hook's copy:
  *

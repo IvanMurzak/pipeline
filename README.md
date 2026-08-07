@@ -301,6 +301,32 @@ drive everything. A project with no submodules resolves an empty candidate set �
 noop. Assumes `git` + `gh` on PATH (like the pipeline's other git work); a missing
 `gh` is a clean exit-2 env error.
 
+### `hook` — the Claude Code hook relays
+
+```bash
+pipeline hook <analytics-relay|stats-relay|session-relay|department-notifier-relay|prompt-match-relay>
+```
+
+**Not meant to be run by hand.** The Pipeline plugin for Claude Code registers
+these five relays in its `hooks/hooks.json` and invokes them through
+`hooks/run-hook.sh`, a POSIX-sh shim that resolves an absolute `pipeline` binary
+before exec'ing — Claude Code runs hooks through a **non-interactive `/bin/sh`**
+which never sources `~/.zshrc`, so a Dock- or Start-menu-launched session cannot
+otherwise see `~/.bun/bin`.
+
+Each relay reads its hook JSON payload on stdin, writes any hook output
+(`hookSpecificOutput.additionalContext`) on stdout, and **always exits 0** — a
+non-zero exit from `PreToolUse` blocks the tool call and from `UserPromptSubmit`
+blocks the prompt, and nothing a best-effort journal writer can fail at is worth
+that. Exit `2` is reserved for an unknown or missing name, which means a
+malformed `hooks.json` rather than a runtime condition.
+
+They live here, rather than in the plugin, so **the hook's version is the CLI's
+version by construction**. While the plugin shipped both a copy of this CLI and
+the relays, a user who had also installed `@baizor/pipeline` globally had two
+copies at potentially different versions and the hooks always ran the plugin's,
+with nothing detecting the divergence.
+
 ## Tests
 
 ```bash

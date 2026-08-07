@@ -415,7 +415,7 @@ describe('the --target=node bundle', () => {
 
 // ── 7. UUIDv5 (RFC 9562 §5.5) — derivation, not minting (ux-v2 b2) ──────────
 //
-// `uuidv5` is additive: it exists so `hooks/analytics_relay.ts` can derive a
+// `uuidv5` is additive: it exists so `src/hooks/analytics-relay.ts` can derive a
 // DETERMINISTIC id from `tool_use_id` (see `hookIdFromToolUseId` below and
 // `<plugin-root>/tests/hook-bypass-id-determinism.test.ts` for the
 // cross-PROCESS version of the determinism check — calling a function twice
@@ -508,7 +508,7 @@ describe('uuidv5 — server-derived step-class vectors (parity with @baizor/pipe
 
 // ── 8. hookIdFromToolUseId — the ONE CLI-side v5 caller ──────────────────────
 
-describe('hookIdFromToolUseId (hooks/analytics_relay.ts bypassRunIdFromToolUseId)', () => {
+describe('hookIdFromToolUseId (src/hooks/analytics-relay.ts bypassRunIdFromToolUseId)', () => {
   test('pinned test vector', () => {
     expect(hookIdFromToolUseId('toolu_01H8XJZ7K9M2NPQR3STUVWXYZ0')).toBe(
       '5e429d42-e46c-5bfb-9fb4-6d56bae76e01',

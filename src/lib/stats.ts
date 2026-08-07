@@ -14,7 +14,7 @@
 // Wiring: `pipeline next` (and therefore `pipeline drive`, which shares
 // invokeNext) appends timeline lines in-process as actions/records flow
 // through, and finalizes on the terminal action. The SubagentStop stats relay
-// hook (hooks/stats_relay.ts) later enriches finished runs with token counts
+// hook (src/hooks/stats-relay.ts) later enriches finished runs with token counts
 // folded from the manager transcript (lib/vendor/transcript-walk.ts —
 // the only complete token source; hook-emitted turn.usage undercounts).
 //
@@ -482,7 +482,7 @@ export function statsFinalizeRun(
 }
 
 // ---------------------------------------------------------------------------
-// Token enrichment (called by hooks/stats_relay.ts + `pipeline stats`)
+// Token enrichment (called by src/hooks/stats-relay.ts + `pipeline stats`)
 // ---------------------------------------------------------------------------
 
 /** Every runs.jsonl under the stats base (recursive; skips per-run `runs/`). */

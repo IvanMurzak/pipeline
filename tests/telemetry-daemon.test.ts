@@ -3,7 +3,7 @@
 // (src/commands/telemetry-daemon.ts, ux-v2 b11).
 //
 // The lock ACQUIRE/reclaim scheme itself — the atomic `wx` race fix and its
-// stale-lock reclamation — lives in `hooks/analytics_relay.ts`
+// stale-lock reclamation — lives in `src/hooks/analytics-relay.ts`
 // (`ensureTelemetryDaemonRunning` / `acquireTelemetryDaemonLock`), tested in
 // `<plugin-root>/tests/hook-telemetry-daemon-lock.test.ts` (that file also
 // carries the mutation check for the race fix). This file covers everything
@@ -209,7 +209,7 @@ describe('documented bounds', () => {
     expect(DEFAULT_IDLE_EXIT_MS).toBe(2 * 60_000);
     expect(DEFAULT_MAX_WALL_CLOCK_MS).toBe(30 * 60_000);
     // The hook's stale-reclaim bound must sit comfortably above the
-    // daemon's own wall-clock cap — see hooks/analytics_relay.ts and
+    // daemon's own wall-clock cap — see src/hooks/analytics-relay.ts and
     // <superrepo>/tests/cross-repo/telemetry-daemon-lock-parity.test.ts.
     expect(LOCK_STALE_AGE_MS).toBe(DEFAULT_MAX_WALL_CLOCK_MS + 5 * 60_000);
   });

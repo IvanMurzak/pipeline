@@ -10,6 +10,29 @@
 # git-worktree and subprocess-spawning suites flake under 8-worker load on a
 # developer machine.
 #
+# ── THE HOOK RELAYS RUN IN THIS JOB (plugin-thin `p6`) ──────────────────────
+# `src/hooks/` holds the five Claude Code hook relays — analytics · stats ·
+# session · department-notifier · prompt-match — that used to be `.ts` scripts
+# inside `pipeline-claude/hooks/`, spawned as `bun <relay>.ts`. They are now
+# `pipeline hook <name>` subcommands, so a hook's version IS this package's
+# version, and the plugin's `hooks/hooks.json` reaches them through
+# `hooks/run-hook.sh` (which survives, and now resolves `pipeline` instead of
+# `bun`).
+#
+# Their thirteen suites came with them — `tests/hook-*.test.ts`,
+# `tests/mirror-*.test.ts` — and the "Run unit tests" step below is the job
+# that executes them. A RELOCATED TEST NO JOB RUNS IS A DELETED TEST: that is
+# why this is written down rather than left implicit in a directory glob.
+# `tests/hook-subcommand.test.ts` additionally proves every registered name
+# actually dispatches; the parity check against what the PLUGIN invokes needs
+# both repositories on disk and lives in the parent monorepo's
+# `tests/cross-repo/` suite.
+#
+# Windows is in the matrix for these specifically, not only out of caution:
+# the daemon-lock suites turn on `wx` exclusive-create and real cross-process
+# spawns, and the shim that resolves this binary for a hook is the one place
+# this project has already been bitten by an npm/bun divergence there.
+#
 # ⚠ Never gate anything on a PIPED test command. `bun test … | tail -n` exits
 # with TAIL's status, so a red suite reports success. Read the runner's own exit
 # code — which is exactly what these steps do by not piping at all.

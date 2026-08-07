@@ -11,7 +11,7 @@
 // kv coercion, worktree detection, rotation, mirror-binding, and liveness logic
 // are byte-for-byte compatible with the Python so the two emitters can write the
 // same journal interchangeably. The worktree/envelope logic intentionally
-// mirrors hooks/analytics_relay.ts (resolveProjectRoot, SCHEMA_VERSION, the
+// mirrors src/hooks/analytics-relay.ts (resolveProjectRoot, SCHEMA_VERSION, the
 // event envelope) so the journal stays consistent — but the logic is duplicated
 // here, not imported, to keep pipeline-cli self-contained.
 //
@@ -34,7 +34,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, dirname, resolve, isAbsolute, basename } from 'node:path';
 
-// Schema v5 — see EVENTS.md. Kept in lockstep with analytics_relay.ts /
+// Schema v5 — see EVENTS.md. Kept in lockstep with analytics-relay.ts /
 // server.ts. v4 added the optional `step_id` field on iteration.* events; v5
 // RENAMES it to `step_name` (pipeline v2: a step is a manifest entry named by
 // `name:`). The rename is the only non-additive change in the journal's
@@ -44,8 +44,8 @@ import { join, dirname, resolve, isAbsolute, basename } from 'node:path';
 // keep folding, so no already-computed analytic reattributes.
 export const SCHEMA_VERSION = 5;
 
-// Keep in sync with hooks/analytics_relay.ts's MIRROR_BINDING_SCHEMA (issue #11).
-// The bindings journal is now read by analytics_relay.ts's own session→run
+// Keep in sync with src/hooks/analytics-relay.ts's MIRROR_BINDING_SCHEMA (issue #11).
+// The bindings journal is now read by analytics-relay.ts's own session→run
 // lookup; the dashboard's MirrorService that first consumed it is deleted.
 export const MIRROR_BINDING_SCHEMA = 1;
 
@@ -67,13 +67,13 @@ export function journalTranscriptsEnabled(): boolean {
 }
 
 /** Master journal opt-out switch (`PIPELINE_JOURNAL_ENABLED`, default ON) — the same
- *  first-statement gate `hooks/analytics_relay.ts` and `hooks/session_relay.ts`
+ *  first-statement gate `src/hooks/analytics-relay.ts` and `src/hooks/session-relay.ts`
  *  apply. Only an explicit falsy value (`0`/`false`/`no`/`off`) disables; unset,
  *  empty and every other value leave it enabled.
  *
  *  This is the CLI-side copy of the helper the two hooks duplicate (they cannot
  *  import a sibling at runtime), so the count of independent copies is three:
- *  here, `hooks/analytics_relay.ts`, and `hooks/session_relay.ts`. Keep the
+ *  here, `src/hooks/analytics-relay.ts`, and `src/hooks/session-relay.ts`. Keep the
  *  falsy-parse semantics identical in all of them.
  *
  *  Used by {@link registerDriveSessionBinding}: "opted out ⇒ no mirror
@@ -139,7 +139,7 @@ function normcase(p: string): string {
  *  bindings journal.
  *
  *  Reads process.env first (USERPROFILE/HOME) so tests can override the home
- *  dir between cases — matching analytics_relay.ts:mirrorBindingsPath, since
+ *  dir between cases — matching analytics-relay.ts:mirrorBindingsPath, since
  *  Node's os.homedir() caches the home dir at process start. */
 function userHomeRuntime(): string {
   const home = process.env.USERPROFILE ?? process.env.HOME ?? homedir();
@@ -167,7 +167,7 @@ export interface ResolvedRoot {
  *    (mainRoot, cur).
  *  - no `.git` found → (resolve(start), null).
  *
- *  Mirrors writer.py:resolve_project_root and analytics_relay.ts:
+ *  Mirrors writer.py:resolve_project_root and analytics-relay.ts:
  *  resolveProjectRoot byte-for-byte. */
 /** The main working tree recorded in a submodule's module directory.
  *

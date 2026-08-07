@@ -8,7 +8,7 @@
 //
 // HOME isolation: every case points USERPROFILE/HOME at a per-test temp dir so
 // the lib resolves the home dir from process.env first (matching
-// analytics_relay.ts).
+// analytics-relay.ts).
 //
 // @serial: real git + temp-dir lifecycle suite — flaky under N-way parallel CPU
 // contention; held out of the parallel pool and run in the serial phase
