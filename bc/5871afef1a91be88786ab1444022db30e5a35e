@@ -1,0 +1,19 @@
+docs/cli.md
+  s_22c8111284a304::t_6a6d3d58676c4a 39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "bc5871afef1a91be88786ab1444022db30e5a35e",
+  "prompts": {},
+  "sessions": {
+    "s_22c8111284a304": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_22c8111284a304",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
