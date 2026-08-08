@@ -52,9 +52,15 @@ import {
   PRIVACY_TIER_ENV,
   QUESTION_PLACEHOLDER,
   resolvePrivacyTier,
+  STEP_IDENTITY_FIELD,
+  STEP_SCOPED_EVENT_TYPES,
+  stepShapedAllowlistViolations,
   stripStatsFailureExcerpts,
   SUMMARY_MAX_CHARS,
 } from '../src/lib/vendor/privacy';
+
+/** A real CLI-minted step identity (`b4`): UUIDv7, version nibble `7`. */
+const STEP_UUID = '019fded9-3a7c-7c31-9f0e-2b5a1d4e8c60';
 
 /** The same journal-event envelope shape pipeline-runner's shipper reads —
  *  local factory so this test file needs nothing outside this package. */
@@ -337,18 +343,26 @@ describe('vendored privacy filter — v5 step-key rename', () => {
   // the rename. (`b23`: a step NAME is a name, not a path — it is not
   // path-shaped and the SG4 scrub does not touch it. The step's PATH is covered
   // in the SG4 section at the bottom of this file.)
+  // ux-v2 `b24` CORRECTED THIS TEST. It asserted the two NAME fields and
+  // stopped there, so it passed green against a filter that was stripping the
+  // step's ROW IDENTITY (`step_uuid`) off these same three events — the
+  // omission that made the cloud write two rows per step. A conformance test
+  // that enumerates an allowlist's fields by hand encodes whatever the
+  // allowlist happened to contain when it was written; that is how it survived.
   test.each(['iteration.started', 'iteration.resumed', 'iteration.completed'])(
-    '%s keeps BOTH step_name (v5) and step_id (v4) at metadata tier',
+    '%s keeps step_name (v5), step_id (v4) AND step_uuid (b4 row identity)',
     (type) => {
       const event = journalEvent(type, 'r1', {
         iteration_path: 'steps/03-review.md',
         outcome: 'completed',
         step_name: 'review',
         step_id: 'review',
+        step_uuid: STEP_UUID,
       });
       const data = (filterEventForTier(event, 'metadata') as { data: Record<string, unknown> }).data;
       expect(data.step_name).toBe('review');
       expect(data.step_id).toBe('review');
+      expect(data.step_uuid).toBe(STEP_UUID);
     },
   );
 
@@ -686,5 +700,86 @@ describe('vendored privacy filter — SG4: an absolute path never survives, what
     for (const tier of ['events', 'full'] as const) {
       expect(filterEventForTier(event, tier)).toBe(event);
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE STEP-IDENTITY RULE (ux-v2 `b24`; `02` D15, migration 049)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// D15 gives a step ONE identity so its TWO reporters — the `iteration.*` event
+// stream and the `stats.run_record` fold — name ONE `step_executions` row. The
+// CLI mints it (`b4`) and writes it to both local paths correctly; this filter
+// stripped it off both, because deny-by-default plus an allowlist that never
+// mentioned `step_uuid` is a silent delete. `grep -c step_uuid` over the
+// shipped filter returned 0, the server derived a row identity per path over
+// two different keys, and production held four `step_executions` rows for two
+// steps — which is what refused gate G6.
+//
+// The section above is where this SHOULD have been caught: it asserted the two
+// NAME fields survive and never asked about the identity.
+
+describe('vendored privacy filter — the step-identity rule (b24)', () => {
+  test('THE SWEEP: no step-shaped allowlist is missing step identity', () => {
+    // Computed over the LIVE tables, so a new step-shaped allowlist that
+    // forgets the identity fails here instead of stripping it in production.
+    expect(stepShapedAllowlistViolations()).toEqual([]);
+  });
+
+  test.each([...STEP_SCOPED_EVENT_TYPES])(
+    '%s carries step_uuid through the metadata tier',
+    (type) => {
+      const event = journalEvent(type, 'r1', { iteration_path: 'steps/01.md', step_uuid: STEP_UUID });
+      const data = (filterEventForTier(event, 'metadata') as { data: Record<string, unknown> }).data;
+      expect(data[STEP_IDENTITY_FIELD]).toBe(STEP_UUID);
+    },
+  );
+
+  test('the stats fold carries step_uuid on every StepStat', () => {
+    const filtered = filterStatsRecordMetadata({
+      run_id: 'r1',
+      steps: [
+        { id: '01-prepare', seconds: 12, outcome: 'pass', step_uuid: STEP_UUID },
+        { id: '02-finish', seconds: 5, outcome: 'pass' }, // pre-`b4`: absent, not invented
+      ],
+    });
+    const steps = filtered.steps as Array<Record<string, unknown>>;
+    expect(steps[0]?.[STEP_IDENTITY_FIELD]).toBe(STEP_UUID);
+    expect(steps[1]).not.toHaveProperty(STEP_IDENTITY_FIELD);
+  });
+
+  test('D15: both reporters ship the SAME uuid, so the cloud sees ONE row', () => {
+    const fromEvent = (
+      filterEventForTier(
+        journalEvent('iteration.completed', 'r1', {
+          iteration_path: 'steps/01-prepare.md',
+          outcome: 'completed',
+          step_name: '01-prepare',
+          step_uuid: STEP_UUID,
+        }),
+        'metadata',
+      ) as { data: Record<string, unknown> }
+    ).data[STEP_IDENTITY_FIELD];
+    const fromStats = (
+      filterStatsRecordMetadata({
+        run_id: 'r1',
+        steps: [{ id: '01-prepare', outcome: 'pass', step_uuid: STEP_UUID }],
+      }).steps as Array<Record<string, unknown>>
+    )[0]?.[STEP_IDENTITY_FIELD];
+    expect(fromEvent).toBe(STEP_UUID);
+    expect(fromStats).toBe(STEP_UUID);
+    expect(fromEvent).toBe(fromStats);
+  });
+
+  test('a step uuid is not path-shaped, so the SG4 scrub leaves it alone', () => {
+    // The privacy decision, asserted: a locally-minted UUIDv7 is a timestamp
+    // plus random bits — not a path, not an account name, not content. `keep`,
+    // not `fingerprint`: fingerprinting an already-opaque identifier buys no
+    // privacy and would BREAK the row identity, since the two reporters'
+    // values must stay byte-equal to name one row.
+    expect(looksAbsolutePath(STEP_UUID)).toBe(false);
+    expect(SG4_PATH_RE.test(STEP_UUID)).toBe(false);
+    expect(scrubPathString(STEP_UUID)).toBe(STEP_UUID);
+    expect(fingerprintString(STEP_UUID)).not.toBe(STEP_UUID);
   });
 });
