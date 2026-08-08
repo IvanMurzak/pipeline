@@ -420,8 +420,12 @@ test('every env-file value is unquoted, space-free and metacharacter-free — as
       expect(`${k}: quotes=${/["']/.test(v)}`).toBe(`${k}: quotes=false`);
       expect(`${k}: whitespace=${/\s/.test(v)}`).toBe(`${k}: whitespace=false`);
       expect(`${k}: backslash=${v.includes('\\')}`).toBe(`${k}: backslash=false`);
-      expect(`${k}: metachars=${/[$`;|&<>(){}\[\]*?!#~^%]/.test(v)}`).toBe(`${k}: metachars=false`);
+      expect(`${k}: metachars=${/[$`;|&<>(){}\[\]*?!#^%]/.test(v)}`).toBe(`${k}: metachars=false`);
       expect(`${k}: allowed=${ENV_VALUE_RE.test(v)}`).toBe(`${k}: allowed=true`);
+      // `~` is legal INSIDE a value — Windows 8.3 path segments (`RUNNER~1`,
+      // which is what TEMP looks like on GitHub's Windows runner) are full of
+      // them — but never at a position where a shell would expand it.
+      expect(`${k}: tilde-expands=${/(^~|:~)/.test(v)}`).toBe(`${k}: tilde-expands=false`);
       // No `export ` prefix, no padding: the tolerant parser would forgive all
       // three, the shell consumer would not always.
       expect(text).toContain(`\n${k}=${v}\n`);
@@ -463,7 +467,11 @@ test('unsafeEnvEntry names exactly what `set -a && source` cannot survive', () =
   expect(unsafeEnvEntry('WORKTREE_PATH', 'C:/tmp/slots/a3')).toBeNull();
   expect(unsafeEnvEntry('PORT_BASE', '31000')).toBeNull();
   expect(unsafeEnvEntry('EMPTY', '')).toBeNull();
-  for (const bad of ['a b', 'a\tb', 'C:\\tmp\\x', '"quoted"', "'q'", 'a;b', 'a|b', 'a&b', '$HOME', '`id`', 'a>b', 'a*b', 'a#b', '~/x', 'a\nb']) {
+  // A Windows 8.3 short path is ACCEPTED — it is what TEMP looks like on
+  // GitHub's Windows runner, and refusing `~` outright would make the
+  // provisioner unusable there.
+  expect(unsafeEnvEntry('WORKTREE_PATH', 'C:/Users/RUNNER~1/AppData/Local/Temp/wtroot-x/slot')).toBeNull();
+  for (const bad of ['a b', 'a\tb', 'C:\\tmp\\x', '"quoted"', "'q'", 'a;b', 'a|b', 'a&b', '$HOME', '`id`', 'a>b', 'a*b', 'a#b', '~/x', 'a:~/x', 'a\nb']) {
     expect(`${JSON.stringify(bad)}: ${unsafeEnvEntry('K', bad) === null ? 'ACCEPTED' : 'refused'}`).toBe(
       `${JSON.stringify(bad)}: refused`,
     );

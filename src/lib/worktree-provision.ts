@@ -132,11 +132,21 @@ export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** Values: an ALLOW-list, never a blocklist. Letters, digits, and the handful
  *  of punctuation characters a path/branch/port needs — `.` `_` `-` `/` `:`
- *  `+` `@` `,` `=`. Excludes by construction: whitespace of any kind, `\`,
+ *  `+` `@` `,` `=` `~`. Excludes by construction: whitespace of any kind, `\`,
  *  quotes, `` ` ``, `$`, `;` `|` `&` `<` `>` `(` `)` `{` `}` `[` `]` `*` `?`
- *  `!` `#` `~` and control characters — i.e. everything that changes meaning
- *  under `set -a && source`. Empty is legal (`KEY=`). */
-export const ENV_VALUE_RE = /^[A-Za-z0-9._:/+@,=-]*$/;
+ *  `!` `#` `^` `%` and control characters — i.e. everything that changes
+ *  meaning under `set -a && source`. Empty is legal (`KEY=`).
+ *
+ *  `~` is allowed INSIDE a value and refused at the two positions where a shell
+ *  would expand it (see `TILDE_EXPANDS_RE`). Blanket-refusing it would make the
+ *  provisioner unusable on Windows, whose 8.3 short paths — `RUNNER~1`,
+ *  `PROGRA~1` — are everywhere, including on GitHub's Windows runners. */
+export const ENV_VALUE_RE = /^[A-Za-z0-9._:/+@,~=-]*$/;
+
+/** Where bash performs tilde expansion inside an ASSIGNMENT: at the start of
+ *  the value, and immediately after a `:` (the PATH-style rule). `A~1` in the
+ *  middle of a path segment is a literal, which is why 8.3 names survive. */
+const TILDE_EXPANDS_RE = /(^~|:~)/;
 
 /** null when `key`/`value` may be written unquoted; otherwise the reason. */
 export function unsafeEnvEntry(key: string, value: string): string | null {
@@ -144,11 +154,14 @@ export function unsafeEnvEntry(key: string, value: string): string | null {
   if (!ENV_VALUE_RE.test(value)) {
     // Name the offender without echoing an unbounded value.
     const bad = [...value].find((c) => !ENV_VALUE_RE.test(c)) ?? '';
-    const shown = bad === ' ' ? 'a space' : bad === '\\' ? "a backslash" : `'${bad}'`;
+    const shown = bad === ' ' ? 'a space' : bad === '\\' ? 'a backslash' : `'${bad}'`;
     return (
       `env value for ${key} contains ${shown}, which cannot be written unquoted ` +
       `(the env file is also read with \`set -a && source\`)`
     );
+  }
+  if (TILDE_EXPANDS_RE.test(value)) {
+    return `env value for ${key} contains a '~' where a shell would expand it (at the start, or after a ':')`;
   }
   return null;
 }
