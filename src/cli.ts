@@ -223,6 +223,24 @@ function usage(): string {
     '      can never reap them; only the machine-owned worktree-* namespace is',
     '      eligible and never the current branch. Always exits 0 (2 on usage).',
     '',
+    '  worktree create|finalize|destroy|list [--name <slot>] [--base <branch>]',
+    '           [--submodules a,b] [--hook-dir <path>] [--ports <n>]',
+    '           [--outcome completed|halted] [--json]',
+    '      Drive the FROZEN worktree-hook lifecycle WITHOUT a pipeline run, for an',
+    '      orchestrator that needs a slot (worktree + branch + env file) but has no',
+    '      run to hang it on. Runs the same consumer hooks through the same code',
+    '      path `pipeline next` uses (src/lib/worktree-hooks.ts) — never a second',
+    '      copy of the PIPELINE_WT_* assembly. Standalone context, stated because',
+    '      the contract is frozen: PIPELINE_WT_PIPELINE_ROOT and',
+    '      PIPELINE_WT_PIPELINE_NAME are the EMPTY STRING, PIPELINE_WT_RUN_ID',
+    '      carries the slot name, and NO run-scoped journal event is written.',
+    '      `create` defaults --name to a fresh UUIDv7 and is IDEMPOTENT per name:',
+    '      a second create reports status "reused". `destroy --outcome completed`',
+    '      reaps (DELETE_BRANCHES=1), `--outcome halted` preserves. `list` shows',
+    '      the slots this command provisioned; leak reaping stays with `gc`.',
+    '      Exit 0 success · 1 the hook failed · 2 usage / invalid --name.',
+    '      Run `pipeline worktree --help` for the full surface.',
+    '',
     '  ci-wait [--pr <number|url|branch> | --branch <name> | --sha <sha>]',
     '          [--repo <path|owner/name>] [--timeout <sec>] [--interval <sec>]',
     '          [--grace <sec>] [--fail-fast|--no-fail-fast] [--json] [--verbose]',
@@ -463,6 +481,13 @@ async function main(argv: string[]): Promise<number> {
       // machinery — keep the hot `next` loop's per-spawn startup cost unchanged.
       const { runGc } = await import('./commands/gc');
       return runGc(rest);
+    }
+    case 'worktree': {
+      // Lazy import (mirrors `drive`/`gc`): `worktree` pulls in the hook
+      // supervisor + git subprocess machinery — keep the hot `next` loop's
+      // per-spawn startup cost unchanged.
+      const { runWorktree } = await import('./commands/worktree');
+      return runWorktree(rest);
     }
     case 'ci-wait': {
       // Lazy import (mirrors `drive`/`gc`): `ci-wait` pulls in the gh subprocess
