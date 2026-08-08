@@ -40,6 +40,22 @@
 //     is not a fabricated run: nothing writes a run journal, a run record, or a
 //     `.runtime/<run-id>/` tree.
 //
+// THE BUILT-IN PROVISIONER (taskflow-v2 a3; 02-target-architecture.md §4.2).
+// `create` resolves `worktree-create.*` in the hook dir FIRST. When the
+// repository has authored one, nothing below changes: the hook runs and wins.
+// When there is none, this command provisions the slot itself through
+// lib/worktree-provision.ts — a git worktree outside the repository, one
+// worktree per declared submodule cut from that submodule's own integration
+// branch, and the env file.
+//
+// ⚠ THAT FALLBACK IS REACHABLE FROM HERE AND NOWHERE ELSE (D9). On the pipeline
+// RUN path a missing `worktree-create.*` still HALTS, exactly as it always has
+// — lib/worktree-hooks.ts neither imports nor knows about the provisioner, so
+// no existing consumer observes a change. The resolution call below uses
+// lib/hooks.ts's own `resolveHookScript`, the same function
+// lib/worktree-hooks.ts uses, so "is there a hook?" cannot answer differently
+// in the two places.
+//
 // SLOT BOOKKEEPING. `finalize`/`destroy` must tell the hook WHICH worktree
 // (`PIPELINE_WT_WORKTREE_PATH`), and `list` must be able to answer at all. The
 // run path reads that from its run state; there is none here, so `create`
@@ -62,7 +78,9 @@ import { existsSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFil
 import { isAbsolute, join, resolve } from 'node:path';
 import { ensureGeneratedDir } from '../lib/generated-dir';
 import { iterWorktrees, realGit, type GitRunner } from '../lib/git';
+import { resolveHookScript } from '../lib/hooks';
 import { newId } from '../lib/ids';
+import { provisionSlot, type ProvisionedSubmodule } from '../lib/worktree-provision';
 import {
   noopEmitter,
   runCreateFailedCleanup,
@@ -127,6 +145,11 @@ export interface SlotRecord {
   /** `--ports N` as requested. NOT allocated yet — allocation ships with the
    *  built-in provisioner (taskflow-v2 a4). */
   ports_requested: number | null;
+  /** Which side provisioned this slot: the consumer's `worktree-create.*`
+   *  (`hook`) or the CLI's built-in provisioner (`builtin`). Recorded because
+   *  teardown differs — a hook-made slot is the hook's to reap. Older records
+   *  predate the field and read back as `hook`, which is what they were. */
+  provisioner: 'hook' | 'builtin';
   created_at: string;
   updated_at: string;
   /** Set by `destroy` when the slot was PRESERVED rather than reaped. */
@@ -160,6 +183,7 @@ export function readSlot(projectRoot: string, name: string): SlotRecord | null {
       submodules: Array.isArray(raw.submodules) ? raw.submodules.filter((s): s is string => typeof s === 'string') : [],
       hook_dir: typeof raw.hook_dir === 'string' ? raw.hook_dir : DEFAULT_HOOK_DIR,
       ports_requested: typeof raw.ports_requested === 'number' ? raw.ports_requested : null,
+      provisioner: raw.provisioner === 'builtin' ? 'builtin' : 'hook',
       created_at: typeof raw.created_at === 'string' ? raw.created_at : '',
       updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : '',
       outcome: raw.outcome === 'completed' || raw.outcome === 'halted' ? raw.outcome : null,
@@ -361,6 +385,17 @@ export interface CreateOutput {
   /** Always null today: `--ports` is recorded, not allocated (taskflow-v2 a4). */
   ports: null;
   ports_requested: number | null;
+  /** `hook` when a `worktree-create.*` provisioned the slot, `builtin` when the
+   *  CLI's own provisioner did (no hook exists). Additive: a repository with a
+   *  hook reports `hook` and behaves exactly as it did before a3. */
+  provisioner: 'hook' | 'builtin';
+  /** One entry per `--submodules` path the BUILT-IN provisioner cut a worktree
+   *  for, with the integration branch it was cut from. Always `[]` on the hook
+   *  path — the frozen contract does not report submodule slots, and this
+   *  command must not invent them. On a FAILED create it lists the submodule
+   *  slots that were cut before the failure (the provisioner deletes nothing),
+   *  so an operator can see what is on disk. */
+  submodule_slots: ProvisionedSubmodule[];
   detail: string | null;
 }
 
@@ -370,16 +405,24 @@ function createSlot(args: WorktreeArgs, git: GitRunner): { output: CreateOutput;
   const hookDir = args.hookDir ?? DEFAULT_HOOK_DIR;
   const paths = hookPathsFor(projectRoot, hookDir);
 
-  // Reuse evidence must be gathered BEFORE the hook runs — afterwards the slot
-  // exists either way and the two cases are indistinguishable.
+  // D9's decision point, and the ONLY one: a hook that exists is run and wins;
+  // its absence is what the built-in provisioner fills, HERE, in the standalone
+  // command — never on the run path.
+  const hasHook = resolveHookScript(paths.hookDirAbs, 'worktree-create') !== null;
+
+  // Reuse evidence must be gathered BEFORE anything provisions — afterwards the
+  // slot exists either way and the two cases are indistinguishable.
   const known = readSlot(projectRoot, name);
   const preRegistered = registeredWorktreePaths(git, projectRoot);
 
-  const res = runCreateHook(
-    { run_id: name, name, base_branch: args.base, submodules: args.submodules, hook_dir: hookDir },
-    paths,
-    noopEmitter,
-  );
+  const res = hasHook
+    ? runCreateHook(
+        { run_id: name, name, base_branch: args.base, submodules: args.submodules, hook_dir: hookDir },
+        paths,
+        noopEmitter,
+      )
+    : provisionSlot({ name, base_branch: args.base, submodules: args.submodules, projectRoot }, git);
+  const submoduleSlots = hasHook ? [] : (res as { submodule_slots: ProvisionedSubmodule[] }).submodule_slots;
 
   const base: Omit<CreateOutput, 'ok' | 'status' | 'reused' | 'reused_evidence' | 'worktree_path' | 'branch' | 'env_file' | 'detail'> = {
     command: 'worktree create',
@@ -389,12 +432,26 @@ function createSlot(args: WorktreeArgs, git: GitRunner): { output: CreateOutput;
     hook_dir: hookDir,
     ports: null,
     ports_requested: args.ports,
+    provisioner: hasHook ? 'hook' : 'builtin',
+    submodule_slots: submoduleSlots,
   };
 
   if (!res.ok || res.provisioned === null) {
     // Same best-effort cleanup the run path performs: a create that failed
     // halfway may have left a partial slot. Never changes this outcome.
-    runCreateFailedCleanup({ run_id: name, name }, paths, res.failedWorktreePath, noopEmitter);
+    //
+    // HOOK PATH ONLY. When the built-in provisioner failed there is no consumer
+    // create hook, so there is no consumer teardown to invoke for a slot the
+    // consumer never made — and the provisioner deliberately deletes nothing on
+    // failure (a refused slot may be a redirect into the main checkout).
+    if (hasHook) {
+      runCreateFailedCleanup(
+        { run_id: name, name },
+        paths,
+        (res as { failedWorktreePath: string | null }).failedWorktreePath,
+        noopEmitter,
+      );
+    }
     return {
       output: {
         ...base,
@@ -430,6 +487,7 @@ function createSlot(args: WorktreeArgs, git: GitRunner): { output: CreateOutput;
     submodules: args.submodules,
     hook_dir: hookDir,
     ports_requested: args.ports,
+    provisioner: hasHook ? 'hook' : 'builtin',
     created_at: known?.created_at || at,
     updated_at: at,
     outcome: null,
@@ -459,7 +517,9 @@ function humanCreate(o: CreateOutput): string {
     `  path:     ${o.worktree_path}`,
     `  branch:   ${o.branch ?? '(none reported)'}`,
     `  env_file: ${o.env_file ?? '(none reported)'}`,
+    `  by:       ${o.provisioner === 'hook' ? `${o.hook_dir}/worktree-create.*` : 'the built-in provisioner (no worktree-create.* found)'}`,
   ];
+  for (const s of o.submodule_slots) lines.push(`  submodule ${s.name}: ${s.dir}  [base ${s.base}]`);
   if (o.reused) lines.push(`  reused:   yes (${o.reused_evidence}) — an orchestrator should treat this as a duplicate dispatch`);
   if (o.ports_requested !== null)
     lines.push(`  ports:    requested ${o.ports_requested}, NOT allocated — allocation ships with the built-in provisioner`);
@@ -634,6 +694,25 @@ const USAGE = [
   'through the SAME code path a pipeline run uses, with the FROZEN PIPELINE_WT_*',
   'contract. Run it from the project root: PIPELINE_WT_PROJECT_ROOT is the',
   'current directory, exactly as on the run path.',
+  '',
+  'NO worktree-create.* HOOK? `create` provisions the slot itself:',
+  '  * `git worktree add -b worktree-<name>` from --base, OUTSIDE the repository',
+  '    (a worker\'s build artifacts never land in the project folder);',
+  '  * one worktree per --submodules entry, cut from THAT submodule\'s own',
+  '    integration branch (`next` where it exists, else --base) — not from the',
+  '    commit the parent pins;',
+  '  * an env file beside the slot: RUN_ID, WORKTREE_NAME/PATH/BRANCH,',
+  '    PROJECT_ROOT, BASE_BRANCH, SUBMODULE_* — dotenv, values UNQUOTED and free',
+  '    of spaces and shell metacharacters (it is also read with `set -a &&',
+  '    source`), so paths are written with forward slashes on every platform.',
+  '  A hook, where one exists, ALWAYS wins — the provisioner is inert then. It is',
+  '  reachable from this command only: a pipeline RUN with no worktree-create.*',
+  '  still halts, exactly as before. `create` ONLY: finalize and destroy still',
+  '  require their own hooks; `pipeline gc` reaps what the provisioner made.',
+  '  Environment: PIPELINE_WT_ROOT (where slots live; default C:/tmp on Windows,',
+  '  else the system temp dir) · PIPELINE_WT_INTEGRATION_BRANCH (default `next`)',
+  '  · PIPELINE_WT_FETCH=1 (fetch origin first; off by default so create never',
+  '  blocks on a remote). Requires git 2.20+.',
   '',
   'Standalone context — stated because the contract is frozen:',
   '  PIPELINE_WT_PIPELINE_ROOT and PIPELINE_WT_PIPELINE_NAME are the EMPTY',

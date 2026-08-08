@@ -46,7 +46,8 @@ import {
   noopEmitter,
   type WorktreeHookPaths,
 } from '../src/lib/worktree-hooks';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { realGit } from '../src/lib/git';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -139,7 +140,7 @@ function scaffold(opts: { createHook?: string | null; submodules?: string } = {}
  *  the same choice tests/hooks.test.ts makes). Restores everything after. */
 function inProject<T>(project: string, home: string, fn: (realProjectRoot: string) => T): T {
   const prevCwd = process.cwd();
-  const keys = ['PIPELINE_RUN_ID', 'PIPELINE_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'USERPROFILE', 'HOME', 'PIPELINE_WORKTREE_SCOPED'];
+  const keys = ['PIPELINE_RUN_ID', 'PIPELINE_PARENT_RUN_ID', 'CLAUDE_SESSION_ID', 'USERPROFILE', 'HOME', 'PIPELINE_WORKTREE_SCOPED', 'PIPELINE_WT_ROOT'];
   const saved: Record<string, string | undefined> = {};
   for (const k of keys) saved[k] = process.env[k];
   try {
@@ -150,6 +151,11 @@ function inProject<T>(project: string, home: string, fn: (realProjectRoot: strin
     process.env.USERPROFILE = home;
     process.env.HOME = home;
     process.env.PIPELINE_WORKTREE_SCOPED = '0';
+    // Where the a3 provisioner WOULD put a slot if it were ever reached. Pinned
+    // to a temp dir so the D9 guard below can assert that nothing appeared
+    // there — and so a leak would be a visible file, not a write into the
+    // developer's real slot root.
+    process.env.PIPELINE_WT_ROOT = mkTmp('wtprovroot-');
     return fn(process.cwd());
   } finally {
     process.chdir(prevCwd);
@@ -463,5 +469,30 @@ test('D9: an isolated run with no worktree-create.* still HALTS after the extrac
     expect(st.phase).toBe('terminal');
     // No worktree was invented on the way to the halt.
     expect(existsSync(join(root, 'create-env-dump.json'))).toBe(false);
+
+    // ---- a3: the BUILT-IN PROVISIONER IS NOT REACHABLE FROM HERE ------------
+    // The provisioner exists now (lib/worktree-provision.ts) and would have
+    // provisioned this exact slot had the standalone command asked. The run
+    // path must still halt instead, so: nothing under the slot root it would
+    // have used, no `worktree-<run>` branch, and no second registered worktree.
+    expect(readdirSync(process.env.PIPELINE_WT_ROOT!)).toEqual([]);
+    expect(realGit(['branch', '--list', `worktree-${runId}`], root).stdout.trim()).toBe('');
+    expect(realGit(['worktree', 'list', '--porcelain'], root).stdout.match(/^worktree /gm)?.length ?? 0).toBe(1);
   });
 }, 30000);
+
+test('D9, structurally: the run path does not IMPORT the provisioner — the standalone command is its only caller', () => {
+  const src = (rel: string): string => readFileSync(join(import.meta.dir, '..', 'src', rel), 'utf8');
+  // A runtime halt proves this run did not provision; the import graph proves
+  // no run ever can. A future edit that wires the provisioner into the engine
+  // fails HERE, before anyone has to notice a silent provision in production.
+  for (const rel of ['commands/next.ts', 'lib/worktree-hooks.ts', 'lib/next.ts']) {
+    expect(`${rel}: ${/from '.*worktree-provision'/.test(src(rel)) ? 'IMPORTS' : 'clean'}`).toBe(`${rel}: clean`);
+    expect(`${rel}: ${src(rel).includes('provisionSlot(') ? 'CALLS' : 'clean'}`).toBe(`${rel}: clean`);
+  }
+  // Not vacuous: the standalone command really does import and call it, so a
+  // rename that silences the checks above fails here instead.
+  const cmd = src('commands/worktree.ts');
+  expect(/from '..\/lib\/worktree-provision'/.test(cmd)).toBe(true);
+  expect(cmd.includes('provisionSlot(')).toBe(true);
+});
