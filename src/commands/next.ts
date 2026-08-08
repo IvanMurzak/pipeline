@@ -22,7 +22,8 @@
 // `isolation: external` worktree hooks are EXECUTED IN-PROCESS: when the state
 // machine emits `provision-worktree` / `finalize-worktree` / `teardown-worktree`,
 // this command runs the consumer's `worktree-create.*` / `worktree-finalize.*` /
-// `worktree-destroy.*` hook itself (lib/hooks.ts — PIPELINE_WT_* env contract,
+// `worktree-destroy.*` hook itself (lib/worktree-hooks.ts — the single-homed
+// PIPELINE_WT_* env contract, on top of lib/hooks.ts's resolution + spawn;
 // JSON-on-stdout, 600 s create/finalize / 300 s destroy timeouts), emits
 // `worktree.created` / `worktree.finalized` / `worktree.destroyed`, feeds the
 // synthesized {kind:'worktree',…} record back into the state machine, and
@@ -70,7 +71,7 @@
 // the same state. Exit code: 1 on a `halt` action, 0 otherwise.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
-import { join, isAbsolute, resolve, basename, dirname, relative, sep } from 'node:path';
+import { join, isAbsolute, resolve, dirname, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { gitBin } from '../lib/git';
 import { computePlan, findEnclosingPipelineRoot, normalizeEffort, normalizeModel, type Plan, type PlanStep } from '../lib/plan';
@@ -98,7 +99,17 @@ import { telemetrySyncEnabled } from '../lib/telemetry-outbox';
 import { tailProjectJournal } from '../lib/telemetry-tail';
 import { statsAppend, statsEnabled, statsFinalizeRun } from '../lib/stats';
 import { backfillProject, findStatsProjectRoot } from '../lib/stats-backfill';
-import { resolveHookScript, runHook, parseHookJson, tail } from '../lib/hooks';
+import { resolveHookScript } from '../lib/hooks';
+import {
+  runCreateHook,
+  runCreateFailedCleanup,
+  runFinalizeHook,
+  runDestroyHook,
+  type WorktreeEventEmitter,
+  type ProvisionedInfo,
+  type FinalizeInfo,
+  type TeardownInfo,
+} from '../lib/worktree-hooks';
 import {
   executeScriptStep,
   parseNextSection,
@@ -811,122 +822,62 @@ function emitStartedEvents(
 
 // ---------------------------------------------------------------------------
 // In-process worktree-hook execution (isolation: external)
+//
+// The FROZEN `PIPELINE_WT_*` assembly and the hook invocations themselves live
+// in lib/worktree-hooks.ts — SINGLE-HOMED, so a caller outside a run (a
+// standalone `pipeline worktree …`) drives the identical contract instead of
+// forking a second dialect of it. What stays here is the RUN's half of the
+// job: the run-scoped event emitter (the shared module takes it as a
+// parameter; a run-less caller passes the no-op), and wrapping the returned
+// provisioning data in the {kind:'worktree', …} record the state machine eats.
 // ---------------------------------------------------------------------------
-
-const CREATE_TIMEOUT_MS = 600_000; // create does submodule worktrees + pulls
-const DESTROY_TIMEOUT_MS = 300_000;
-const FINALIZE_TIMEOUT_MS = 600_000; // finalize may do arbitrary consumer work (commit/push/…) — create-like budget
-
-/** Effective hook timeout: `PIPELINE_HOOK_TIMEOUT_MS` (a positive integer)
- *  overrides every hook budget — injectable so tests can exercise the timeout
- *  path with short values. Read per call, never cached at module load. */
-function hookTimeoutMs(base: number): number {
-  const v = Number(process.env.PIPELINE_HOOK_TIMEOUT_MS);
-  return Number.isFinite(v) && v > 0 ? Math.floor(v) : base;
-}
 
 type ProvisionAction = Extract<NextAction, { action: 'provision-worktree' }>;
 type FinalizeAction = Extract<NextAction, { action: 'finalize-worktree' }>;
 type TeardownAction = Extract<NextAction, { action: 'teardown-worktree' }>;
 
-export interface ProvisionedInfo {
-  worktree_path: string;
-  branch: string | null;
-  env_file: string | null;
-}
+// Re-exported so this module's public surface is unchanged by the extraction.
+export type { ProvisionedInfo, FinalizeInfo, TeardownInfo };
 
-export interface FinalizeInfo {
-  ok: boolean;
-  detail: string | null;
-}
+/** The RUN's emitter for the shared lifecycle: the same best-effort
+ *  kv()/emitEvent journal writer every other auto-emitted event uses. A caller
+ *  with no run passes lib/worktree-hooks.ts's `noopEmitter` instead — a
+ *  run-scoped event for a run that does not exist would be a fabricated
+ *  record. */
+const runScopedWorktreeEmitter: WorktreeEventEmitter = (eventType, fields) => {
+  safeEmit(
+    eventType,
+    fields.map(([k, v]) => kv(k, v)),
+  );
+};
 
-export interface TeardownInfo {
-  ok: boolean;
-  detail: string | null;
-}
-
-/** Execute the consumer's worktree-create hook per the FROZEN contract
- *  (PIPELINE_WT_* env vars; stdout = ONE JSON object with worktree_path;
- *  idempotent per name). Emits worktree.created (ok true/false) and returns the
- *  {kind:'worktree',phase:'provisioned',…} record to feed the state machine. */
+/** Execute the consumer's worktree-create hook (lib/worktree-hooks.ts) and wrap
+ *  its provisioning data in the {kind:'worktree',phase:'provisioned',…} record
+ *  the state machine consumes. */
 function execCreateHook(
   action: ProvisionAction,
   hookDirAbs: string,
   projectRoot: string,
   pipelineRootAbs: string,
 ): { record: WorktreeRecord; provisioned: ProvisionedInfo | null; failedWorktreePath: string | null } {
-  const fail = (
-    detail: string,
-    failedWorktreePath: string | null = null,
-  ): { record: WorktreeRecord; provisioned: null; failedWorktreePath: string | null } => {
-    safeEmit('worktree.created', [kv('run_id', action.run_id), kv('ok', false), kv('detail', detail)]);
-    return { record: { kind: 'worktree', phase: 'provisioned', ok: false, detail }, provisioned: null, failedWorktreePath };
-  };
-
-  const script = resolveHookScript(hookDirAbs, 'worktree-create');
-  if (!script) {
-    return fail(`isolation: external but no ${hookDirAbs}/worktree-create.* found`);
+  const res = runCreateHook(action, { hookDirAbs, projectRoot, pipelineRootAbs }, runScopedWorktreeEmitter);
+  if (res.provisioned === null) {
+    return {
+      record: { kind: 'worktree', phase: 'provisioned', ok: false, detail: res.detail },
+      provisioned: null,
+      failedWorktreePath: res.failedWorktreePath,
+    };
   }
-
-  const env: Record<string, string> = {
-    PIPELINE_WT_ACTION: 'create',
-    PIPELINE_WT_RUN_ID: action.run_id,
-    PIPELINE_WT_NAME: action.name,
-    PIPELINE_WT_PIPELINE_NAME: basename(pipelineRootAbs),
-    PIPELINE_WT_PIPELINE_ROOT: pipelineRootAbs,
-    PIPELINE_WT_PROJECT_ROOT: projectRoot,
-    PIPELINE_WT_BASE_BRANCH: action.base_branch,
-    PIPELINE_WT_SUBMODULES: action.submodules.join(','),
-    PIPELINE_WT_DRY_RUN: '0',
-  };
-  const timeoutMs = hookTimeoutMs(CREATE_TIMEOUT_MS);
-  const r = runHook(script, env, projectRoot, timeoutMs);
-  const exitedClean = r.code === 0 && !r.timedOut && !r.error;
-  const parsed = exitedClean ? parseHookJson(r.stdout) : null;
-  const wtPath = parsed && typeof parsed.worktree_path === 'string' ? parsed.worktree_path : null;
-
-  if (wtPath === null) {
-    const why = r.timedOut
-      ? `timed out after ${Math.round(timeoutMs / 1000)}s`
-      : r.error
-        ? `failed to spawn (${r.error})`
-        : !exitedClean
-          ? `exited ${r.code}`
-          : 'stdout not JSON';
-    return fail(`worktree-create hook ${why}: ${tail(r.stderr || r.stdout)}`);
-  }
-
-  // The contract requires an ABSOLUTE worktree_path — a relative one is a
-  // create-hook failure (the same halt as garbage stdout), but the path is
-  // still handed to the best-effort create-failed cleanup.
-  if (!isAbsolute(wtPath)) {
-    return fail(`worktree-create hook returned a non-absolute worktree_path '${wtPath}'`, wtPath);
-  }
-
-  const branch = typeof parsed!.branch === 'string' ? (parsed!.branch as string) : null;
-  const envFile = typeof parsed!.env_file === 'string' ? (parsed!.env_file as string) : null;
-  safeEmit('worktree.created', [
-    kv('run_id', action.run_id),
-    kv('worktree_path', wtPath),
-    kv('branch', branch),
-    kv('env_file', envFile),
-    kv('ok', true),
-    kv('hook_dir', action.hook_dir),
-  ]);
+  const { worktree_path, branch, env_file } = res.provisioned;
   return {
-    record: { kind: 'worktree', phase: 'provisioned', worktree_path: wtPath, branch, env_file: envFile },
-    provisioned: { worktree_path: wtPath, branch, env_file: envFile },
+    record: { kind: 'worktree', phase: 'provisioned', worktree_path, branch, env_file },
+    provisioned: res.provisioned,
     failedWorktreePath: null,
   };
 }
 
-/** A3: best-effort cleanup after a FAILED create. The create hook may have done
- *  partial work before failing/timing out/printing garbage, so invoke the
- *  consumer's destroy hook ONCE with the additive `PIPELINE_WT_OUTCOME=
- *  create-failed` (full destroy-style env; `PIPELINE_WT_WORKTREE_PATH` only
- *  when the failed create output yielded one). STRICTLY fire-and-forget: never
- *  throws and never changes the halt outcome; `worktree.destroyed` is emitted
- *  ONLY when the destroy hook reports ok. */
+/** A3: best-effort cleanup after a FAILED create (lib/worktree-hooks.ts) —
+ *  fire-and-forget, never alters the halt. */
 function execCreateFailedCleanup(
   action: ProvisionAction,
   hookDirAbs: string,
@@ -934,164 +885,44 @@ function execCreateFailedCleanup(
   pipelineRootAbs: string,
   failedWorktreePath: string | null,
 ): void {
-  try {
-    const script = resolveHookScript(hookDirAbs, 'worktree-destroy');
-    if (!script) return;
-    const env: Record<string, string> = {
-      PIPELINE_WT_ACTION: 'destroy',
-      PIPELINE_WT_RUN_ID: action.run_id,
-      PIPELINE_WT_NAME: action.name,
-      PIPELINE_WT_PIPELINE_ROOT: pipelineRootAbs,
-      PIPELINE_WT_PROJECT_ROOT: projectRoot,
-      PIPELINE_WT_OUTCOME: 'create-failed',
-      // ALWAYS '0' here: a failed create leaves a partial slot whose branch (if
-      // any) is evidence — the cleanup must never reap it.
-      PIPELINE_WT_DELETE_BRANCHES: '0',
-      PIPELINE_WT_DRY_RUN: '0',
-    };
-    if (failedWorktreePath !== null) env.PIPELINE_WT_WORKTREE_PATH = failedWorktreePath;
-    const r = runHook(script, env, projectRoot, hookTimeoutMs(DESTROY_TIMEOUT_MS));
-    const exitedClean = r.code === 0 && !r.timedOut && !r.error;
-    const parsed = parseHookJson(r.stdout);
-    if (exitedClean && parsed?.ok !== false) {
-      safeEmit('worktree.destroyed', [
-        kv('run_id', action.run_id),
-        kv('worktree_path', failedWorktreePath),
-        kv('ok', true),
-        kv('outcome', 'create-failed'),
-        kv('detail', typeof parsed?.detail === 'string' ? parsed.detail : null),
-      ]);
-    }
-  } catch {
-    // Best-effort only — a cleanup failure must never affect the halt.
-  }
+  runCreateFailedCleanup(
+    action,
+    { hookDirAbs, projectRoot, pipelineRootAbs },
+    failedWorktreePath,
+    runScopedWorktreeEmitter,
+  );
 }
 
-/** Execute the consumer's MANDATORY worktree-finalize hook. UNLIKE destroy (a
- *  soft-fail that never strands the run), finalize is STRICT must-succeed: only
- *  an explicit `{"ok":true}` on a clean exit passes; a missing hook, non-zero
- *  exit, timeout, spawn error, or absent/false `ok` FAILS — the state machine
- *  then halts the run and the worktree is preserved. Same FROZEN PIPELINE_WT_*
- *  env style as create/destroy (+ ACTION=finalize). GENERIC: the plugin passes
- *  the worktree context and inspects only `ok` — it never inspects, requires, or
- *  cares WHAT the hook did (commit/push/bump/anything). Emits worktree.finalized. */
+/** Execute the consumer's MANDATORY worktree-finalize hook
+ *  (lib/worktree-hooks.ts) and wrap its result in the
+ *  {kind:'worktree',phase:'finalized',…} record. */
 function execFinalizeHook(
   action: FinalizeAction,
   hookDirAbs: string,
   projectRoot: string,
   pipelineRootAbs: string,
 ): { record: WorktreeRecord; finalize: FinalizeInfo } {
-  const script = resolveHookScript(hookDirAbs, 'worktree-finalize');
-  let ok: boolean;
-  let detail: string | null;
-  if (!script) {
-    // Opted in (e.g. `finalize: true` frontmatter) but no hook exists → the run
-    // asked to finalize and cannot → FAIL loud (must-succeed gate). (When the
-    // opt-in was hook-PRESENCE, this branch is unreachable.)
-    ok = false;
-    detail = `no ${hookDirAbs}/worktree-finalize.* hook found`;
-  } else {
-    const env: Record<string, string> = {
-      PIPELINE_WT_ACTION: 'finalize',
-      PIPELINE_WT_RUN_ID: action.run_id,
-      PIPELINE_WT_NAME: action.name,
-      PIPELINE_WT_PIPELINE_NAME: basename(pipelineRootAbs),
-      PIPELINE_WT_PIPELINE_ROOT: pipelineRootAbs,
-      PIPELINE_WT_PROJECT_ROOT: projectRoot,
-      PIPELINE_WT_BASE_BRANCH: action.base_branch,
-      PIPELINE_WT_SUBMODULES: action.submodules.join(','),
-      PIPELINE_WT_WORKTREE_PATH: action.worktree_path ?? '',
-      PIPELINE_WT_OUTCOME: action.outcome,
-      PIPELINE_WT_DRY_RUN: '0',
-    };
-    const timeoutMs = hookTimeoutMs(FINALIZE_TIMEOUT_MS);
-    const r = runHook(script, env, projectRoot, timeoutMs);
-    const exitedClean = r.code === 0 && !r.timedOut && !r.error;
-    const parsed = exitedClean ? parseHookJson(r.stdout) : null;
-    ok = exitedClean && parsed?.ok === true; // STRICT: require an explicit ok:true
-    if (typeof parsed?.detail === 'string') {
-      detail = parsed.detail;
-    } else if (ok) {
-      detail = null;
-    } else {
-      const why = r.timedOut
-        ? `timed out after ${Math.round(timeoutMs / 1000)}s`
-        : r.error
-          ? `failed to spawn (${r.error})`
-          : !exitedClean
-            ? `exited ${r.code}`
-            : 'stdout missing {"ok":true}';
-      detail = `worktree-finalize hook ${why}: ${tail(r.stderr || r.stdout)}`;
-    }
-  }
-  safeEmit('worktree.finalized', [
-    kv('run_id', action.run_id),
-    kv('worktree_path', action.worktree_path),
-    kv('ok', ok),
-    kv('outcome', action.outcome),
-    kv('detail', detail),
-  ]);
+  const { ok, detail } = runFinalizeHook(
+    action,
+    { hookDirAbs, projectRoot, pipelineRootAbs },
+    runScopedWorktreeEmitter,
+  );
   return { record: { kind: 'worktree', phase: 'finalized', ok, detail }, finalize: { ok, detail } };
 }
 
-/** Execute the consumer's worktree-destroy hook per the FROZEN contract
- *  ({"ok":true} / {"ok":false,"detail"} soft-fail / non-zero hard-fail). A
- *  missing or failing hook NEVER strands the run — the ok:false record still
- *  advances the state machine to terminal. Emits worktree.destroyed. */
+/** Execute the consumer's worktree-destroy hook (lib/worktree-hooks.ts) and
+ *  wrap its result in the {kind:'worktree',phase:'torn-down',…} record. */
 function execDestroyHook(
   action: TeardownAction,
   hookDirAbs: string,
   projectRoot: string,
   pipelineRootAbs: string,
 ): { record: WorktreeRecord; teardown: TeardownInfo } {
-  const script = resolveHookScript(hookDirAbs, 'worktree-destroy');
-  let ok: boolean;
-  let detail: string | null;
-  if (!script) {
-    ok = false;
-    detail = `no ${hookDirAbs}/worktree-destroy.* hook found`;
-  } else {
-    const env: Record<string, string> = {
-      PIPELINE_WT_ACTION: 'destroy',
-      PIPELINE_WT_RUN_ID: action.run_id,
-      PIPELINE_WT_NAME: action.name,
-      PIPELINE_WT_PIPELINE_ROOT: pipelineRootAbs,
-      PIPELINE_WT_PROJECT_ROOT: projectRoot,
-      PIPELINE_WT_WORKTREE_PATH: action.worktree_path ?? '',
-      PIPELINE_WT_OUTCOME: action.outcome,
-      // Outcome-aware (decided by the engine in emitTeardown): '1' only on a
-      // COMPLETED run that has not opted out via `delete_branches: false`
-      // frontmatter — the run branch dies with the worktree so a finished run
-      // leaks nothing. halted/depth-exhausted always get '0' (preserve for
-      // debugging/resume).
-      PIPELINE_WT_DELETE_BRANCHES: action.delete_branches ? '1' : '0',
-      PIPELINE_WT_DRY_RUN: '0',
-    };
-    const timeoutMs = hookTimeoutMs(DESTROY_TIMEOUT_MS);
-    const r = runHook(script, env, projectRoot, timeoutMs);
-    const exitedClean = r.code === 0 && !r.timedOut && !r.error;
-    const parsed = parseHookJson(r.stdout);
-    ok = exitedClean && parsed?.ok !== false;
-    if (typeof parsed?.detail === 'string') {
-      detail = parsed.detail;
-    } else if (ok) {
-      detail = null;
-    } else {
-      const why = r.timedOut
-        ? `timed out after ${Math.round(timeoutMs / 1000)}s`
-        : r.error
-          ? `failed to spawn (${r.error})`
-          : `exited ${r.code}`;
-      detail = `worktree-destroy hook ${why}: ${tail(r.stderr || r.stdout)}`;
-    }
-  }
-  safeEmit('worktree.destroyed', [
-    kv('run_id', action.run_id),
-    kv('worktree_path', action.worktree_path),
-    kv('ok', ok),
-    kv('outcome', action.outcome),
-    kv('detail', detail),
-  ]);
+  const { ok, detail } = runDestroyHook(
+    action,
+    { hookDirAbs, projectRoot, pipelineRootAbs },
+    runScopedWorktreeEmitter,
+  );
   return { record: { kind: 'worktree', phase: 'torn-down', ok, detail }, teardown: { ok, detail } };
 }
 
