@@ -7,13 +7,25 @@ tasks to pipelines, routing graph pipelines, driving the whole run loop, and
 emitting journal events — costs **near-zero LLM tokens** instead of being done
 in an agent's context.
 
-## Runtime
-
-Written in TypeScript, run directly with **Bun** (no build step needed for the
-plugin's own use):
+## Install
 
 ```bash
-bun "${CLAUDE_PLUGIN_ROOT}/apps/pipeline-cli/src/cli.ts" <command> [options]
+bun add -g @baizor/pipeline      # or: npm i -g @baizor/pipeline
+pipeline --help
+```
+
+The [Pipeline plugin for Claude Code](https://github.com/IvanMurzak/pipeline-claude)
+**requires** this package: since plugin v0.93.0 the plugin ships no code of its
+own, and its skills, agents and hooks all run `pipeline` subcommands.
+
+## Runtime
+
+Written in TypeScript and run directly with **Bun** — the published `bin` points
+at `src/cli.ts`, so there is no build step and no dependency to install. From a
+checkout:
+
+```bash
+bun src/cli.ts <command> [options]
 ```
 
 For embedding in another local project you can either import the library API or
@@ -22,6 +34,15 @@ produce a Node-targeted bundle:
 ```bash
 bun run build          # → dist/cli.mjs (Node-compatible ESM)
 ```
+
+## Documentation
+
+- **[`docs/cli.md`](docs/cli.md)** — telemetry (`pipeline stats telemetry`), the
+  opt-out switches, where the CLI writes on disk, and the uploader's lifecycle.
+- [Privacy tiers](https://github.com/IvanMurzak/pipeline-claude/blob/main/docs/privacy-tiers.md)
+  — field by field, what leaves your machine.
+- [Connecting to the cloud](https://github.com/IvanMurzak/pipeline-claude/blob/main/docs/cloud-connect.md)
+  — `pipeline cloud connect`, history upload, retention and deletion.
 
 ## Commands
 
