@@ -36,7 +36,7 @@ Reading the lines:
 | Line | Meaning |
 | --- | --- |
 | **Telemetry** | `on`, or `off (PIPELINE_SYNC_LOCAL_STATS=0)`. |
-| **Account** | The org and host from `.pipeline/cloud.json`, or `not connected — run \`pipeline cloud connect\``. |
+| **Account** | The org and host from `.pipeline/cloud.json`, or a line telling you to run `pipeline cloud connect`. |
 | **Streaming** | `active — uploading (daemon pid N)` when the uploader is alive for this project; otherwise `idle`. |
 | **Queued** | Distinct **runs** waiting to be sent — not records — plus the age of the oldest. |
 | **Dropped** | Everything that left the send path and is not coming back on its own: queue-bound evictions, records with no usable run id, malformed lines, lock contention, and quarantined records. |
