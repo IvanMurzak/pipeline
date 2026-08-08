@@ -194,7 +194,12 @@ function call(args: string[], git: GitRunner = realGit): { code: number; out: st
 
 function callJson(args: string[], git: GitRunner = realGit): { code: number; json: any } {
   const r = call([...args, '--json'], git);
-  return { code: r.code, json: r.out.trim() ? JSON.parse(r.out) : null };
+  const json = r.out.trim() ? JSON.parse(r.out) : null;
+  // A provisioner refusal explains itself in `detail`; a bare `expect(code)`
+  // assertion throws that explanation away, and the platform this feature is
+  // hardest on is the one whose log is all anyone gets to read.
+  if (r.code !== 0 && json?.detail) console.error(`[${args.join(' ')}] exit ${r.code}: ${json.detail}`);
+  return { code: r.code, json };
 }
 
 /** The env file's RAW lines as [key, value], comments dropped. Deliberately not

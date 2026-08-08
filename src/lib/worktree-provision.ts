@@ -56,7 +56,7 @@
 // to `source`.
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { branchExists, iterWorktrees, type GitRunner } from './git';
@@ -197,6 +197,35 @@ export function isUnder(p: string, dir: string): boolean {
   return a === b || a.startsWith(b + '/');
 }
 
+/** The OS's canonical spelling of `p`, resolved through the nearest ancestor
+ *  that exists (so it works for a slot that has not been created yet).
+ *
+ *  `realpathSync.NATIVE`, not `realpathSync`, and the difference is the whole
+ *  reason this function exists: on Windows a path can carry 8.3 short segments
+ *  (`RUNNER~1`, `PROGRA~1` — GitHub's Windows runner hands out exactly that as
+ *  TEMP), plain `realpathSync` leaves them alone, and **git always prints the
+ *  long form**. Comparing our constructed path against git's answer would then
+ *  mismatch on every slot: the reuse probe would never recognize its own slot,
+ *  and the R10 toplevel assertion would refuse a perfectly good one.
+ *
+ *  Best-effort: any failure returns the path unchanged. */
+function canonicalExisting(p: string): string {
+  const abs = resolve(p);
+  const tail: string[] = [];
+  let cur = abs;
+  while (!existsSync(cur)) {
+    const parent = dirname(cur);
+    if (parent === cur) return toPosixPath(abs); // nothing on this path exists
+    tail.unshift(basename(cur));
+    cur = parent;
+  }
+  try {
+    return toPosixPath([realpathSync.native(cur), ...tail].join('/'));
+  } catch {
+    return toPosixPath(abs);
+  }
+}
+
 /** `pipeline-protocol` → `PIPELINE_PROTOCOL` (the `SUBMODULE_DIR_<NAME>` key). */
 function envKeyOf(name: string): string {
   return name.replace(/[^A-Za-z0-9]/g, '_').toUpperCase();
@@ -234,11 +263,13 @@ export function invalidSubmodulePath(rel: string): string | null {
  *  provision a slot called `a3` off each other's directory. */
 export function slotRootFor(projectRoot: string): string {
   const override = (process.env.PIPELINE_WT_ROOT ?? '').trim();
-  const base = override
-    ? toPosixPath(override)
-    : process.platform === 'win32' && existsSync('C:/tmp')
-      ? 'C:/tmp/pipeline-worktrees'
-      : `${toPosixPath(tmpdir())}/pipeline-worktrees`;
+  const base = canonicalExisting(
+    override
+      ? override
+      : process.platform === 'win32' && existsSync('C:/tmp')
+        ? 'C:/tmp/pipeline-worktrees'
+        : `${tmpdir()}/pipeline-worktrees`,
+  );
   const canonical = norm(projectRoot);
   const digest = createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 8);
   const label = slugOf(basename(canonical) || 'project').slice(0, 24) || 'project';
