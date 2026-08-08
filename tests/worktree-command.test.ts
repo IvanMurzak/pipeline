@@ -163,6 +163,21 @@ const hookCallCount = (root: string): number => {
   return readFileSync(f, 'utf8').split('\n').filter(Boolean).length;
 };
 
+/** Point the BUILT-IN provisioner's slot root (taskflow-v2 a3) at a temp dir
+ *  that `cleanupCreated` reaps. Only the two tests that deliberately reach the
+ *  provisioner need it; everywhere else in this file a create hook exists and
+ *  the provisioner is inert. */
+function withSlotRoot<T>(fn: () => T): T {
+  const saved = process.env.PIPELINE_WT_ROOT;
+  process.env.PIPELINE_WT_ROOT = mkTmp('wtcmdslots-');
+  try {
+    return fn();
+  } finally {
+    if (saved === undefined) delete process.env.PIPELINE_WT_ROOT;
+    else process.env.PIPELINE_WT_ROOT = saved;
+  }
+}
+
 const eventsFile = (root: string): string => join(root, '.pipeline', '.runtime', 'events.jsonl');
 const slotFile = (root: string, name: string): string =>
   join(root, '.pipeline', '.runtime', 'worktrees', `${name}.json`);
@@ -432,11 +447,17 @@ process.exit(3);
     expect(existsSync(slotFile(nonZero, 'hard'))).toBe(false); // nothing recorded
   });
 
+  // A MISSING create hook is no longer a hard-fail here: taskflow-v2 a3 gave
+  // the standalone command a built-in provisioner for exactly that case (D9 —
+  // the standalone command only; a pipeline RUN with no create hook still
+  // halts, asserted in tests/worktree-hook-module.test.ts). The hard-fail
+  // catalogue above is what remains: a hook that exists and misbehaves.
   const missing = scaffold({ create: null });
   inProject(missing, () => {
-    const r = callJson(['create', '--name', 'nohook']);
-    expect(r.code).toBe(1);
-    expect(r.json.detail).toContain('worktree-create.*');
+    const r = withSlotRoot(() => callJson(['create', '--name', 'nohook']));
+    expect(r.code).toBe(0);
+    expect(r.json.provisioner).toBe('builtin');
+    expect(r.json.worktree_path).not.toBeNull();
   });
 
   const garbage = scaffold({
@@ -449,7 +470,9 @@ process.stdout.write('not json at all\\n');
     expect(r.code).toBe(1);
     expect(r.json.detail).toContain('stdout not JSON');
   });
-}, 60000);
+  // 180s: the missing-hook third of this test now provisions a REAL git
+  // worktree (a3), and git-heavy suites are the ones that time out under load.
+}, 180000);
 
 test('finalize is STRICT must-succeed: a hook that does not print {"ok":true} exits 1', () => {
   const root = scaffold({
@@ -592,16 +615,25 @@ test('--hook-dir redirects hook resolution (relative to the project root, or abs
   writeFileSync(join(alt, 'worktree-create.js'), CREATE_HOOK);
   writeFileSync(join(alt, 'worktree-destroy.js'), DESTROY_HOOK);
   inProject(root, () => {
-    // The default dir has no hooks at all — this fails unless --hook-dir works.
-    expect(call(['create', '--name', 'alt']).code).toBe(1);
+    // The default dir has no hooks at all, so the DEFAULT resolution reaches
+    // the built-in provisioner (a3) and never the hook under `tools/`: the
+    // hook's own marker file is the proof it did not run.
+    const dflt = withSlotRoot(() => callJson(['create', '--name', 'default-dir']));
+    expect(dflt.code).toBe(0);
+    expect(dflt.json.provisioner).toBe('builtin');
+    expect(existsSync(join(root, 'create-env-dump.json'))).toBe(false);
 
     const r = callJson(['create', '--name', 'alt', '--hook-dir', 'tools/wt-hooks']);
     expect(r.code).toBe(0);
     expect(r.json.hook_dir).toBe('tools/wt-hooks');
+    expect(r.json.provisioner).toBe('hook');
+    expect(existsSync(join(root, 'create-env-dump.json'))).toBe(true);
 
     // destroy replays the recorded hook dir without being told again.
     const d = callJson(['destroy', '--name', 'alt']);
     expect(d.code).toBe(0);
     expect(d.json.reaped).toBe(true);
   });
-}, 30000);
+  // 180s: the default-hook-dir half now reaches the built-in provisioner,
+  // which does real git work.
+}, 180000);
