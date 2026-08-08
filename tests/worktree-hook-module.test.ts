@@ -12,10 +12,21 @@
 // The inputs for the direct call are derived from the scaffold — never read back
 // out of the run path's own dump — so a divergence in either direction fails.
 //
+// The SECOND caller is the standalone `pipeline worktree` command group
+// (taskflow-v2 a2). It is compared against the run path here rather than in its
+// own suite, on purpose: a frozen contract should have exactly ONE place that
+// compares its callers, or the comparison itself forks. Two documented values
+// differ — `PIPELINE_WT_PIPELINE_ROOT` and `PIPELINE_WT_PIPELINE_NAME` are the
+// empty string outside a run — and that difference is asserted, not excused, so
+// a THIRD divergence cannot hide behind it.
+//
 // Also covered:
 //   - emitter isolation: the emitter is a PARAMETER, and the no-op writes no
 //     run-scoped journal events (a run-less caller must not fabricate history
-//     for a run that does not exist);
+//     for a run that does not exist), for the direct module call AND for the
+//     command, including in a project that has a real run journal;
+//   - a slot name unrelated to any run id — the run path has always had
+//     name === run_id, so the standalone combination needs its own test;
 //   - the D9 regression guard: an isolated run (`isolation: external` today,
 //     `isolation: run` in the v2 vocabulary) with no `worktree-create.*` still
 //     halts, exactly as before the extraction. A later task adds a built-in
@@ -27,6 +38,7 @@
 
 import { test, expect, afterEach } from 'bun:test';
 import { runNext } from '../src/commands/next';
+import { runWorktree } from '../src/commands/worktree';
 import {
   runCreateHook,
   runFinalizeHook,
@@ -165,6 +177,24 @@ function nextCall(pipelineRoot: string, runId: string, extra: string[] = []): { 
   return { code, json: buf.trim() ? JSON.parse(buf.trim()) : null };
 }
 
+/** Run the standalone command in-process, capturing stdout + its exit code.
+ *  The SECOND caller of the shared module. */
+function worktreeCall(args: string[]): { code: number; out: string } {
+  let buf = '';
+  const orig = process.stdout.write;
+  (process.stdout as any).write = (chunk: unknown) => {
+    buf += String(chunk);
+    return true;
+  };
+  let code: number;
+  try {
+    code = runWorktree(args);
+  } finally {
+    (process.stdout as any).write = orig;
+  }
+  return { code, out: buf };
+}
+
 /** The dumped environment as a deterministic byte string: every `PIPELINE_WT_*`
  *  key the hook saw, sorted, `KEY=value` per line. Sorted because a child's
  *  environment-block ORDER is the OS's business — the contract is the mapping,
@@ -251,6 +281,119 @@ test('anti-drift: the run path and a direct shared-module call hand the hook byt
     expect(canonicalWtEnv(root, 'destroy-env-dump.json')).toBe(viaRun.destroy);
   });
 }, 30000);
+
+// ---------------------------------------------------------------------------
+// (1b) THE SAME TEST, FOR THE STANDALONE COMMAND
+// ---------------------------------------------------------------------------
+
+/** The two variables a run-less caller cannot fill. Dropped from the byte
+ *  comparison and asserted SEPARATELY below, so "the standalone context
+ *  differs" can never grow to cover a third variable silently. */
+const STANDALONE_EMPTY = ['PIPELINE_WT_PIPELINE_ROOT', 'PIPELINE_WT_PIPELINE_NAME'] as const;
+
+function withoutPipelineIdentity(canonical: string): string {
+  return canonical
+    .split('\n')
+    .filter((line) => !STANDALONE_EMPTY.some((k) => line.startsWith(`${k}=`)))
+    .join('\n');
+}
+
+test('anti-drift: `pipeline worktree` hands the hook the run path\'s own PIPELINE_WT_* — every variable but the two documented standalone ones (create · finalize · destroy)', () => {
+  const s = scaffold({ submodules: 'AppX, McpY' });
+  const runId = 'driftrun4';
+  inProject(s.project, s.home, (root) => {
+    // ---- the RUN path: init (create) → completion (finalize → destroy) -----
+    expect(nextCall(s.pipelineRoot, runId).json.action).toBe('run-step');
+    const r2 = nextCall(
+      s.pipelineRoot,
+      runId,
+      record({ kind: 'step', outcome: 'completed', next_iteration: 'PIPELINE_COMPLETE' }),
+    );
+    expect(r2.json.action).toBe('done');
+
+    const viaRun = {
+      create: canonicalWtEnv(root, 'create-env-dump.json'),
+      finalize: canonicalWtEnv(root, 'finalize-env-dump.json'),
+      destroy: canonicalWtEnv(root, 'destroy-env-dump.json'),
+    };
+    // Not vacuous: on the run path these two variables carry real values.
+    expect(viaRun.create).toContain(`PIPELINE_WT_PIPELINE_ROOT=${resolve(s.pipelineRoot)}\n`);
+    expect(viaRun.create).toContain('PIPELINE_WT_PIPELINE_NAME=demo\n');
+
+    // ---- the COMMAND: same inputs, no run, no emitter ----------------------
+    // Everything comes from the scaffold + the documented flag surface.
+    expect(worktreeCall(['create', '--name', runId, '--base', 'main', '--submodules', 'AppX,McpY']).code).toBe(0);
+    expect(worktreeCall(['finalize', '--name', runId]).code).toBe(0);
+    expect(worktreeCall(['destroy', '--name', runId, '--outcome', 'completed']).code).toBe(0);
+
+    const viaCommand = {
+      create: canonicalWtEnv(root, 'create-env-dump.json'),
+      finalize: canonicalWtEnv(root, 'finalize-env-dump.json'),
+      destroy: canonicalWtEnv(root, 'destroy-env-dump.json'),
+    };
+
+    // The assertion this extension exists for: identical everywhere else.
+    for (const action of ['create', 'finalize', 'destroy'] as const) {
+      expect(withoutPipelineIdentity(viaCommand[action])).toBe(withoutPipelineIdentity(viaRun[action]));
+    }
+
+    // And the documented difference, stated as an assertion rather than an
+    // exclusion: wherever the RUN path carries one of these two variables, the
+    // command carries it too (same key set — the destroy contract lists no
+    // PIPELINE_NAME, and the command must not invent one) and its value is
+    // EMPTY, never absent.
+    for (const action of ['create', 'finalize', 'destroy'] as const) {
+      for (const key of STANDALONE_EMPTY) {
+        const onRunPath = viaRun[action].includes(`${key}=`);
+        expect(`${action}/${key} present=${viaCommand[action].includes(`${key}=`)}`).toBe(
+          `${action}/${key} present=${onRunPath}`,
+        );
+        if (onRunPath) {
+          expect(`${action}/${key} empty=${viaCommand[action].includes(`${key}=\n`)}`).toBe(
+            `${action}/${key} empty=true`,
+          );
+        }
+      }
+    }
+    // PIPELINE_WT_NAME is NOT one of them — it is the slot identity the frozen
+    // contract makes create idempotent per, so emptying it would collapse every
+    // standalone slot onto one.
+    const createEnv = JSON.parse(readFileSync(join(root, 'create-env-dump.json'), 'utf8')) as Record<string, string>;
+    expect(createEnv.PIPELINE_WT_NAME).toBe(runId);
+    expect(createEnv.PIPELINE_WT_RUN_ID).toBe(runId);
+  });
+}, 60000);
+
+test('a --name unrelated to any run id: the command provisions its own slot in a project that HAS a run, and adds nothing to that run\'s journal', () => {
+  const s = scaffold({});
+  const runId = 'driftrun5';
+  inProject(s.project, s.home, (root) => {
+    // A real run first: it provisions slot `driftrun5` and journals it.
+    expect(nextCall(s.pipelineRoot, runId).json.action).toBe('run-step');
+    const journalBefore = readFileSync(eventsFile(root), 'utf8');
+    expect(journalBefore).toContain('worktree.created');
+
+    // Now a slot whose name is not any run id — a combination the run path has
+    // never produced (name has always equalled run_id there).
+    const name = 'a2-worktree-command-group';
+    const created = JSON.parse(worktreeCall(['create', '--name', name, '--json']).out);
+    expect(created.ok).toBe(true);
+    expect(created.name).toBe(name);
+    expect(created.worktree_path).toBe(join(root, '.claude', 'worktrees', name));
+    expect(created.worktree_path).not.toBe(join(root, '.claude', 'worktrees', runId));
+
+    const env = JSON.parse(readFileSync(join(root, 'create-env-dump.json'), 'utf8')) as Record<string, string>;
+    expect(env.PIPELINE_WT_NAME).toBe(name);
+    expect(env.PIPELINE_WT_RUN_ID).toBe(name); // no run id exists; the slot name stands in
+
+    expect(worktreeCall(['finalize', '--name', name]).code).toBe(0);
+    expect(worktreeCall(['destroy', '--name', name, '--outcome', 'halted']).code).toBe(0);
+
+    // The run's journal is byte-for-byte what it was: no worktree.created for a
+    // slot no run owns, no fabricated run_id.
+    expect(readFileSync(eventsFile(root), 'utf8')).toBe(journalBefore);
+  });
+}, 60000);
 
 // ---------------------------------------------------------------------------
 // (2) THE EMITTER IS A PARAMETER

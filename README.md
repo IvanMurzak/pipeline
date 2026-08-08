@@ -322,6 +322,62 @@ drive everything. A project with no submodules resolves an empty candidate set �
 noop. Assumes `git` + `gh` on PATH (like the pipeline's other git work); a missing
 `gh` is a clean exit-2 env error.
 
+### `worktree` — the worktree-hook lifecycle without a run
+
+```bash
+pipeline worktree create   [--name <slot>] [--base <branch>] [--submodules a,b] \
+                           [--hook-dir <path>] [--ports <n>] [--json]
+pipeline worktree finalize --name <slot> [--base <branch>] [--submodules a,b] \
+                           [--hook-dir <path>] [--json]
+pipeline worktree destroy  --name <slot> [--outcome completed|halted] \
+                           [--hook-dir <path>] [--json]
+pipeline worktree list     [--json]
+```
+
+For an orchestrator that needs a **slot** — a worktree, its branch, its env file
+— but has no pipeline run to hang it on. It executes the consumer's
+`worktree-create` / `worktree-finalize` / `worktree-destroy` hooks (see the
+plugin's `docs/worktree-hook-contract.md`) through the **same** code path
+`pipeline next` uses (`src/lib/worktree-hooks.ts`), never a second copy of the
+`PIPELINE_WT_*` assembly — the contract is frozen, so it is single-homed and an
+anti-drift test compares the two callers' environments byte for byte.
+
+**Standalone context** (stated because the contract is frozen):
+
+- `PIPELINE_WT_PIPELINE_ROOT` and `PIPELINE_WT_PIPELINE_NAME` are the **empty
+  string** — there is no pipeline. They are present-and-empty, never absent.
+- `PIPELINE_WT_NAME` is the slot name (it is the slot identity the create hook
+  is idempotent per), and `PIPELINE_WT_RUN_ID` carries the same value: there is
+  no run id, and on the run path the two have always been equal.
+- **No run-scoped journal event is written.** A standalone invocation must not
+  fabricate `worktree.created` history for a run that does not exist.
+- `PIPELINE_WT_PROJECT_ROOT` is the current directory, exactly as on the run
+  path — run the command from the project root.
+
+**Notes**
+
+- `--name` defaults to a fresh UUIDv7 (what `pipeline id` mints) and must match
+  `[A-Za-z0-9][A-Za-z0-9._-]*`, max 64 characters. The name reaches a filesystem
+  path and a git branch name, so anything else — a path separator, `..`,
+  whitespace, a shell metacharacter, a leading `-`, a Windows device name — is
+  refused with exit 2 before any path, branch, or hook is touched.
+- Creation is **idempotent per name** by frozen contract: a second `create`
+  reuses the slot and reports `status: "reused"` (plus `reused_evidence`) rather
+  than failing. An orchestrator should read a reuse as a duplicate dispatch.
+- `destroy --outcome completed` (default) **reaps** —
+  `PIPELINE_WT_DELETE_BRANCHES=1` and the slot record is dropped; `--outcome
+  halted` **preserves** — `DELETE_BRANCHES=0` and the record is kept for
+  post-mortem.
+- `list` reports the slots this command provisioned (recorded under
+  `.pipeline/.runtime/worktrees/`) and whether each is still on disk. Finding and
+  reaping *leaked* worktrees and branches remains `pipeline gc`'s job.
+- `--ports <n>` is accepted and **recorded, not allocated** — port allocation
+  arrives with the built-in default provisioner.
+
+Exit code: `0` success · `1` the hook failed (soft-fail `{"ok":false,"detail"}`
+or hard-fail — `detail` says which) · `2` usage / invalid `--name` / invalid
+`--outcome`.
+
 ### `hook` — the Claude Code hook relays
 
 ```bash
