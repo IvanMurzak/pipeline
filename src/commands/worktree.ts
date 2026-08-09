@@ -517,7 +517,7 @@ function fillHookSlotPorts(ctx: {
     // this CLI does not own being unwritable is the hook's, and turning it into
     // a failure would break slots that provisioned fine before ports existed.
     // The block is handed back so it does not stay reserved for nothing.
-    releaseReservations(reservationDirFor(slotRootBase()), ctx.name);
+    releaseReservations(reservationDirFor(slotRootBase()), ctx.name, ctx.worktreePath);
     return {
       source: 'none',
       note: `could not publish ports into the hook's env file ${ctx.envFile} (${String((e as Error).message ?? e)}) — the slot has none`,
@@ -822,6 +822,11 @@ function destroySlot(args: WorktreeArgs): { output: DestroyOutput; code: number 
   const reaped = res.ok && args.outcome === 'completed';
   if (reaped) {
     deleteSlot(projectRoot, name);
+    // The slot is gone, so its ports go back to the pool NOW rather than
+    // waiting for some later allocation to notice the reservation is stale.
+    // Identified by name AND worktree path — the registry is machine-wide and
+    // slot names (task ids) repeat across projects.
+    if (slot) releaseReservations(reservationDirFor(slotRootBase()), name, slot.worktree_path);
   } else if (slot) {
     slot.outcome = args.outcome;
     slot.updated_at = nowIso();

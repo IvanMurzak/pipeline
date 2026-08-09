@@ -237,13 +237,21 @@ export function reservationDirFor(slotRootBase: string): string {
 }
 
 interface Reservation {
-  /** The slot that holds this port. Its OWN reservations are never obstacles. */
+  /** The slot that holds this port. */
   name: string;
   base: number;
   count: number;
-  /** The on-disk proof the slot still exists. Gone → the reservation is stale
-   *  and may be taken over; that is what stops a crashed run from eating the
-   *  range forever. */
+  /** The slot's worktree — BOTH the liveness proof and half of the identity.
+   *
+   *  Half of the identity because the registry is machine-wide while a slot
+   *  NAME is not unique across projects: task ids repeat, so two projects both
+   *  provisioning `a4` would otherwise each read the other's reservation as
+   *  "mine", release it, and claim the same block — the exact overlap this
+   *  layer exists to prevent. Name AND path is what makes a reservation mine.
+   *
+   *  Liveness proof because a path that is gone from disk means the slot is
+   *  gone: the reservation is stale and may be taken over, which is what stops
+   *  a crashed run from eating the range forever. */
   path: string;
   at: string;
 }
@@ -277,10 +285,18 @@ function ensureReservationDir(dir: string | null): string | null {
   }
 }
 
-/** Drop every reservation held by `name`. Called before a re-allocation so a
+/** True when a reservation belongs to the slot identified by `name` at
+ *  `livePath` — never merely by name (see `Reservation.path`). */
+function isOwnedBy(rec: Reservation, name: string, livePath: string): boolean {
+  return rec.name === name && rec.path === livePath;
+}
+
+/** Drop every reservation held by THIS slot. Called before a re-allocation so a
  *  slot never holds two blocks (the deterministic base can move when the ports
- *  it wanted became busy, and the abandoned claim must not survive). */
-export function releaseReservations(dir: string, name: string): void {
+ *  it wanted became busy, and the abandoned claim must not survive) and on
+ *  teardown, so a reaped slot's ports return to the pool at once instead of
+ *  waiting to be noticed as stale. */
+export function releaseReservations(dir: string, name: string, livePath: string): void {
   let entries: string[];
   try {
     entries = readdirSync(dir);
@@ -291,7 +307,7 @@ export function releaseReservations(dir: string, name: string): void {
     if (!RESERVATION_RE.test(entry)) continue;
     const file = `${dir}/${entry}`;
     const rec = readReservation(file);
-    if (rec === null || rec.name !== name) continue;
+    if (rec === null || !isOwnedBy(rec, name, livePath)) continue;
     try {
       unlinkSync(file);
     } catch {
@@ -313,7 +329,7 @@ function claimPort(dir: string, port: number, rec: Reservation): ClaimResult {
   } catch {
     const other = readReservation(file);
     if (other === null) return 'taken'; // unreadable: assume someone owns it
-    if (other.name === rec.name) return 'claimed'; // our own, re-taken
+    if (isOwnedBy(other, rec.name, rec.path)) return 'claimed'; // our own, re-taken
     if (other.path && existsSync(other.path)) return 'taken'; // a live slot holds it
     // Stale: the slot it names is gone from disk. Take it over — and if
     // another process wins that race, the `wx` below fails and we move on.
@@ -367,8 +383,13 @@ export function deterministicBase(name: string, count: number, range: PortRange 
   return range.min + (digest.readUInt32BE(0) % span);
 }
 
-/** Candidate bases in probe order: the deterministic one, then every other
- *  block-sized step, wrapping through the range exactly once. */
+/** Candidate bases in probe order: the deterministic one, then every
+ *  block-sized step from it, wrapping once.
+ *
+ *  A TILING of the range, deliberately — not every possible offset. Blocks that
+ *  tile cannot partially overlap, which is what makes two slots asking for
+ *  DIFFERENT counts safe to compare; and a range with no free tile is a range
+ *  worth reporting as full rather than picking apart byte by byte. */
 function* candidateBases(first: number, count: number, range: PortRange): Generator<number> {
   const span = spanOf(range, count);
   const tries = Math.max(1, Math.ceil(span / count));
@@ -416,7 +437,7 @@ export function allocatePorts(req: AllocateRequest): PortAllocation {
   const isFree = req.isFree ?? isPortFree;
 
   const dir = ensureReservationDir(req.reservationDir);
-  if (dir !== null) releaseReservations(dir, name);
+  if (dir !== null) releaseReservations(dir, name, req.livePath);
 
   const first = deterministicBase(name, count, range);
   const rec: Reservation = { name, base: 0, count, path: req.livePath, at: new Date().toISOString() };

@@ -95,7 +95,7 @@ function gitRoot(dir: string): string {
   return process.platform === 'win32' ? top.replace(/\//g, '\\') : top;
 }
 
-function scaffold(opts: { createHook?: string } = {}): string {
+function scaffold(opts: { createHook?: string; destroyHook?: string } = {}): string {
   const tmp = mkTmp('wtports-');
   sh(['init', '-q', '-b', 'main', tmp]);
   ident(tmp);
@@ -103,10 +103,14 @@ function scaffold(opts: { createHook?: string } = {}): string {
   sh(['add', '.'], tmp);
   sh(['commit', '-q', '-m', 'init'], tmp);
   const root = gitRoot(tmp);
+  const hooks = join(root, '.pipeline', '.hooks');
   if (opts.createHook !== undefined) {
-    const hooks = join(root, '.pipeline', '.hooks');
     mkdirSync(hooks, { recursive: true });
     writeFileSync(join(hooks, 'worktree-create.js'), opts.createHook);
+  }
+  if (opts.destroyHook !== undefined) {
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(join(hooks, 'worktree-destroy.js'), opts.destroyHook);
   }
   return root;
 }
@@ -581,6 +585,34 @@ process.stdout.write(JSON.stringify({ worktree_path: wt, branch: 'b', env_file: 
   });
 }, 180000);
 
+test('a REAPED slot hands its ports straight back — the reservation does not wait to be noticed as stale', () => {
+  const root = scaffold({
+    createHook: HOOK_NO_PORTS,
+    destroyHook: `
+const fs = require('fs');
+const wt = process.env.PIPELINE_WT_WORKTREE_PATH || '';
+if (process.env.PIPELINE_WT_OUTCOME === 'completed' && wt) fs.rmSync(wt, { recursive: true, force: true });
+process.stdout.write(JSON.stringify({ ok: true }) + '\\n');
+`,
+  });
+  inProject(root, '22200-22299', ({ wtRoot }) => {
+    const r = callJson(['create', '--name', 'reaped', '--ports', '4']);
+    expect(r.code).toBe(0);
+    const base = r.json.port_base as number;
+    const reservation = (p: number): string => join(wtRoot, '.ports', `${p}.json`);
+    for (let i = 0; i < 4; i++) expect(existsSync(reservation(base + i))).toBe(true);
+
+    expect(call(['destroy', '--name', 'reaped', '--outcome', 'completed']).code).toBe(0);
+    for (let i = 0; i < 4; i++) expect(`${base + i}: ${existsSync(reservation(base + i))}`).toBe(`${base + i}: false`);
+
+    // A PRESERVED slot (`--outcome halted`) keeps its ports: it is kept alive
+    // for post-mortem and resume, and its ports are part of that.
+    const kept = callJson(['create', '--name', 'kept', '--ports', '4']);
+    expect(call(['destroy', '--name', 'kept', '--outcome', 'halted']).code).toBe(0);
+    expect(existsSync(reservation(kept.json.port_base as number))).toBe(true);
+  });
+}, 180000);
+
 // ---------------------------------------------------------------------------
 // (6) DoD 7 — exhaustion is a stated failure naming the range
 // ---------------------------------------------------------------------------
@@ -715,6 +747,31 @@ test('reservations alone keep two same-base allocations apart, and a reservation
   });
   expect(reclaimed.ok).toBe(true);
   expect(reclaimed.ok && reclaimed.base).toBe(26036);
+});
+
+test('the SAME slot name in two different projects gets two different blocks — the registry is machine-wide and task ids repeat', () => {
+  // The registry is keyed by port and owned by (name, worktree path). Keyed by
+  // NAME alone, project A's `a4` would read project B's reservation as its own,
+  // release it, and claim the very block B is using.
+  const dir = join(mkTmp('resv2-'), 'ports');
+  const range = { min: 26100, max: 26139 };
+  const projA = mkTmp('projA-');
+  const projB = mkTmp('projB-');
+  const isFree = (): boolean => true; // nothing BOUND: only the registry can keep them apart
+  const alloc = (livePath: string) =>
+    allocatePorts({ name: 'a4', count: 4, reservationDir: dir, livePath, range, isFree });
+
+  const a = alloc(projA);
+  const b = alloc(projB);
+  expect(a.ok).toBe(true);
+  expect(b.ok).toBe(true);
+  const aPorts = new Set(a.ok ? a.ports : []);
+  for (const p of b.ok ? b.ports : []) expect(`${p} also in project A: ${aPorts.has(p)}`).toBe(`${p} also in project A: false`);
+
+  // Each project's slot is still STABLE on re-provision — releasing "mine"
+  // must not have become releasing "nobody's".
+  expect(alloc(projA).ok && alloc(projA)).toEqual(a);
+  expect(alloc(projB).ok && alloc(projB)).toEqual(b);
 });
 
 test('portEnvEntries and readPortsFromEnv are inverses, and only port-shaped keys count', () => {
