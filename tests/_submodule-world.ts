@@ -121,15 +121,29 @@ export interface FakeGh {
 
 /** advanceMode 'advance' (default): `pr merge` fast-forwards the bare origin's
  *  base to the pushed scratch commit (a real ff). 'never': stores the merge sha
- *  but does NOT advance origin (⇒ the reconcile can never catch up → halt). */
+ *  but does NOT advance origin (⇒ the reconcile can never catch up → halt).
+ *
+ *  `failFirstMerge`: the first PLAIN `pr merge` is refused (branch protection),
+ *  as GitHub would refuse it. An `--admin` merge is never refused — that IS the
+ *  bypass — so with the fallback ON this yields the admin retry, and with it OFF
+ *  it yields a terminal refusal.
+ *
+ *  `throwOnAdmin`: any gh invocation carrying `--admin` THROWS instead of being
+ *  recorded and answered. A `--no-admin` test then proves the absence of
+ *  elevation two independent ways — the throw makes an elevated call impossible
+ *  to pass silently, and the recorded `calls` are still asserted `--admin`-free
+ *  in case the production code ever swallowed the exception. */
 export function makeFakeGh(
   superOrigin: string,
-  opts: { advanceMode?: 'advance' | 'never'; failFirstMerge?: boolean } = {},
+  opts: { advanceMode?: 'advance' | 'never'; failFirstMerge?: boolean; throwOnAdmin?: boolean } = {},
 ): FakeGh {
   const calls: Array<{ args: string[]; cwd: string }> = [];
   const mode = opts.advanceMode ?? 'advance';
   const state: { base?: string; head?: string; sha?: string; mergeSha?: string; mergedOnce?: boolean } = {};
   const gh: GhRunner = (args, cwd) => {
+    if (opts.throwOnAdmin && args.includes('--admin')) {
+      throw new Error(`FAKE GH: elevation attempted — gh ${args.join(' ')}`);
+    }
     calls.push({ args: [...args], cwd });
     const [group, verb] = args;
     if (group === 'pr' && verb === 'create') {

@@ -1,7 +1,7 @@
-# `pipeline` CLI — telemetry, opt-out and the uploader; the `worktree` command group
+# `pipeline` CLI — telemetry, opt-out and the uploader; the `worktree` and `submodule` command groups
 
 `pipeline --help` (and `pipeline <command> --help`) is the command reference and
-is generated from the code that runs. This page covers two things a `--help`
+is generated from the code that runs. This page covers three things a `--help`
 screen cannot explain in a paragraph:
 
 - **Telemetry** (below): what the CLI uploads on your behalf, how to stop it,
@@ -11,6 +11,10 @@ screen cannot explain in a paragraph:
   (near the bottom of this page): the worktree-hook lifecycle run without a
   pipeline — `create`/`finalize`/`destroy`/`list`, the built-in provisioner and
   teardown, ports, and the standalone hook-context.
+- **[`pipeline submodule bump`](#pipeline-submodule-bump--the-guarded-pointer-bump-and-its-elevation-switch)**
+  (last on this page): the guarded submodule-pointer bump, and the one flag on
+  this CLI that decides whether it may **bypass branch protection on your
+  repository**.
 
 Two companion pages live in the plugin repository:
 
@@ -770,3 +774,97 @@ belongs to the `plugin-thin` taskflow (`02-extract-cli.md`), which is doing the
 broader pass over exactly this class of stale path across the plugin
 repository. This note exists so a reader who follows the link above is not
 left thinking the path mismatch is something they got wrong.
+
+---
+
+## `pipeline submodule bump` — the guarded pointer bump and its elevation switch
+
+```console
+$ pipeline submodule bump --project-root <path> [--submodules a,b] [--base <branch>]
+                          [--source-worktree <path>] [--dry-run] [--json]
+                          [--no-fetch] [--no-admin]
+```
+
+Records superproject submodule-pointer change(s) on the base branch and pushes
+them **isolation-safely**: all branch and commit work happens in a throwaway
+worktree cut from `origin/<base>`, and the only mutation ever performed on the
+shared checkout is `git fetch` + `git merge --ff-only` — never a `checkout`, a
+`reset`, or a force. Drifted pointers are auto-detected when `--submodules` is
+omitted. One JSON object is printed on stdout; exit `0`
+(`committed`/`noop`/`dry-run`), `1` (`halted`), `2` (usage or environment).
+
+The change is landed **through a pull request**, not pushed straight at the base
+branch. That is what makes the next section matter.
+
+### `--no-admin` — refuse to bypass branch protection
+
+The landing PR is merged with:
+
+```console
+gh pr merge <pr> --squash --delete-branch
+```
+
+**By default**, if GitHub refuses that merge — a required review, a required
+check, any protection rule — the command retries **once** with `--admin`:
+
+```console
+gh pr merge <pr> --squash --delete-branch --admin
+```
+
+`--admin` is GitHub's administrator bypass. It merges the PR *despite* the rule
+that refused it, and it only succeeds at all when the credentials `gh` is using
+carry admin rights on the repository. This is the single point in the CLI where
+a rule you configured on your own repository can be overridden on your behalf.
+
+`--no-admin` turns that fallback off. With it:
+
+- the plain merge is attempted **once**;
+- if GitHub refuses it, the refusal is **reported and the command halts** —
+  `status: "halted"`, `merge_outcome: "refused"`, `halt_reason` naming the PR,
+  `stderr` carrying GitHub's own refusal text, exit code `1`;
+- `gh` is **never invoked with `--admin`** at all.
+
+Nothing is lost when a merge is refused this way. The scratch branch and its
+commit are already on `origin` and the PR is open; the pointer bump is merged by
+satisfying whatever gate refused it, exactly like any other pull request.
+
+**The orchestrator is expected to pass `--no-admin`.** An automated driver that
+lands pointer bumps on your behalf must not be able to silently overrule your
+branch protection, so the Taskflow orchestrator passes this flag on every
+invocation — the flag is what makes "a merge GitHub refuses is reported, never
+retried with elevation" a property of the command rather than a promise in a
+document.
+
+**The default is deliberately still the fallback**, i.e. *on*. Flipping it would
+change the behaviour of every existing caller without their asking — the class
+of silent change this project avoids on principle. So the elevation is opt-out,
+not opt-in, and the burden of opting out sits with the automated caller that
+made the promise. Interactive use is unaffected: run it by hand and you get the
+same behaviour you always did.
+
+### The three merge outcomes in `--json`
+
+`merge_outcome` is the machine-readable discriminator — a refused merge is
+otherwise distinguishable from any other halt only by reading `halt_reason`
+prose, which is not a contract.
+
+| `merge_outcome` | `merged_via_admin` | `status` | What happened |
+| --- | --- | --- | --- |
+| `"plain"` | `false` | `committed` | `gh pr merge` succeeded as-is. Nothing was bypassed. |
+| `"admin"` | `true` | `committed` | The plain merge was refused; the `--admin` retry succeeded. **Branch protection was bypassed.** Only reachable without `--no-admin`. |
+| `"refused"` | `false` | `halted` | The merge did not happen and was reported. With `--no-admin` this is terminal and no `--admin` call was made; without it, it means even the elevated retry failed. |
+| `null` | `false` | `noop` / `dry-run` / `halted` | The merge step was never reached — nothing had drifted, `--dry-run` stopped before it, or an earlier step (fetch, push, `gh pr create`) halted. |
+
+`status` alone does not answer the question. A PR that merged perfectly well —
+plainly or via `--admin` — still reports `halted` when the *shared checkout*
+afterwards could not be fast-forwarded to it (`reconcile_status: "failed"`); the
+bump landed on `origin` either way. `merge_outcome` is the only field that says
+what happened to the merge itself.
+
+`merged_via_admin` predates `merge_outcome` and is kept unchanged for existing
+consumers; it answers only "was the bypass used", not "did the merge happen".
+
+`--dry-run` reports the plan without pushing anything, and its
+`planned_actions` state which merge would be attempted — the `gh pr merge` line
+reads `(with --admin fallback)` only when the fallback is live, so a dry run is
+also the cheapest way to confirm the flag reached the command.

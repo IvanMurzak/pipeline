@@ -264,7 +264,8 @@ otherwise.
 
 ```bash
 bun src/cli.ts submodule bump --project-root <superproject> [--submodules a,b] \
-  [--base <branch>] [--source-worktree <path>] [--dry-run] [--json]
+  [--base <branch>] [--source-worktree <path>] [--dry-run] [--json] \
+  [--no-fetch] [--no-admin]
 ```
 
 A **guarded git primitive**: it records superproject submodule-pointer change(s)
@@ -288,6 +289,12 @@ deterministic, tested command that **refuses** unsafe requests.
   before push/PR/merge (mutates nothing on the base branch).
 - `--json` / `--no-fetch` — JSON is always emitted; `--no-fetch` trusts the
   present remote-tracking refs (skips the read-only reachability fetch).
+- `--no-admin` — do **not** retry a refused `gh pr merge` with `--admin`. The
+  fallback is ON by default and **bypasses branch protection** on the target
+  repository; with `--no-admin`, a refused merge is reported
+  (`merge_outcome: "refused"`, halted, exit 1) and `gh` is never invoked with
+  `--admin`. An automated orchestrator is expected to pass it — see
+  [`docs/cli.md`](docs/cli.md#--no-admin--refuse-to-bypass-branch-protection).
 
 **Guards** (each maps to an incident it prevents):
 
@@ -312,9 +319,14 @@ deterministic, tested command that **refuses** unsafe requests.
   "bumped":  [{ "path": "sub", "from": "<sha>", "to": "<sha>" }],
   "skipped": [{ "path": "sub", "reason": "<why>", "status": "unchanged-by-run|base-advanced-conflict|unreachable|…" }],
   "pr": "<url|null>", "infra_sha": "<sha|null>", "reconcile_status": "ff|skipped|failed|na",
-  "merged_via_admin": false, "halt_reason": null
+  "merged_via_admin": false, "merge_outcome": "plain|admin|refused|null", "halt_reason": null
 }
 ```
+
+`merge_outcome` distinguishes the three merge outcomes — `"plain"` (merged as
+is), `"admin"` (merged by bypassing branch protection), `"refused"` (not merged;
+reported, never forced) — and is `null` when the merge step was never reached
+(noop / dry-run / an earlier halt).
 
 Exit code: `0` (committed / noop / dry-run) · `1` (halted) · `2` (usage / env —
 bad args, not a git repo, or `gh` missing for a non-dry-run landing).
