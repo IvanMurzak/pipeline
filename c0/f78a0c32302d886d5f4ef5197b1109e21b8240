@@ -1,0 +1,24 @@
+hooks/hooks.json
+  s_f9bd48b89a0af2::t_844d2d2a3df0fe 10-13
+  s_f9bd48b89a0af2::t_ff886640fd6fe0 2
+hooks/stats_relay.ts
+  s_f9bd48b89a0af2::t_71a097be93cc4a 3,10-26,36,43-44,89
+apps/pipeline-cli/src/lib/stats-backfill.ts
+  s_f9bd48b89a0af2::t_6ff60bae4a35b0 1-292
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "c0f78a0c32302d886d5f4ef5197b1109e21b8240",
+  "prompts": {},
+  "sessions": {
+    "s_f9bd48b89a0af2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cac9d280-0593-447c-a8f5-2a3ff91785c5",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

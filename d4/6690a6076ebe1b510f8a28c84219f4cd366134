@@ -1,0 +1,23 @@
+src/commands/worktree.ts
+  s_32b1d4b0972741::t_d2e3e3b5b25d85 520,825-829
+src/lib/port-alloc.ts
+  s_32b1d4b0972741::t_cc82aa47a2132c 240,244-254,288-294,296-299,310,332,386-392,440
+tests/worktree-ports.test.ts
+  s_32b1d4b0972741::t_009f96ea7473b0 98,106,111-114,588-615,752-776
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "d46690a6076ebe1b510f8a28c84219f4cd366134",
+  "prompts": {},
+  "sessions": {
+    "s_32b1d4b0972741": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_32b1d4b0972741",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

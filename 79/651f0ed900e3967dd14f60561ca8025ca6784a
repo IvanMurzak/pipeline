@@ -1,0 +1,37 @@
+CHANGELOG.md
+  s_97dc321289f58c::t_eec101986ce29a 7-29
+.claude-plugin/plugin.json
+  s_97dc321289f58c::t_eec101986ce29a 3
+apps/pipeline-ui/tests/file-line-stream.test.ts
+  s_97dc321289f58c::t_80d4f15a244a3b 1-127
+apps/pipeline-ui/server.ts
+  s_97dc321289f58c::t_8d67984ff99569 2342-2356,2359-2361
+  s_97dc321289f58c::t_9fff49cd04de7e 28
+  s_97dc321289f58c::t_684cbda0e1cdc3 2292
+  s_97dc321289f58c::t_64d0dd0ddeb76d 2228-2231,2233
+  s_97dc321289f58c::t_347e9057c82a48 2243-2245,2250
+  s_97dc321289f58c::t_9dd46e743f8498 821,823
+  s_97dc321289f58c::t_382addd94cf33a 3749-3759
+  s_97dc321289f58c::t_d45c81440526a5 2253
+  s_97dc321289f58c::t_eedb38c496da56 744
+  s_97dc321289f58c::t_c09a22067146ce 2297
+  s_97dc321289f58c::t_a2b0461d757ddd 2362
+apps/pipeline-ui/lib.ts
+  s_97dc321289f58c::t_3c637de8d4b910 7,909-935,937,939,943-966,968-971
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "79651f0ed900e3967dd14f60561ca8025ca6784a",
+  "prompts": {},
+  "sessions": {
+    "s_97dc321289f58c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f66cede4-68f5-4bb2-89cd-c39f4197b6c5",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

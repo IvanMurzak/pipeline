@@ -1,0 +1,31 @@
+apps/pipeline-cli/tests/next-stats-run-init-kick.test.ts
+  s_f9bd48b89a0af2::t_e3c0f36932db8a 45-51
+  s_f9bd48b89a0af2::t_f41bec03710667 83
+  s_f9bd48b89a0af2::t_a5a0b1055aaee0 1-44,52-82,84-138
+apps/pipeline-cli/tests/hook-stats-relay.test.ts
+  s_f9bd48b89a0af2::t_de8eee663601fe 1-242
+apps/pipeline-cli/tests/stats-backfill-verb.test.ts
+  s_f9bd48b89a0af2::t_1402952ff85682 122
+  s_f9bd48b89a0af2::t_e9e5056d70c024 1-121,123-158
+apps/pipeline-cli/tests/stats-backfill.test.ts
+  s_f9bd48b89a0af2::t_8d45d189709b61 49-56,59-60,73
+  s_f9bd48b89a0af2::t_bde40145f9f213 1-48,57-58,61-72,74-426
+apps/pipeline-cli/tests/fixtures/stats_relay.pre-refactor.ts
+  s_f9bd48b89a0af2::t_b137eaa730ef1a 1-139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "76e1a61ef1e42457d9f8932b0184995be18b88e3",
+  "prompts": {},
+  "sessions": {
+    "s_f9bd48b89a0af2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cac9d280-0593-447c-a8f5-2a3ff91785c5",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

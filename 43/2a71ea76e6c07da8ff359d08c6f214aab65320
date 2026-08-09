@@ -1,0 +1,19 @@
+tests/vendor-privacy.test.ts
+  s_3d4e30098762ea::t_3ff47d485b224f 334-339
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "432a71ea76e6c07da8ff359d08c6f214aab65320",
+  "prompts": {},
+  "sessions": {
+    "s_3d4e30098762ea": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_3d4e30098762ea",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

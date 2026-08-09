@@ -1,0 +1,19 @@
+CHANGELOG.md
+  s_d0f7e7b6eff56e::t_3762100537d2a3 7-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "37f37d0b8843036c562083219bbcd65df64537e4",
+  "prompts": {},
+  "sessions": {
+    "s_d0f7e7b6eff56e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d2cb2e21-f860-44f1-adcc-fe66015824da",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

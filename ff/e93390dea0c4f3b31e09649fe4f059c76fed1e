@@ -1,0 +1,19 @@
+tests/gc-slot-root.test.ts
+  s_64da5ef1e574c3::t_4c2ca263a29983 28,255-297
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "ffe93390dea0c4f3b31e09649fe4f059c76fed1e",
+  "prompts": {},
+  "sessions": {
+    "s_64da5ef1e574c3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_64da5ef1e574c3",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

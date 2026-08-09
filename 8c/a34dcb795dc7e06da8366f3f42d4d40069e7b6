@@ -1,0 +1,38 @@
+apps/pipeline-cli/src/lib/script-types.ts
+  s_69ec513d2e61d8::t_8cda58078862a8 46-57
+apps/pipeline-cli/src/lib/plan.ts
+  s_69ec513d2e61d8::t_a77d606c2cd5f4 20
+  s_69ec513d2e61d8::t_aa70d068983fa3 330-332
+apps/pipeline-cli/tests/manifest-plan.test.ts
+  s_69ec513d2e61d8::t_32f25b5d651aa5 307,329
+  s_69ec513d2e61d8::t_08b05c33277dfd 1-11,13-18,22-306,308-328,330-377
+  s_69ec513d2e61d8::t_20857e6d4951ee 12,19-21
+apps/pipeline-cli/src/lib/manifest.ts
+  s_69ec513d2e61d8::t_cce67cc4807627 26-32,36-37
+  s_69ec513d2e61d8::t_44ac27b0bd15ac 223-269
+  s_69ec513d2e61d8::t_9bf364d2d5ac41 376-378,381-386,398-410,422-428,435-467
+  s_69ec513d2e61d8::t_0b1ab50333681f 41-42
+  s_69ec513d2e61d8::t_0b1d0e0b588a6a 113-124,127-134
+  s_69ec513d2e61d8::t_8066a0f8e9db43 73-75,79-80
+apps/pipeline-cli/src/lib/manifest-plan.ts
+  s_69ec513d2e61d8::t_5d97d17d20a245 1-135,141-347
+  s_69ec513d2e61d8::t_515aac18cfb0a3 136-140
+apps/pipeline-cli/tests/manifest.test.ts
+  s_69ec513d2e61d8::t_52cdd49360223c 410,422-428,437-488,501-503,510-578
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "8ca34dcb795dc7e06da8366f3f42d4d40069e7b6",
+  "prompts": {},
+  "sessions": {
+    "s_69ec513d2e61d8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2333b0af-97e3-4675-85f9-28bab5ff7022",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

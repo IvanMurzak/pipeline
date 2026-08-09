@@ -1,0 +1,26 @@
+apps/pipeline-cli/templates/support-answer/scripts/bm25_retrieve.ts
+  s_a0187f20d63fae::t_3e4bb6b2a9f7b3 282-285
+  s_a0187f20d63fae::t_7812697bb91e96 8-14
+apps/pipeline-cli/templates/support-answer/steps/01-retrieve.md
+  s_a0187f20d63fae::t_fd01d774529e1d 29-36,38-39,43-44
+apps/pipeline-cli/templates/support-answer/steps/03-answer.md
+  s_a0187f20d63fae::t_9f6668f13261fe 12-14,21,28,33
+apps/pipeline-cli/templates/support-answer/steps/02-select.md
+  s_a0187f20d63fae::t_6087e56fa04736 10-17,24-25,30-35,39-40,45-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "aa72511001034d1d4214b39d6b6cab3400512817",
+  "prompts": {},
+  "sessions": {
+    "s_a0187f20d63fae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "92a83b9b-471a-4dfb-a4d5-cc213d191839",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

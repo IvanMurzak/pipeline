@@ -1,0 +1,30 @@
+apps/pipeline-cli/package.json
+  s_f7f7392a09f46e::t_0a7726d3671ff9 3
+apps/pipeline-cli/src/lib/plan.ts
+  s_f7f7392a09f46e::t_3b67f250cff5fe 605-615
+  s_f7f7392a09f46e::t_3ea8c27d093630 616
+apps/pipeline-cli/tests/plan.test.ts
+  s_f7f7392a09f46e::t_623e01973bc075 739-740,743
+  s_f7f7392a09f46e::t_63e569d39daa05 730-735
+  s_f7f7392a09f46e::t_d11f8da605880c 753,764-778
+  s_f7f7392a09f46e::t_f5fca20d40f893 779-782
+  s_f7f7392a09f46e::t_78d2d96a0712cc 686-691,694
+  s_f7f7392a09f46e::t_e437fb93afbf98 654-685,692-693,695-717,720,722-729,736-738,741-742,744-752,754-763,783-795
+  s_f7f7392a09f46e::t_dd1aef5f8eefed 718-719,721
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "1577ee39944ca4e9bcfefc88e74bd9d304039c10",
+  "prompts": {},
+  "sessions": {
+    "s_f7f7392a09f46e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6d5d57f-6526-4873-9255-59c34d4f8571",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

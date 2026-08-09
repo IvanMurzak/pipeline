@@ -1,0 +1,35 @@
+README.md
+  s_0f16c8f458da1a::t_f9fd09b450ac88 369-372,402-406
+docs/cli.md
+  s_0f16c8f458da1a::t_4dd869d4b200c7 459-461,735-776
+src/cli.ts
+  s_0f16c8f458da1a::t_73951b828ca391 217-230,253-254
+src/commands/gc.ts
+  s_0f16c8f458da1a::t_47a61396b23c77 33-100,114-117,143-154,180-210,235-239,252-256,464-722,943-956,994-995,1008-1013,1030-1033,1067,1133-1147,1153-1154,1159-1165,1199-1200
+src/commands/worktree.ts
+  s_0f16c8f458da1a::t_8ca7996eed0fb1 306-314,316,320,1192-1195
+src/lib/port-alloc.ts
+  s_0f16c8f458da1a::t_2f6d3e4053c531 294-303,308,310,318,323
+src/lib/worktree-provision.ts
+  s_0f16c8f458da1a::t_752e1257f2e3cc 757-762
+tests/gc-slot-root.test.ts
+  s_0f16c8f458da1a::t_4ec28474a2ac85 1-581
+tests/worktree-hook-module.test.ts
+  s_0f16c8f458da1a::t_a264345cd08c5e 515,521-525,531-537,547-559
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "29e52b561d3ee79f8652fe5168c596eef1661411",
+  "prompts": {},
+  "sessions": {
+    "s_0f16c8f458da1a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_0f16c8f458da1a",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

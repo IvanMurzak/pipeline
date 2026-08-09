@@ -1,0 +1,47 @@
+CHANGELOG.md
+  s_506ad3e5ddf53a::t_1af80fcbae3d2f 7-72
+CLAUDE.md
+  s_506ad3e5ddf53a::t_8dede7a54c4639 26
+apps/pipeline-cli/src/commands/drive.ts
+  s_506ad3e5ddf53a::t_204b2a2730b438 24-36,101-104,107-109,130,132-133,138,151,187-192,240-251,253,261-266,290,296-298,304,309,329-331,354-358,509-516,553-557,560,565-568,576,579,584-586,874-890,916-943,1053-1054,1061,1107-1125,1319-1328,1407-1415,1424,1428-1430,1513,1540,1677-1682,1688-1692,1701,1740,1751,1778-1798,1800-1807,1825-1826,1831-1857,1859,1862,1865,1867-1879,1911,1962-1964,2053-2056,2060,2063-2081,2089,2110-2131,2181,2216,2263,2277
+apps/pipeline-cli/src/commands/next.ts
+  s_506ad3e5ddf53a::t_afb59fe4d3c17a 675,692-697,1830-1842,2378-2389
+apps/pipeline-cli/src/lib/envelope.ts
+  s_506ad3e5ddf53a::t_85acbd9ef223d0 33-38,43-52,95,99-113,148-188
+apps/pipeline-cli/src/lib/event.ts
+  s_506ad3e5ddf53a::t_581aca5d899516 429-461,486-505,508-555
+apps/pipeline-cli/tests/awaiting-input-contract.test.ts
+  s_506ad3e5ddf53a::t_e862aab2535493 1-178
+apps/pipeline-cli/tests/compose-exec.test.ts
+  s_506ad3e5ddf53a::t_512b44bd89b38c 14,21,722-724
+apps/pipeline-cli/tests/drive-claude-smoke.test.ts
+  s_506ad3e5ddf53a::t_d4fbbbf38834dc 1-115
+apps/pipeline-cli/tests/drive-self-improve.test.ts
+  s_506ad3e5ddf53a::t_bdde3959c8c41f 47-50
+apps/pipeline-cli/tests/drive.test.ts
+  s_506ad3e5ddf53a::t_f283addb11aa72 17,48-52,80-83,371-376,379-382,853-854,1217-1458,1485-1486
+apps/pipeline-cli/tests/envelope.test.ts
+  s_506ad3e5ddf53a::t_e6b4fbdce5b2b7 6,129-185
+apps/pipeline-cli/tests/gate.test.ts
+  s_506ad3e5ddf53a::t_f721093bc69324 456-458,463,465-483
+apps/pipeline-ui/EVENTS.md
+  s_506ad3e5ddf53a::t_83ca9f784d1a76 51,171-210
+docs/cli.md
+  s_506ad3e5ddf53a::t_e714db2e4fef85 18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "c3c00d4d1c8bc4b498554e2086cbaa40cb54e5a1",
+  "prompts": {},
+  "sessions": {
+    "s_506ad3e5ddf53a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c7ddf85b-52fd-4790-860e-d62058866e78",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

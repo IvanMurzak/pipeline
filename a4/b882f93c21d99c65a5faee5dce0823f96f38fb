@@ -1,0 +1,31 @@
+apps/pipeline-ui/EVENTS.md
+  s_a6d0a5362ddd54::t_326a8983aa5494 212-238
+apps/pipeline-ui/server.ts
+  s_a6d0a5362ddd54::t_aa659237af08ea 40,76-77,82,477-488,1260-1261,2153-2268,3519-3532,3541-3547
+apps/pipeline-ui/tests/interrupt-detect.test.ts
+  s_a6d0a5362ddd54::t_08dc00859a2b72 1-139
+apps/pipeline-ui/tests/server-backfill-sweep.test.ts
+  s_a6d0a5362ddd54::t_4948b804de3fd7 1-217
+apps/pipeline-ui/tests/server-watchdog.test.ts
+  s_a6d0a5362ddd54::t_a89bf4afeb4bdf 1-247
+apps/pipeline-ui/transcript-stats.ts
+  s_a6d0a5362ddd54::t_ea01cf2feddbb7 802-963
+docs/ui-subsystem.md
+  s_a6d0a5362ddd54::t_750f374e5b8930 46-47,49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "a4b882f93c21d99c65a5faee5dce0823f96f38fb",
+  "prompts": {},
+  "sessions": {
+    "s_a6d0a5362ddd54": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_a6d0a5362ddd54",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

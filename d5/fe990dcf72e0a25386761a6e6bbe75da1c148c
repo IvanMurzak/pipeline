@@ -1,0 +1,285 @@
+CHANGELOG.md
+  s_4cebbe5743659f::t_08276d2d85b4cd 39
+CLAUDE.md
+  s_4cebbe5743659f::t_8e2e1f3e89fef0 30,46,56,70,103-104,165,169
+README.md
+  s_4cebbe5743659f::t_63e4f60136462c 5,16,43-44,65,114,121,132,136,152,201-202,267,291,313,375,399,412,460,489,514,555,557-558,598,610,624,709,722,734,794,837
+agents/pipeline-designer.md
+  s_364be739bc892c::t_3140294995d423 3,13,25,28,36,39,48,54,59,78,186-187,243,264,556-557,619,627,658
+agents/pipeline-improver.md
+  s_364be739bc892c::t_8c2cbec262de43 13,15,24,28,92,251,267
+agents/pipeline-manager.md
+  s_364be739bc892c::t_148db4ca15e8fb 38,42
+agents/pipeline-script-creator.md
+  s_364be739bc892c::t_b82de654e13ca5 13,17-18,52,61,65,199,275,287
+agents/step-executor.md
+  s_4cebbe5743659f::t_bc011efc547a25 11,29,32,41,44,80
+apps/pipeline-cli/README.md
+  s_364be739bc892c::t_aeed8956a28658 36,44,116,138
+apps/pipeline-cli/src/cli.ts
+  s_4cebbe5743659f::t_ff2450f818b96f 71,221,253,264
+apps/pipeline-cli/src/commands/clone.ts
+  s_a0187f20d63fae::t_44d4f7fe2bc977 4,18,80,83,127
+apps/pipeline-cli/src/commands/cloud.ts
+  s_4cebbe5743659f::t_8d57a2ea965d3a 14,478,1456
+apps/pipeline-cli/src/commands/department.ts
+  s_4cebbe5743659f::t_86e18ee675d5e0 323,352,367,373,1120
+apps/pipeline-cli/src/commands/init.ts
+  s_4cebbe5743659f::t_fb3c2f819ab87e 399,412
+apps/pipeline-cli/src/commands/logs.ts
+  s_364be739bc892c::t_4c72a666d90eb3 68,72
+apps/pipeline-cli/src/commands/stats.ts
+  s_364be739bc892c::t_7838e477f5211d 5,84
+apps/pipeline-cli/src/commands/ui.ts
+  s_364be739bc892c::t_d0ae291f84eb69 113,118,390
+apps/pipeline-cli/src/lib/cloud-config.ts
+  s_364be739bc892c::t_b32abd23e69844 5,133,211
+apps/pipeline-cli/src/lib/compose.ts
+  s_364be739bc892c::t_fd7f488f69a977 101,104,128-129
+apps/pipeline-cli/src/lib/department-serve.ts
+  s_4cebbe5743659f::t_dafd3c6f60e173 49
+apps/pipeline-cli/src/lib/event.ts
+  s_4cebbe5743659f::t_52839c397f5118 4,251,260,777
+apps/pipeline-cli/src/lib/generated-dir.ts
+  s_4cebbe5743659f::t_7b4b179c2d3c6b 7-8
+apps/pipeline-cli/src/lib/match.ts
+  s_364be739bc892c::t_7f9d2d3a67fc51 3
+apps/pipeline-cli/src/lib/plan.ts
+  s_364be739bc892c::t_852301894307cf 142,933,1011,1234
+apps/pipeline-cli/src/lib/stats-backfill.ts
+  s_4cebbe5743659f::t_67f3ba98edb11e 221-222,235,313,372
+apps/pipeline-cli/src/lib/stats.ts
+  s_4cebbe5743659f::t_a2698115818e04 7,104
+apps/pipeline-cli/src/lib/templates.ts
+  s_a0187f20d63fae::t_bf1b01d196a9cf 4
+apps/pipeline-cli/tests/awaiting-input-contract.test.ts
+  s_4cebbe5743659f::t_49f734e9e88c80 158
+apps/pipeline-cli/tests/clone.test.ts
+  s_a0187f20d63fae::t_21f9786dedb65b 59,64,80,95,154
+apps/pipeline-cli/tests/compose-exec.test.ts
+  s_364be739bc892c::t_17baef29a8d8fc 7,43,66
+apps/pipeline-cli/tests/compose.test.ts
+  s_364be739bc892c::t_2b9e3d5efa7ba2 38,77,87
+apps/pipeline-cli/tests/department-serve.test.ts
+  s_4cebbe5743659f::t_7c0b6d3d9b1bf7 78,104,405,408,502,2062
+apps/pipeline-cli/tests/department-status.test.ts
+  s_4cebbe5743659f::t_70fe15b14b7fde 73,82
+apps/pipeline-cli/tests/department.test.ts
+  s_4cebbe5743659f::t_f2fd8eaad4e5f0 264,275,294,310,341,349,354,363,574,586,719,730,742,751,763,836,855
+apps/pipeline-cli/tests/drive-claude-smoke.test.ts
+  s_4cebbe5743659f::t_b280a10775a122 51,55
+apps/pipeline-cli/tests/drive-script-steps.test.ts
+  s_364be739bc892c::t_e2154aaa35525f 57,62,68,193,204
+apps/pipeline-cli/tests/drive-self-improve.test.ts
+  s_4cebbe5743659f::t_abd1b5ac34d514 174,562,709,734
+apps/pipeline-cli/tests/drive.test.ts
+  s_4cebbe5743659f::t_5c7c2537c5ad33 538,542,554,561,1443,1445
+apps/pipeline-cli/tests/envelope.test.ts
+  s_364be739bc892c::t_144d0f69f1a5e7 139,148
+apps/pipeline-cli/tests/event.test.ts
+  s_364be739bc892c::t_1cf15cc4120866 78,248,275
+apps/pipeline-cli/tests/fixtures/stats_relay.pre-refactor.ts
+  s_4cebbe5743659f::t_f4b421bfd27cb2 51,55,75
+apps/pipeline-cli/tests/gate.test.ts
+  s_364be739bc892c::t_e0a68f28fb671e 53,61,467
+apps/pipeline-cli/tests/hook-prompt-match.test.ts
+  s_364be739bc892c::t_ef56b973e518ac 63,65,208-209,245,259,261-262,311
+apps/pipeline-cli/tests/hook-stats-relay.test.ts
+  s_4cebbe5743659f::t_df52ce699b2ce6 61,69-70,140
+apps/pipeline-cli/tests/hooks.test.ts
+  s_364be739bc892c::t_0132de5a8b9547 153,164,222,312,418,491
+apps/pipeline-cli/tests/init.test.ts
+  s_4cebbe5743659f::t_0a8aecf57bf214 292,303,347,374,392,446,494,501,505,562-563,625
+apps/pipeline-cli/tests/logs.test.ts
+  s_364be739bc892c::t_6f8d690d5b6fe0 89,105,179,186
+apps/pipeline-cli/tests/model-overrides.test.ts
+  s_364be739bc892c::t_1c253d219c0126 111,178,183
+apps/pipeline-cli/tests/next-render.test.ts
+  s_f7f7392a09f46e::t_46ecb50d96364b 48,66,116
+apps/pipeline-cli/tests/next-script.test.ts
+  s_364be739bc892c::t_c345818e7eeaf7 183,323,412
+apps/pipeline-cli/tests/next-stats-run-init-kick.test.ts
+  s_4cebbe5743659f::t_cdf261c0d851fc 30,38,52,116
+apps/pipeline-cli/tests/next.test.ts
+  s_364be739bc892c::t_fafedb2a01d5db 148,240,564,896,1267
+apps/pipeline-cli/tests/plan-pipeline-steps.test.ts
+  s_364be739bc892c::t_7a6a0ea8da5641 173,196,199
+apps/pipeline-cli/tests/plan.test.ts
+  s_364be739bc892c::t_a6037b1ce01a6d 333,729
+apps/pipeline-cli/tests/render-source-mapping.test.ts
+  s_a0187f20d63fae::t_08eaff54b299e6 36
+apps/pipeline-cli/tests/script-exec-integration.test.ts
+  s_364be739bc892c::t_330b812215f6cb 46,65,145,944
+apps/pipeline-cli/tests/stats-backfill-verb.test.ts
+  s_4cebbe5743659f::t_e1e2665f576ff5 93
+apps/pipeline-cli/tests/stats-backfill.test.ts
+  s_4cebbe5743659f::t_1db0f9bc0ae07d 39,206,239,453
+apps/pipeline-cli/tests/stats-worktree-anchor.test.ts
+  s_4cebbe5743659f::t_bbafe14029e8d7 12,72,85,114,134,139
+apps/pipeline-cli/tests/stats.test.ts
+  s_364be739bc892c::t_82f92b882b8e65 50,52,70,73,80,246,274,284,292,306,335,382,409,443,638
+apps/pipeline-cli/tests/template-support-answer.test.ts
+  s_4cebbe5743659f::t_51684bd36d077a 266-267
+apps/pipeline-cli/tests/ui.test.ts
+  s_364be739bc892c::t_0755559c43bb43 77,80
+apps/pipeline-cli/tests/worktree-scoped.test.ts
+  s_4cebbe5743659f::t_2c7f29ee205f0b 103,105,110,126,184,203,205,274,296,305,329,341,361,393-394,435
+apps/pipeline-ui/EVENTS.md
+  s_364be739bc892c::t_f0200cf05a6be9 3,345,407
+apps/pipeline-ui/dist/assets/index-9Vo8IiI0.js
+  s_4cebbe5743659f::t_5dbca30a573255 399
+apps/pipeline-ui/editor.ts
+  s_364be739bc892c::t_3fe4446f397d3d 14,66,79,276
+apps/pipeline-ui/launcher.ts
+  s_364be739bc892c::t_4f0d54043fe0ef 6,28,176,311,322
+apps/pipeline-ui/manual-tests/README.md
+  s_364be739bc892c::t_2103c8140c1a9a 23
+apps/pipeline-ui/manual-tests/fixtures/test-pipeline/PIPELINE.md
+  s_364be739bc892c::t_2991a463413f89 18
+apps/pipeline-ui/manual-tests/harness.ts
+  s_364be739bc892c::t_a7546ee6bdeccf 223,245,255,281,478
+apps/pipeline-ui/manual-tests/scenarios/index.ts
+  s_364be739bc892c::t_72652cf4487b45 122,128,131,140,146,149,158,234,239,245,299,323,383,465,470,488
+apps/pipeline-ui/manual-tests/scenarios/model.ts
+  s_364be739bc892c::t_6becc02b957027 91
+apps/pipeline-ui/mirror.ts
+  s_4cebbe5743659f::t_ceeae6d4801fee 16
+apps/pipeline-ui/server.ts
+  s_4cebbe5743659f::t_e0583bbc15b9c7 7-8,857,958,1604,1697,1825,1842,1863,1930,1966,1981,2107,2173,2323,2433,3067,3123
+apps/pipeline-ui/tests/aifix.test.ts
+  s_364be739bc892c::t_7894538bb0a568 5,48
+apps/pipeline-ui/tests/bindings-compaction.test.ts
+  s_4cebbe5743659f::t_35ef165ccaba2c 53
+apps/pipeline-ui/tests/hook-awaiting-input.test.ts
+  s_4cebbe5743659f::t_f0da7441523c3e 43,48,210,228,235
+apps/pipeline-ui/tests/hook-bypass-detection.test.ts
+  s_364be739bc892c::t_4ee0dd10f3f638 68,103,245,264,337,361,443,484,533
+apps/pipeline-ui/tests/hook-cwd-gate.test.ts
+  s_364be739bc892c::t_9ea537b0db017e 8,14,38,41,51,53,62,66,72-73,75,78,91
+apps/pipeline-ui/tests/hook-pretool-binding.test.ts
+  s_364be739bc892c::t_f82c7ce941756d 77,119,251
+apps/pipeline-ui/tests/hook-runid-session-fallback.test.ts
+  s_364be739bc892c::t_c34b7fa7ceacbf 72,126,267,277
+apps/pipeline-ui/tests/hook-subagent-stop.test.ts
+  s_364be739bc892c::t_e115ef7d16e1ee 64,110
+apps/pipeline-ui/tests/launcher.test.ts
+  s_364be739bc892c::t_18b7d445b9354d 124,596-597,599
+apps/pipeline-ui/tests/lib.test.ts
+  s_364be739bc892c::t_5aa3de00a6484a 220,222,240,275,279,318
+apps/pipeline-ui/tests/mirror-binding.test.ts
+  s_364be739bc892c::t_89f4ea24d1a1f8 74,114,251
+apps/pipeline-ui/tests/mirror-scope-discipline.test.ts
+  s_364be739bc892c::t_3da6a538e05cfe 67
+apps/pipeline-ui/tests/mirror-subagent.test.ts
+  s_364be739bc892c::t_738a737a4477b2 69,280,336,369
+apps/pipeline-ui/tests/mirror-tail.test.ts
+  s_364be739bc892c::t_a87e8fd4b632b2 63,139
+apps/pipeline-ui/tests/model-resolution.test.ts
+  s_364be739bc892c::t_69d6c60b032729 57
+apps/pipeline-ui/tests/server-backfill-sweep.test.ts
+  s_4cebbe5743659f::t_43424218ea6415 74,80,83
+apps/pipeline-ui/tests/server-fold-endpoints.test.ts
+  s_4cebbe5743659f::t_b698a4a8b3dc27 39,121,123,127
+apps/pipeline-ui/tests/server-watchdog.test.ts
+  s_4cebbe5743659f::t_6a7d7586dcacbe 41,135
+apps/pipeline-ui/tests/server.test.ts
+  s_364be739bc892c::t_7ef12c8cedee42 70,350,380-381,461-462
+apps/pipeline-ui/tests/step-timings.test.ts
+  s_364be739bc892c::t_2546ea154b5889 13-14
+apps/pipeline-ui/tests/transcript-opt-out.test.ts
+  s_a0187f20d63fae::t_c62f175dc8275f 162-163,195,281,308,363,367
+apps/pipeline-ui/web/src/App.tsx
+  s_364be739bc892c::t_dade819452a144 597,615,624,840
+apps/pipeline-ui/web/src/components/CloudConnectCta.tsx
+  s_364be739bc892c::t_ab1e454dc79d60 19
+apps/pipeline-ui/web/src/lib/__tests__/format.test.ts
+  s_364be739bc892c::t_7a2042d5ffa061 22,30,38
+apps/pipeline-ui/web/src/lib/__tests__/launch.test.ts
+  s_364be739bc892c::t_c012830bb4b125 18
+apps/pipeline-ui/web/src/lib/__tests__/runs.test.ts
+  s_364be739bc892c::t_c57c490c17fecb 230,233,237,240,244,248,270,280,286,291,302,313,319,391,395,425,429,435,449-450,462,468,486,504,519,525,547,553,573,576,580,597,608
+apps/pipeline-ui/web/src/lib/cloudConnect.ts
+  s_364be739bc892c::t_10ce882486bc70 5,20
+apps/pipeline-ui/web/src/lib/format.ts
+  s_364be739bc892c::t_f0ba7483475119 38-39
+apps/pipeline-ui/web/src/lib/pipelineTree.ts
+  s_364be739bc892c::t_430ddd7be9b185 17
+docs/cli.md
+  s_4cebbe5743659f::t_b50fde183c1edf 7,9,11,25,34
+docs/execution-modes.md
+  s_364be739bc892c::t_87381339500d15 9,25
+docs/history.md
+  s_364be739bc892c::t_6e74c2ff287a31 8
+docs/running-pipelines.md
+  s_4cebbe5743659f::t_99e609d87fc834 13,36
+docs/ui-subsystem.md
+  s_364be739bc892c::t_b8a5e75ed743a2 5,22,34
+docs/worktree-hook-contract.md
+  s_364be739bc892c::t_1c2d8a46fbb5d7 3,45
+hooks/analytics_relay.ts
+  s_4cebbe5743659f::t_f054649de54f4b 43,73,214,218,222,229,239,451,499,501,560,780,1031,1725,1727,1729-1730,1735
+hooks/hooks.json
+  s_4cebbe5743659f::t_863639105a32e6 2
+hooks/pipeline_ui_relay.ts
+  s_4cebbe5743659f::t_951dab8873d846 6,185,189,191,197,481,525-526,529,535
+hooks/prompt_match_relay.ts
+  s_4cebbe5743659f::t_8db7f61c870edf 23,140,144,148,155,165,171,309
+hooks/stats_relay.ts
+  s_364be739bc892c::t_11448514a35bb8 8,43,94
+roadmap/script-steps/DESIGN.md
+  s_364be739bc892c::t_1b94d64ac59ebd 503
+skills/clone/SKILL.md
+  s_a0187f20d63fae::t_2cc91e39157a6a 3,16,52,61,75
+skills/design/SKILL.md
+  s_364be739bc892c::t_af1e5635685197 3,26,30,40,55
+skills/dispatch/SKILL.md
+  s_364be739bc892c::t_a18d820229a38c 11,45,66,128
+skills/find/SKILL.md
+  s_364be739bc892c::t_55a0b5bb9e336a 17,36,56
+skills/optimize/SKILL.md
+  s_364be739bc892c::t_8319e9879712d2 3,14,86
+skills/run/SKILL.md
+  s_364be739bc892c::t_cc67b7a62ce4a4 57,63,89-90,169-170,174-175,181
+skills/ui/SKILL.md
+  s_364be739bc892c::t_9bffd48d6fede5 22,45,73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "d5fe990dcf72e0a25386761a6e6bbe75da1c148c",
+  "prompts": {},
+  "sessions": {
+    "s_364be739bc892c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b8f91f54-742b-4579-9e3a-eeb38012be81",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_4cebbe5743659f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fc6d3-15e6-7ee2-9b93-87a1eb2dffe6",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_a0187f20d63fae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "92a83b9b-471a-4dfb-a4d5-cc213d191839",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_f7f7392a09f46e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6d5d57f-6526-4873-9255-59c34d4f8571",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

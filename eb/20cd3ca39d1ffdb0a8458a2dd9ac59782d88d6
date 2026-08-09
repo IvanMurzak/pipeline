@@ -1,0 +1,73 @@
+apps/pipeline-cli/tests/drive.test.ts
+  s_716a2f2d4693eb::t_7c475b719977b4 202-203,214-215,219-222,231-232
+  s_716a2f2d4693eb::t_21b6b7a05ae5db 287-288
+apps/pipeline-ui/web/src/components/EditorPanel.tsx
+  s_716a2f2d4693eb::t_08b6139c3eee59 472-480
+apps/pipeline-cli/src/lib/envelope.ts
+  s_716a2f2d4693eb::t_49915228154c8c 140-145
+  s_716a2f2d4693eb::t_2836f655ca738d 1,3-18
+  s_716a2f2d4693eb::t_94643417ff52cd 130-139
+apps/pipeline-cli/src/cli.ts
+  s_716a2f2d4693eb::t_7921fe17e1e533 147-154
+apps/pipeline-ui/aifix.ts
+  s_716a2f2d4693eb::t_c59fd7aba0965e 225-229
+  s_716a2f2d4693eb::t_f6b1a6f994341a 130-144
+  s_716a2f2d4693eb::t_749520723ca5d2 183-184
+  s_716a2f2d4693eb::t_df9192be70ea40 21
+  s_716a2f2d4693eb::t_0c88fde09e6ad1 47-50
+  s_716a2f2d4693eb::t_87f0b3d1d43c48 206-224,230-233,242
+apps/pipeline-cli/src/lib/stream-json.ts
+  s_716a2f2d4693eb::t_794bf488b060ee 62-75,77,86-87,90-114,116,121-126
+  s_716a2f2d4693eb::t_99d8d50d3b539a 1-61,76,78-85,88-89,115,117-120,127-403
+apps/pipeline-cli/src/lib/step-transcripts.ts
+  s_716a2f2d4693eb::t_6a1ce01ca69e6e 113-114
+apps/pipeline-cli/tests/stream-json.test.ts
+  s_716a2f2d4693eb::t_f1ebf082e52fc9 163-253
+  s_716a2f2d4693eb::t_ecde64d54724d6 1-162,254-696
+apps/pipeline-cli/tests/drive-stream-json.test.ts
+  s_716a2f2d4693eb::t_eef6efe777e7d1 1-202
+CLAUDE.md
+  s_716a2f2d4693eb::t_b38e59a894298d 53
+  s_716a2f2d4693eb::t_6db07368a4e05d 54
+apps/pipeline-ui/web/src/types.ts
+  s_716a2f2d4693eb::t_7a5b480fff836f 440-443
+apps/pipeline-cli/src/commands/drive.ts
+  s_716a2f2d4693eb::t_294c9d6668ceb7 1309-1315
+  s_716a2f2d4693eb::t_97c2ae18432167 470-475
+  s_716a2f2d4693eb::t_d783e702b794ac 1166-1183
+  s_716a2f2d4693eb::t_e42d76421b24b7 509-514
+  s_716a2f2d4693eb::t_cd59d91fa76db8 230-232,234-249
+  s_716a2f2d4693eb::t_48973e66e43981 286-288
+  s_716a2f2d4693eb::t_d3ef498b64a74a 750
+  s_716a2f2d4693eb::t_50017aa9fc6138 310
+  s_716a2f2d4693eb::t_8907b1410cb3e1 1345-1350,1357
+  s_716a2f2d4693eb::t_291ad348727cae 423-428
+  s_716a2f2d4693eb::t_dd20d033685f4a 279-285
+  s_716a2f2d4693eb::t_7794ce27d5c925 87-95
+  s_716a2f2d4693eb::t_65b02cea42d342 161
+  s_716a2f2d4693eb::t_2716027d622800 430-442,444-449
+  s_716a2f2d4693eb::t_8baa9466c7a899 745
+  s_716a2f2d4693eb::t_bfdf5fb4837f01 1552,1977
+  s_716a2f2d4693eb::t_462f8e0044f08b 507-508,515-516,525-528,537-542
+  s_716a2f2d4693eb::t_d1166d31b221c7 1184
+README.md
+  s_716a2f2d4693eb::t_9a139612650fef 803
+docs/cli.md
+  s_716a2f2d4693eb::t_4d451f91917e89 28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "eb20cd3ca39d1ffdb0a8458a2dd9ac59782d88d6",
+  "prompts": {},
+  "sessions": {
+    "s_716a2f2d4693eb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "30b2d290-214d-4259-afb7-f324c8e3daac",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

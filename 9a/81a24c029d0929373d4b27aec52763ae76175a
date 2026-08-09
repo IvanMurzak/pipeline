@@ -1,0 +1,59 @@
+apps/pipeline-cli/src/commands/logs.ts
+  s_a0187f20d63fae::t_f71190cc48b3ac 8
+skills/ui/SKILL.md
+  s_a0187f20d63fae::t_bf0afc86800594 69
+hooks/prompt_match_relay.ts
+  s_a0187f20d63fae::t_450fcf6ea8c3c7 19-22
+  s_a0187f20d63fae::t_b09f7e33e5c62c 56-61
+docs/ui-subsystem.md
+  s_a0187f20d63fae::t_6c6ee760365a51 35
+README.md
+  s_a0187f20d63fae::t_edd2d6d03d8d42 659
+  s_a0187f20d63fae::t_b051c3808f67c7 537
+  s_a0187f20d63fae::t_eda3dcd60a644c 676
+  s_a0187f20d63fae::t_0e3b20196fde1d 573
+  s_a0187f20d63fae::t_8d6d292aa8bdd6 634,636,640,643,645-647,649-651
+hooks/hooks.json
+  s_a0187f20d63fae::t_c8f15dad50cc81 2
+CLAUDE.md
+  s_a0187f20d63fae::t_bf76779267839c 32
+apps/pipeline-cli/tests/ui.test.ts
+  s_a0187f20d63fae::t_d6b1fb5b329716 20,23,25-29,34-35
+docs/cli.md
+  s_a0187f20d63fae::t_1b42967bdbd218 17
+  s_a0187f20d63fae::t_9e6fa67660db23 26
+  s_a0187f20d63fae::t_76b0a49e971ce2 16
+apps/pipeline-cli/tests/hook-prompt-match.test.ts
+  s_a0187f20d63fae::t_1cb92c8addf7ce 6-8
+hooks/analytics_relay.ts
+  s_a0187f20d63fae::t_13391b0fb1854f 1556
+  s_a0187f20d63fae::t_a4a43ffcf0f5b7 96-102
+hooks/pipeline_ui_relay.ts
+  s_a0187f20d63fae::t_706893256d1683 454
+  s_a0187f20d63fae::t_456ef5384064a1 39-46
+apps/pipeline-cli/src/cli.ts
+  s_a0187f20d63fae::t_ded882691ca53d 160
+apps/pipeline-ui/EVENTS.md
+  s_a0187f20d63fae::t_cb19d32b04bdfc 454
+hooks/stats_relay.ts
+  s_a0187f20d63fae::t_c8b0773e1e6d2a 20-22
+apps/pipeline-cli/src/commands/ui.ts
+  s_a0187f20d63fae::t_e99c543e5e78e7 46-48
+  s_a0187f20d63fae::t_60ab3b7ba54b07 302-306,312-314
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "9a81a24c029d0929373d4b27aec52763ae76175a",
+  "prompts": {},
+  "sessions": {
+    "s_a0187f20d63fae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "92a83b9b-471a-4dfb-a4d5-cc213d191839",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

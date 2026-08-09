@@ -1,0 +1,23 @@
+.github/workflows/ci.yml
+  s_d0f7e7b6eff56e::t_55051809b238c7 81-91,97,99
+CLAUDE.md
+  s_d0f7e7b6eff56e::t_7c660d2a775287 74,186,196-201
+tests/fixtures/stats_relay.pre-refactor.ts
+  s_d0f7e7b6eff56e::t_d0e368c3e6a9a8 13-17,41,46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "723d36127080ef3e422affda88e81d048b71a7cb",
+  "prompts": {},
+  "sessions": {
+    "s_d0f7e7b6eff56e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d2cb2e21-f860-44f1-adcc-fe66015824da",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

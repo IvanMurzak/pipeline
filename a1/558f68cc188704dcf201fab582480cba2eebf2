@@ -1,0 +1,25 @@
+.claude-plugin/plugin.json
+  s_54e998f58fdee2::t_9e9d8d5f6d5c89 3
+CHANGELOG.md
+  s_54e998f58fdee2::t_c27c0c5103e528 7-32,35-37,53-60
+README.md
+  s_54e998f58fdee2::t_51429969139949 9-26,32,43,752-764,772,775,779-798,811-812,815-817
+docs/departments-mcp.md
+  s_54e998f58fdee2::t_ace9490b729930 45-54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "a1558f68cc188704dcf201fab582480cba2eebf2",
+  "prompts": {},
+  "sessions": {
+    "s_54e998f58fdee2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_54e998f58fdee2",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,49 @@
+apps/pipeline-cli/src/lib/envelope.ts
+  s_0437b8a8fbb7aa::t_13a7f0cba56aff 136-150
+  s_0437b8a8fbb7aa::t_404e3fef3fa7ca 40-48
+apps/pipeline-cli/src/lib/step-schema.ts
+  s_0437b8a8fbb7aa::t_e91af368d8eb0c 76-78
+apps/pipeline-cli/tests/envelope.test.ts
+  s_0437b8a8fbb7aa::t_09c771f680e35e 6
+  s_0437b8a8fbb7aa::t_05a5d1cb74eee8 100-128
+apps/pipeline-cli/tests/drive.test.ts
+  s_0437b8a8fbb7aa::t_50692859b7e769 524-526,531
+  s_0437b8a8fbb7aa::t_289a7197ce8bbe 1169,1171,1175-1176,1178-1183,1185-1189,1191,1194-1195,1197-1203,1205,1208-1212,1214-1232,1238
+  s_0437b8a8fbb7aa::t_96b20c502ec48e 1172-1174,1177,1184
+  s_0437b8a8fbb7aa::t_0e94837400deba 1192-1193,1196
+  s_0437b8a8fbb7aa::t_689f7996d262c8 1204,1207,1213,1234-1237
+  s_0437b8a8fbb7aa::t_7f1aec36e28886 1206,1233
+  s_0437b8a8fbb7aa::t_b9ff37d945bbb3 1190
+  s_0437b8a8fbb7aa::t_4f9168fe809925 1170
+apps/pipeline-cli/README.md
+  s_0437b8a8fbb7aa::t_de3188ab3cbfdc 47-85
+apps/pipeline-cli/src/commands/drive.ts
+  s_0437b8a8fbb7aa::t_2a938ba933f97c 950-951
+  s_0437b8a8fbb7aa::t_e565c7aaa0919a 1068-1070,1084
+  s_0437b8a8fbb7aa::t_7a025061e27bff 1222,1231
+  s_0437b8a8fbb7aa::t_f862fad6c3e1ce 1008-1013
+  s_0437b8a8fbb7aa::t_c42d0b8a9c7e9c 864
+  s_0437b8a8fbb7aa::t_da3faaa762119c 288-294,300,306
+  s_0437b8a8fbb7aa::t_e3d799f01e1159 98
+  s_0437b8a8fbb7aa::t_bb71a54211efaf 1333-1340
+  s_0437b8a8fbb7aa::t_aec55d6f25f868 911-912,923
+  s_0437b8a8fbb7aa::t_4d51bff9bacae2 1308-1315
+  s_0437b8a8fbb7aa::t_01a3e284cb6ef9 727-731
+  s_0437b8a8fbb7aa::t_a981c7696f2121 1344-1351
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "eba98aa7ce7dfdef45e662b01118a56d4e6db3f7",
+  "prompts": {},
+  "sessions": {
+    "s_0437b8a8fbb7aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "aca23227-fb01-4357-947a-d2d68329d5df",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

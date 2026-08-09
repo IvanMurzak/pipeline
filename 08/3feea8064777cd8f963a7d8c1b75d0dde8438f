@@ -1,0 +1,37 @@
+CLAUDE.md
+  s_c0ed473a081f1c::t_cbca3b25856beb 30,55-56,61,63
+apps/pipeline-cli/src/commands/cloud.ts
+  s_c0ed473a081f1c::t_c8ff72c510b6fd 579-590,605-608,623,806-827,843-844,847,1402-1406
+apps/pipeline-cli/src/commands/department.ts
+  s_c0ed473a081f1c::t_7be82e3b181334 100,164,184-189,582-584,587,658-675,690-694,861-889,1016,1021,1027,1030-1033,1939-1944,2049-2073,2077-2089,2092-2105,2112-2122,2126-2133,2201-2203,2209-2210,2227-2228,2251-2253,2255-2257,2282-2297,2303,2309-2310,2312,2314,2322-2326,2330-2456,2459-2461,2465-2466,2468-2471,2480,2482-2517,2519-2522,2524-2530,2590,2626-2635,2637-2643,3099-3105
+apps/pipeline-cli/src/lib/cloud-config.ts
+  s_c0ed473a081f1c::t_d23e51208a83cd 106-121
+apps/pipeline-cli/src/lib/department-manifest.ts
+  s_c0ed473a081f1c::t_f9a546a7ec9139 198-233,271-274,298-311,321-332,340-348,384-408
+apps/pipeline-cli/src/lib/department-serve.ts
+  s_c0ed473a081f1c::t_212e4cd8b8ad54 56-62,513-527,543-547,549-551,555-556,572-576
+apps/pipeline-cli/tests/cloud.test.ts
+  s_c0ed473a081f1c::t_08dfc97ed05044 1584-1604
+apps/pipeline-cli/tests/department-status.test.ts
+  s_c0ed473a081f1c::t_c675cff8cc8513 491,493,500-504,508-514,519-641,735-739,764-769,823-830,833-837,842-847,1414-1619
+apps/pipeline-cli/tests/department.test.ts
+  s_c0ed473a081f1c::t_c399a090110f20 24,28-30,827-935,970-976,979,983
+docs/cli.md
+  s_c0ed473a081f1c::t_0a27255bc0b0c6 9,13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "083feea8064777cd8f963a7d8c1b75d0dde8438f",
+  "prompts": {},
+  "sessions": {
+    "s_c0ed473a081f1c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_c0ed473a081f1c",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

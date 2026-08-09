@@ -1,0 +1,69 @@
+apps/pipeline-cli/tests/script-exec-integration.test.ts
+  s_f7f7392a09f46e::t_a32a527315b0d5 1039-1041,1050
+  s_f7f7392a09f46e::t_daa45eb0ea2360 1099
+  s_f7f7392a09f46e::t_bd6adf60d1b1d2 1003-1038,1042-1049,1051-1068,1073-1098,1100-1145,1159-1162
+  s_f7f7392a09f46e::t_38f5d1c90c67d4 1146-1158
+  s_f7f7392a09f46e::t_a7ebffcee3d8c3 1069-1072
+apps/pipeline-cli/src/lib/script-step.ts
+  s_f7f7392a09f46e::t_4a20bc9849b17b 36
+  s_f7f7392a09f46e::t_89066b43644327 262
+  s_f7f7392a09f46e::t_3261ad70795c0a 786-850
+  s_f7f7392a09f46e::t_2f7412f32e8b07 279-291
+  s_f7f7392a09f46e::t_2c59c462506e24 150-159
+  s_f7f7392a09f46e::t_0d442083fe4921 188-192
+  s_f7f7392a09f46e::t_6eafafbe113588 14-16
+  s_f7f7392a09f46e::t_2401b704b79c65 35,39-45
+  s_f7f7392a09f46e::t_ffd5b29936d7b1 969,971-976,985
+  s_f7f7392a09f46e::t_4f974f04dab71d 955-965,968,970,977-984,986-1002,1006-1028,1032-1033,1036,1038-1046
+  s_f7f7392a09f46e::t_e01c0aa65814fe 1029-1031,1034-1035,1037
+  s_f7f7392a09f46e::t_43d0613a8198ae 1065-1072
+  s_f7f7392a09f46e::t_b8b8e96be2ec52 258-261,263-264,272-278,292-293
+  s_f7f7392a09f46e::t_1a122fc2e9388b 294
+apps/pipeline-cli/tests/script-step.test.ts
+  s_f7f7392a09f46e::t_27ce2aa5f11d2f 1036-1110,1112-1367,1395-1401
+  s_f7f7392a09f46e::t_926ebf3d762441 1111
+  s_f7f7392a09f46e::t_f7605b882a386f 1368-1394
+apps/pipeline-cli/src/commands/step-run.ts
+  s_f7f7392a09f46e::t_126f8bd4917aab 15-19
+  s_f7f7392a09f46e::t_6a5ebc5408be95 290-298,312,316
+  s_f7f7392a09f46e::t_d6dea2bff39c60 337-338,355-360
+  s_f7f7392a09f46e::t_9505033d1638e5 371-372,374-377,379
+  s_f7f7392a09f46e::t_956cafa3c8d6d2 417-419,421
+  s_f7f7392a09f46e::t_6824e81b476df0 299-311,313-315,317-319
+apps/pipeline-cli/tests/step-run.test.ts
+  s_f7f7392a09f46e::t_ce31f0638f6a58 344-353,357-361
+  s_f7f7392a09f46e::t_4f2560987c812e 425-447
+  s_f7f7392a09f46e::t_b77f063af1bb10 362
+apps/pipeline-cli/tests/plan.test.ts
+  s_f7f7392a09f46e::t_b5be5a952077f9 524,526-569,574-601
+  s_f7f7392a09f46e::t_e01b3c040b24b1 570-573
+  s_f7f7392a09f46e::t_2c291aa033c546 520-523
+  s_f7f7392a09f46e::t_50403f8afbd99c 525
+apps/pipeline-cli/src/commands/next.ts
+  s_f7f7392a09f46e::t_bd2e07f7ca1195 1552-1557
+  s_f7f7392a09f46e::t_839b6de41414c8 2206-2210
+apps/pipeline-cli/src/lib/plan.ts
+  s_f7f7392a09f46e::t_bdb3c871d4f20b 773-819,823,831,837-839,841-844,846,848,850,873-885
+  s_f7f7392a09f46e::t_e46b2fc938952a 38-39
+  s_f7f7392a09f46e::t_a653da88469b8e 1379-1385
+  s_f7f7392a09f46e::t_1389a19083f75d 1316-1330
+  s_f7f7392a09f46e::t_8b887677503305 820-822,824-830,832-836,840,845,847,849,851-872
+  s_f7f7392a09f46e::t_8f7f4758dd9d92 1072-1074
+  s_f7f7392a09f46e::t_7dec2131cdcc7b 898-900
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "d1643d9f32c5a5f090ef22d23f206faa9a14a047",
+  "prompts": {},
+  "sessions": {
+    "s_f7f7392a09f46e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6d5d57f-6526-4873-9255-59c34d4f8571",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

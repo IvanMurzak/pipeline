@@ -1,0 +1,21 @@
+src/commands/gc.ts
+  s_6c441f6dfdd116::t_dca9ada7691788 591,884-888,894
+tests/gc-slot-root.test.ts
+  s_6c441f6dfdd116::t_7e58128389467b 512,519
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "07dfe8059b3aa09622b544ea296c0920233607cb",
+  "prompts": {},
+  "sessions": {
+    "s_6c441f6dfdd116": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_6c441f6dfdd116",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+README.md
+  s_16c2b07af8c3ce::t_d43f8cb0dfcd8d 10-20,23-25,28,38-46
+docs/cli.md
+  s_16c2b07af8c3ce::t_4a58e0d8d5bde1 1-261
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "e191e22d14ea2cc80ba027a964f56bd881dab0ea",
+  "prompts": {},
+  "sessions": {
+    "s_16c2b07af8c3ce": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_16c2b07af8c3ce",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

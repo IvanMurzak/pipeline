@@ -1,0 +1,36 @@
+apps/pipeline-cli/src/lib/plan.ts
+  s_f7f7392a09f46e::t_2f816667b354cb 596-609,611-614,625-626,629-634
+  s_f7f7392a09f46e::t_349c476289ce13 775-783
+  s_f7f7392a09f46e::t_63aca65675f28f 35-41
+  s_f7f7392a09f46e::t_1327db23963b51 101-108
+  s_f7f7392a09f46e::t_98410f4f140a97 660-669,672-674,676-680,683-689,691-692,694-695
+  s_f7f7392a09f46e::t_3276d3ee3558a3 725-731,734-768
+  s_f7f7392a09f46e::t_d97d6b856c513a 556-595,610,615-624,627-628,635-659,670-671,675,681-682,690,693,696-724,732-733,769-770
+  s_f7f7392a09f46e::t_cd9c24e311d467 801-810,828
+  s_f7f7392a09f46e::t_3a954f454a13d6 852-858
+  s_f7f7392a09f46e::t_aeadf4e642423f 961-965,967
+  s_f7f7392a09f46e::t_8d798daf7a003c 811-827
+  s_f7f7392a09f46e::t_e720c0e16ab2f5 1230-1246
+  s_f7f7392a09f46e::t_3953bbaa502fd7 958-960,966,968
+  s_f7f7392a09f46e::t_167998c3ebf5f7 1436
+apps/pipeline-cli/tests/plan.test.ts
+  s_f7f7392a09f46e::t_7c503e98c79f51 531-535,538-540,542-577
+  s_f7f7392a09f46e::t_62d4af4cf03606 3
+  s_f7f7392a09f46e::t_0c2771ea083460 429-530,536-537,541,578-666
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "ba8aa34c89e6750ec4b934974e77081fac7f5871",
+  "prompts": {},
+  "sessions": {
+    "s_f7f7392a09f46e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6d5d57f-6526-4873-9255-59c34d4f8571",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

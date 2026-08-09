@@ -1,0 +1,25 @@
+apps/pipeline-ui/server.ts
+  s_0871d4f0cb0688::t_ada1594612d781 406-410
+apps/pipeline-ui/tests/hook-awaiting-input.test.ts
+  s_0871d4f0cb0688::t_e323f074ddac07 60-76,201-249
+apps/pipeline-ui/transcript-stats.ts
+  s_0871d4f0cb0688::t_b96b57abb21d25 903-904
+hooks/analytics_relay.ts
+  s_0871d4f0cb0688::t_64f02da6e7b219 1668-1687,1705
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "1eeddb3220213b9b2fb3a7ab0f62ef544c7619bd",
+  "prompts": {},
+  "sessions": {
+    "s_0871d4f0cb0688": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_0871d4f0cb0688",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

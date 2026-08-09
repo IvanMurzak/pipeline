@@ -1,0 +1,51 @@
+apps/pipeline-cli/src/lib/substitution.ts
+  s_f7f7392a09f46e::t_62a692e537237f 419-425
+  s_f7f7392a09f46e::t_d25e1f7ebfd106 511-514
+  s_f7f7392a09f46e::t_957d8e3080e126 591-594
+  s_f7f7392a09f46e::t_784f3e9e1b22ac 35,37-44,46,50-54,56-63,66-70,76
+  s_f7f7392a09f46e::t_2ccdc616375ee4 327,331
+  s_f7f7392a09f46e::t_0cf383a119d2a6 440-446,452
+  s_f7f7392a09f46e::t_8ec1fd7a42db90 1-14,19-34,36,45,47-49,55,64-65,71-75,77-78,84-156,166-167,169-184,186-187,193-312,314-326,329-330,333-418,426-439,447-451,453-510,515-590,595-620
+  s_f7f7392a09f46e::t_9d96cf772eab6b 79-83
+  s_f7f7392a09f46e::t_94ee3c445fcf45 15-18
+  s_f7f7392a09f46e::t_37be78964a8f12 157-165,168
+  s_f7f7392a09f46e::t_55587f1228d030 185,188-192
+  s_f7f7392a09f46e::t_a91336c6167c7f 313
+  s_f7f7392a09f46e::t_e0cbdea6b05ac9 328,332
+apps/pipeline-cli/src/index.ts
+  s_f7f7392a09f46e::t_c241767dff2eed 178-204
+apps/pipeline-cli/tests/substitution.test.ts
+  s_f7f7392a09f46e::t_3a0613e977a6f0 608
+  s_f7f7392a09f46e::t_ca8fea7f717694 661
+  s_f7f7392a09f46e::t_0445a2575f5f38 446-452
+  s_f7f7392a09f46e::t_682e519a9db481 619
+  s_f7f7392a09f46e::t_7eb4675e627409 694
+  s_f7f7392a09f46e::t_d018e749ada7eb 588
+  s_f7f7392a09f46e::t_196c67b933d064 711
+  s_f7f7392a09f46e::t_2a444f7f7f5fc2 1-78,102-324,358-445,453-563,565-568,570-587,589-600,602-607,609-618,620-633,635-644,646-660,662-672,674-693,695-710,712-732,734-808
+  s_f7f7392a09f46e::t_1356c2b93ee7ca 673
+  s_f7f7392a09f46e::t_8f6d193f79fc01 645
+  s_f7f7392a09f46e::t_e4ad2e86177f04 325-357
+  s_f7f7392a09f46e::t_54156f9d784d57 601
+  s_f7f7392a09f46e::t_e466cf88698193 564
+  s_f7f7392a09f46e::t_d62f9383f5bb31 634
+  s_f7f7392a09f46e::t_867b8756e6e3a1 79-101
+  s_f7f7392a09f46e::t_c9ce8c551014fd 733
+  s_f7f7392a09f46e::t_194f7481ced58b 569
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "4bd87f41004ecd95d6c3c33837902574271d649d",
+  "prompts": {},
+  "sessions": {
+    "s_f7f7392a09f46e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6d5d57f-6526-4873-9255-59c34d4f8571",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

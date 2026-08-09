@@ -1,0 +1,21 @@
+apps/pipeline-ui/dist/index.html
+  s_642ea2ce8ada0b::t_cd3f14d74d729f 29
+apps/pipeline-ui/dist/assets/index-DiB-fLyg.js
+  s_642ea2ce8ada0b::t_cd3f14d74d729f 1-505
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "661efdad290c51dd3e5570cd78b63227738af9af",
+  "prompts": {},
+  "sessions": {
+    "s_642ea2ce8ada0b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8a276dfb-c876-49e9-b5b8-58abc477f8be",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

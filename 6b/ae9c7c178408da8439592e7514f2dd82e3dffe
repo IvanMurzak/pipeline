@@ -1,0 +1,55 @@
+apps/pipeline-cli/src/commands/logs.ts
+  s_5c7335c5fb60a8::t_7e53b88e7b0d65 187-196
+apps/pipeline-cli/tests/logs.test.ts
+  s_5c7335c5fb60a8::t_2482ca61855318 190-214
+apps/pipeline-ui/EVENTS.md
+  s_5c7335c5fb60a8::t_7722e8eaec90bd 52,212-248
+apps/pipeline-ui/dist/assets/index-DWht2xE_.js
+  s_5c7335c5fb60a8::t_e24a9638e8c750 1,9,17,25,33-34,37-38,40,48,53,58,63,68,73,78,83,88,93,98,103,108,113,118,123,128,133,138,143,148,153,158,163,168,173,178,183,188,193,198,203,208,213,218,223,228,233,238,243,248,253,258,263,268,273,278,283,288,293,298,303,308,313,318,323,328,333,343,348,353,358,363,368,373,378-383,387,390-395,399,403,405,407,411-412,414-416,418,420,423-428,431-432,437,439-448,452,456-459,463-465,468-469,471-494,501,505
+apps/pipeline-ui/dist/index.html
+  s_5c7335c5fb60a8::t_526d5ad9d6afc4 1-29,31-35
+apps/pipeline-ui/lib.ts
+  s_5c7335c5fb60a8::t_e64391d72f7224 623-628,711-714,720-723,852-853
+apps/pipeline-ui/tests/hook-awaiting-input.test.ts
+  s_5c7335c5fb60a8::t_0d4a60041a2720 1-183
+apps/pipeline-ui/tests/lib.test.ts
+  s_5c7335c5fb60a8::t_810ddcc27fa5d5 661-695
+apps/pipeline-ui/web/src/App.tsx
+  s_5c7335c5fb60a8::t_0301f4dd3106e0 116-118
+apps/pipeline-ui/web/src/components/EventStream.tsx
+  s_5c7335c5fb60a8::t_116a38b4e784a5 41,52,60-63
+apps/pipeline-ui/web/src/components/RunCard.tsx
+  s_5c7335c5fb60a8::t_d262348a4e0fa0 101,136
+apps/pipeline-ui/web/src/components/RunsOverview.tsx
+  s_5c7335c5fb60a8::t_39c8d4c01311ed 81
+apps/pipeline-ui/web/src/components/StatsPanel.tsx
+  s_5c7335c5fb60a8::t_cf45a8572e04c4 147
+apps/pipeline-ui/web/src/components/StatusBadge.tsx
+  s_5c7335c5fb60a8::t_c0e39cb0ef889c 17-37,39-40
+apps/pipeline-ui/web/src/lib/__tests__/runs.test.ts
+  s_5c7335c5fb60a8::t_e79bce9ecae053 643-708
+apps/pipeline-ui/web/src/lib/runs.ts
+  s_5c7335c5fb60a8::t_b4db6c4aba00ba 19-21,89-90,125-129,168-172
+apps/pipeline-ui/web/src/types.ts
+  s_5c7335c5fb60a8::t_2f76ce68655bab 24-25,249-257,278-282
+hooks/analytics_relay.ts
+  s_5c7335c5fb60a8::t_3a34fb108c81d4 108-117,1595,1598-1649,1652-1671,1692-1706,1728-1730
+hooks/hooks.json
+  s_5c7335c5fb60a8::t_5a2c9562f4ee00 2,73-82
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "6bae9c7c178408da8439592e7514f2dd82e3dffe",
+  "prompts": {},
+  "sessions": {
+    "s_5c7335c5fb60a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_5c7335c5fb60a8",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
