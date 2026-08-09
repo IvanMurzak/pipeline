@@ -1,0 +1,31 @@
+src/cli.ts
+  s_4d2eed31635a91::t_46021b07667561 238-241
+src/commands/worktree.ts
+  s_4d2eed31635a91::t_1b6d06c27b8c60 59-68,87-89,94-104,111,167-169,171-175,214,414-426,442-540,546-548,566,569-582,588,592-609,627,631-665,683-684,702-705,722-731,910-911,913-916,924-938,952-953
+src/lib/port-alloc.ts
+  s_4d2eed31635a91::t_5403430175a7fa 1-446
+src/lib/worktree-hooks.ts
+  s_4d2eed31635a91::t_b21d4d0327746a 144-152,163-170,193,251,255-273
+src/lib/worktree-provision.ts
+  s_4d2eed31635a91::t_13df8c5138d5dd 46-53,71,262-281,294,315-318,343-346,420,514-533,545-549,580
+tests/worktree-command.test.ts
+  s_4d2eed31635a91::t_8e8c542c75fe1b 120,123-126,130-131,597,600,606-615
+tests/worktree-ports.test.ts
+  s_4d2eed31635a91::t_313c200a6c2192 1-745
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "86af86c334bdd8ccbd2211bb89675ab014c9de1f",
+  "prompts": {},
+  "sessions": {
+    "s_4d2eed31635a91": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_4d2eed31635a91",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
