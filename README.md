@@ -397,6 +397,17 @@ still name it, `pipeline gc` once nothing can), and one documented limitation
   `PIPELINE_WT_DELETE_BRANCHES=1` and the slot record is dropped; `--outcome
   halted` **preserves** — `DELETE_BRANCHES=0` and the record is kept for
   post-mortem.
+- **`submodule_slots` names the directory a worker actually works in**, on
+  `create --json` and `list --json` alike, **whichever side provisioned the
+  slot** — `{ path, name, dir, base, source, exists }`, and `[]` (never `null`)
+  when no submodules were declared. A dispatched worker commits in the
+  *submodule* slot, so the parent `worktree_path` is empty and clean **by
+  design**: a reconciliation that inspects only `worktree_path` sees an empty
+  shell and is wrong about it. A `worktree-create.*` hook is not required to
+  enumerate its submodule slots (the frozen contract has no field for them), so
+  the directory is derived — from the slot record, then the slot's env file
+  (`SUBMODULE_<n>_DIR`), then the layout convention the built-in teardown
+  already reaps by — and `source` says which of the three answered.
 - `list` reports the slots this command provisioned (recorded under
   `.pipeline/.runtime/worktrees/`) and whether each is still on disk. Finding and
   reaping *leaked* worktrees and branches is `pipeline gc`'s job — both the

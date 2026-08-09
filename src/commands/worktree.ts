@@ -102,6 +102,37 @@
 // one shared index: parallel dispatch is the whole point of this command, and a
 // shared index would need a lock to survive two concurrent `create`s.
 //
+// SUBMODULE SLOTS ARE REPORTED, NOT ONLY RECORDED (taskflow-v2 a11 — P-1, and
+// the defect that destroyed finished work). A worker dispatched into a slot
+// does its work in the SUBMODULE worktree; the parent slot is genuinely empty.
+// `create`/`list` used to report `submodule_slots: []` for every HOOK-
+// provisioned slot, so an orchestrator reconciling a resumed run could only see
+// the parent — read it as an empty shell, and reap a slot that held finished
+// commits. The only machine-readable pointer to the real directory was
+// `SUBMODULE_*_DIR` inside the slot's env file, and nothing on the resume path
+// read it.
+//
+// `reportedSubmoduleSlots` closes that, for both verbs and both provisioners,
+// through THREE channels in descending order of authority:
+//
+//   1. the slot record's own `submodule_slots` — what the BUILT-IN provisioner
+//      said it cut, at the moment it cut it (`source: 'record'`);
+//   2. the slot's ENV FILE — `SUBMODULE_<n>_{PATH,NAME,DIR,BASE}`, which is
+//      where the frozen contract leaves a hook's answer and what this
+//      repository's own reference `worktree-create.py` writes
+//      (`source: 'env-file'`);
+//   3. the CONVENTION `teardownSubmodulesOf` already reaps by —
+//      `derivedSubmoduleSlotDir` off the parent slot's own path
+//      (`source: 'derived'`).
+//
+// Every entry also carries `exists`, because the question being answered is
+// "is this slot really empty?" and a directory that is not there is a different
+// answer from one that is. Reporting is ALL this adds: what `create` RECORDS is
+// unchanged (`[]` on the hook path — the frozen contract does not report
+// submodule slots and this command still does not invent them into the record
+// teardown reads), the `SUBMODULE_*_DIR` env keys stay exactly where they are,
+// and teardown is untouched.
+//
 // Exit codes (all four subcommands):
 //   0  the action succeeded
 //   1  the hook failed — SOFT (`{"ok":false,"detail":…}` + exit 0) or HARD
@@ -113,7 +144,7 @@
 //      invalid `--outcome`, invalid `--ports`.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseEnvFile } from '../lib/env-file';
 import { ensureGeneratedDir } from '../lib/generated-dir';
 import { iterWorktrees, realGit, type GitRunner } from '../lib/git';
@@ -355,6 +386,134 @@ export function listSlots(projectRoot: string): SlotRecord[] {
 }
 
 // ---------------------------------------------------------------------------
+// Reporting a slot's submodule directories (a11 — P-1)
+//
+// The parent slot of a dispatched worker is EMPTY BY DESIGN: the worker works
+// in the submodule slot. Anything that reconciles a slot it did not create —
+// a resumed parallel run, an orchestrator deciding whether to reap — has to be
+// able to reach that directory from `create --json` / `list --json`, or it will
+// conclude the slot never held anything. See the module header.
+// ---------------------------------------------------------------------------
+
+/** A submodule slot AS REPORTED: the provisioner's four fields, plus how this
+ *  command came to know the directory and whether it is on disk right now.
+ *
+ *  Both provisioner paths produce this same shape — that is the point. A
+ *  consumer must not have to branch on `provisioner` to find out where a
+ *  worker's commits are. */
+export interface ReportedSubmoduleSlot extends ProvisionedSubmodule {
+  /** Which channel named `dir`:
+   *  `record`   — the built-in provisioner reported it at create time and the
+   *               slot record kept it. Authoritative.
+   *  `env-file` — the slot's env file publishes it (`SUBMODULE_<n>_DIR`). This
+   *               is a HOOK's own answer, on the channel the frozen contract
+   *               leaves for it. Authoritative.
+   *  `derived`  — neither channel named it, so this is the CONVENTION the
+   *               built-in provisioner and the reference hook both follow
+   *               (`derivedSubmoduleSlotDir`), which is also the one
+   *               `teardownSubmodulesOf` reaps by. A well-founded guess, and
+   *               labelled as one — check `exists` before trusting it. */
+  source: 'record' | 'env-file' | 'derived';
+  /** Is `dir` on disk NOW? The reconciliation question ("is this slot empty?")
+   *  is not answerable from a path alone, and a stale record is a different
+   *  answer from a live slot. */
+  exists: boolean;
+}
+
+/** A sane ceiling on the `SUBMODULE_<n>_*` block: a slot with more declared
+ *  submodules than this is a malformed env file, not a monorepo. */
+const MAX_ENV_SUBMODULE_SLOTS = 256;
+
+/** The `SUBMODULE_<n>_{PATH,NAME,DIR,BASE}` block of a slot env file.
+ *
+ *  This is the channel a HOOK answers on — the frozen create-hook JSON has no
+ *  field for submodule slots, and this repository's own reference
+ *  `worktree-create.py` publishes exactly these keys (as does the built-in
+ *  provisioner). Best-effort in every direction: an absent, unreadable or
+ *  half-written file yields no entries rather than failing a command, an index
+ *  with no `_DIR` is skipped rather than becoming an empty path, and
+ *  `SUBMODULE_COUNT` is treated as a hint, never as the truth about which
+ *  indices exist. */
+function envFileSubmoduleSlots(envFile: string | null): ProvisionedSubmodule[] {
+  if (envFile === null) return [];
+  let env: Record<string, string>;
+  try {
+    env = parseEnvFile(readFileSync(envFile, 'utf8'));
+  } catch {
+    return [];
+  }
+  const declared = Number(env.SUBMODULE_COUNT);
+  const limit =
+    Number.isInteger(declared) && declared > 0 ? Math.min(declared, MAX_ENV_SUBMODULE_SLOTS) : MAX_ENV_SUBMODULE_SLOTS;
+  const out: ProvisionedSubmodule[] = [];
+  for (let n = 1; n <= limit; n++) {
+    const dir = (env[`SUBMODULE_${n}_DIR`] ?? '').trim();
+    if (!dir) continue;
+    const path = (env[`SUBMODULE_${n}_PATH`] ?? '').trim();
+    const name = (env[`SUBMODULE_${n}_NAME`] ?? '').trim() || basename(path) || `submodule-${n}`;
+    out.push({ path: path || name, name, dir, base: (env[`SUBMODULE_${n}_BASE`] ?? '').trim() });
+  }
+  return out;
+}
+
+/** What `dir` a slot's declared submodules are at, for REPORTING.
+ *
+ *  Record first, then the env file, then the convention — see the module
+ *  header. Ordered by the DECLARED `--submodules` list so both provisioner
+ *  paths report the same order for the same request; anything the env file
+ *  names that was not declared is appended rather than dropped (a hook may
+ *  provision more than it was asked for, and hiding that is how the parent-slot
+ *  mistake happened in the first place).
+ *
+ *  Never throws and never touches git: `list` must stay a read of the registry. */
+export function reportedSubmoduleSlots(slot: {
+  name: string;
+  worktree_path: string;
+  env_file: string | null;
+  submodules: string[];
+  submodule_slots: ProvisionedSubmodule[];
+}): ReportedSubmoduleSlot[] {
+  const seal = (s: ProvisionedSubmodule, source: ReportedSubmoduleSlot['source']): ReportedSubmoduleSlot => ({
+    ...s,
+    source,
+    exists: existsSync(s.dir),
+  });
+  // The built-in path: the provisioner said what it cut and the record kept it.
+  if (slot.submodule_slots.length) return slot.submodule_slots.map((s) => seal(s, 'record'));
+
+  const fromEnv = new Map<string, ProvisionedSubmodule>();
+  for (const s of envFileSubmoduleSlots(slot.env_file)) if (!fromEnv.has(s.path)) fromEnv.set(s.path, s);
+
+  const out: ReportedSubmoduleSlot[] = [];
+  const claimed = new Set<string>();
+  for (const rel of slot.submodules) {
+    const published = fromEnv.get(rel);
+    if (published) {
+      claimed.add(rel);
+      out.push(seal(published, 'env-file'));
+      continue;
+    }
+    out.push(
+      seal(
+        {
+          path: rel,
+          name: basename(rel),
+          dir: derivedSubmoduleSlotDir(slot.worktree_path, slot.name, rel),
+          // The integration branch is the one thing the convention cannot
+          // derive — it is a fact about the submodule repository, not about the
+          // layout. Empty, never guessed; the key is always present (a consumer
+          // reads a shape, not a maybe-shape).
+          base: '',
+        },
+        'derived',
+      ),
+    );
+  }
+  for (const [rel, s] of fromEnv) if (!claimed.has(rel)) out.push(seal(s, 'env-file'));
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Shared plumbing
 // ---------------------------------------------------------------------------
 
@@ -529,13 +688,21 @@ export interface CreateOutput {
    *  CLI's own provisioner did (no hook exists). Additive: a repository with a
    *  hook reports `hook` and behaves exactly as it did before a3. */
   provisioner: 'hook' | 'builtin';
-  /** One entry per `--submodules` path the BUILT-IN provisioner cut a worktree
-   *  for, with the integration branch it was cut from. Always `[]` on the hook
-   *  path — the frozen contract does not report submodule slots, and this
-   *  command must not invent them. On a FAILED create it lists the submodule
-   *  slots that were cut before the failure (the provisioner deletes nothing),
-   *  so an operator can see what is on disk. */
-  submodule_slots: ProvisionedSubmodule[];
+  /** One entry per submodule slot this create produced — `{ path, name, dir,
+   *  base, source, exists }` — WHICHEVER side provisioned it (a11).
+   *
+   *  It used to be `[]` on the hook path, on the reasoning that the frozen
+   *  contract does not make a hook enumerate its submodule slots. It does not;
+   *  but a worker works IN the submodule slot, so an empty list here reads as
+   *  "there is nothing to look at" about the only directory that ever holds the
+   *  work. The directory is derived instead — from the record, the env file, or
+   *  the shared convention — and `source` says which, so an unreported hook
+   *  answer is never dressed up as a reported one. See `reportedSubmoduleSlots`.
+   *
+   *  On a FAILED create it lists the submodule slots that were cut before the
+   *  failure (the provisioner deletes nothing), so an operator can see what is
+   *  on disk. `[]` — never null, never absent — when none were declared. */
+  submodule_slots: ReportedSubmoduleSlot[];
   detail: string | null;
 }
 
@@ -664,6 +831,10 @@ function createSlot(args: WorktreeArgs, git: GitRunner): { output: CreateOutput;
         noopEmitter,
       )
     : provisionSlot({ name, base_branch: args.base, submodules: args.submodules, projectRoot, ports: portCount }, git);
+  // WHAT THE RECORD KEEPS, and it is deliberately unchanged by a11: only the
+  // built-in provisioner's own answer. The record is what teardown reaps from,
+  // and a derived directory — however well-founded — is not a thing this
+  // command watched itself create. Reporting derives; recording does not.
   const submoduleSlots = hasHook ? [] : (res as { submodule_slots: ProvisionedSubmodule[] }).submodule_slots;
 
   const base: Omit<
@@ -687,7 +858,11 @@ function createSlot(args: WorktreeArgs, git: GitRunner): { output: CreateOutput;
     hook_dir: hookDir,
     ports_requested: portCount,
     provisioner: hasHook ? 'hook' : 'builtin',
-    submodule_slots: submoduleSlots,
+    // The failure case's value: what the provisioner managed to cut before it
+    // gave up. A failed create has no env file and no record to derive from, so
+    // there is nothing else to report; the success return below replaces this
+    // with the full derivation.
+    submodule_slots: submoduleSlots.map((s) => ({ ...s, source: 'record' as const, exists: existsSync(s.dir) })),
   };
   /** A create that produced no usable slot: no path, no branch, no ports. */
   const failure = (detail: string | null): { output: CreateOutput; code: number } => ({
@@ -806,10 +981,26 @@ function createSlot(args: WorktreeArgs, git: GitRunner): { output: CreateOutput;
       ports,
       port_base: portBase,
       ports_source: portsSource,
+      // Derived from what this create actually produced — including a HOOK's,
+      // which reports nothing of its own (a11). Same shape from both paths.
+      submodule_slots: reportedSubmoduleSlots({
+        name,
+        worktree_path,
+        env_file,
+        submodules: args.submodules,
+        submodule_slots: submoduleSlots,
+      }),
       detail: portsNote,
     },
     code: 0,
   };
+}
+
+/** The bracketed tail of a submodule-slot line: the integration branch, where
+ *  the directory came from, and — the question a reconciliation is actually
+ *  asking — whether it is on disk. */
+function submoduleNote(s: ReportedSubmoduleSlot): string {
+  return `[base ${s.base || 'unknown'}]  [${s.source}${s.exists ? '' : ', NOT on disk'}]`;
 }
 
 function humanCreate(o: CreateOutput): string {
@@ -821,7 +1012,9 @@ function humanCreate(o: CreateOutput): string {
     `  env_file: ${o.env_file ?? '(none reported)'}`,
     `  by:       ${o.provisioner === 'hook' ? `${o.hook_dir}/worktree-create.*` : 'the built-in provisioner (no worktree-create.* found)'}`,
   ];
-  for (const s of o.submodule_slots) lines.push(`  submodule ${s.name}: ${s.dir}  [base ${s.base}]`);
+  // The directory a worker actually works in — printed for a hook-provisioned
+  // slot too (a11), with the provenance of the path and whether it is there.
+  for (const s of o.submodule_slots) lines.push(`  submodule ${s.path}: ${s.dir}  ${submoduleNote(s)}`);
   if (o.reused) lines.push(`  reused:   yes (${o.reused_evidence}) — an orchestrator should treat this as a duplicate dispatch`);
   const portNames = Object.keys(o.ports).sort((a, b) => (o.ports[a] ?? 0) - (o.ports[b] ?? 0));
   if (portNames.length) {
@@ -1122,8 +1315,23 @@ function humanDestroy(o: DestroyOutput): string {
 // ---------------------------------------------------------------------------
 
 export interface ListedSlot extends SlotRecord {
+  /** The slot's submodule directories, DERIVED at list time rather than read
+   *  straight off the record (a11 — the fix that matters for resume).
+   *
+   *  `create`'s output is long gone by the time a run is reconciled; `list` is
+   *  what a resume calls, and a hook-provisioned slot's record carries `[]`
+   *  here by design. Narrowing `SlotRecord`'s field rather than adding a second
+   *  one is deliberate: a consumer that reads `submodule_slots` off `list` must
+   *  get the answer, not a `[]` that happens to be the record's spelling of "I
+   *  did not write this down". `source`/`exists` say how solid each entry is. */
+  submodule_slots: ReportedSubmoduleSlot[];
   /** Whether the recorded worktree path is still on disk. A false here is a
-   *  stale record, not a leak — `pipeline gc` owns leak detection and reaping. */
+   *  stale record, not a leak — `pipeline gc` owns leak detection and reaping.
+   *
+   *  ⚠ It is the PARENT slot's path, and a parent slot is empty by design when
+   *  the work happens in a submodule. `exists: true` with a clean tree is not
+   *  evidence that a slot holds nothing — read `submodule_slots` before
+   *  concluding that. */
   exists: boolean;
 }
 
@@ -1138,7 +1346,11 @@ function listOutput(): ListOutput {
   return {
     command: 'worktree list',
     project_root: projectRoot,
-    slots: listSlots(projectRoot).map((s) => ({ ...s, exists: existsSync(s.worktree_path) })),
+    slots: listSlots(projectRoot).map((s) => ({
+      ...s,
+      submodule_slots: reportedSubmoduleSlots(s),
+      exists: existsSync(s.worktree_path),
+    })),
   };
 }
 
@@ -1152,6 +1364,13 @@ function humanList(o: ListOutput): string {
     // guessing, exactly as the record itself refuses to guess (DoD 4/5).
     const finalizedNote = s.finalized ? `  [finalized_by=${s.finalized_by ?? 'unknown'}]` : '';
     lines.push(`  ${state.padEnd(9)} ${s.name}  ${s.worktree_path}  [${s.branch ?? 'no branch reported'}]${finalizedNote}`);
+    // The parent slot above is EMPTY BY DESIGN when a worker works in a
+    // submodule. These lines are where the work is (a11); without them an
+    // operator reading this output reaches the same wrong conclusion the
+    // machine-readable path used to force.
+    for (const sub of s.submodule_slots) {
+      lines.push(`            submodule ${sub.path}: ${sub.dir}  ${submoduleNote(sub)}`);
+    }
   }
   lines.push('(leaked worktrees and branches this command never provisioned: `pipeline gc`)');
   return lines.join('\n') + '\n';
@@ -1191,9 +1410,18 @@ const USAGE = [
   '    dotenv, values UNQUOTED and free of spaces and shell metacharacters (it is',
   '    also read with `set -a && source`), so paths are written with forward',
   '    slashes on every platform.',
-  '  A hook, where one exists, ALWAYS wins — the provisioner is inert then. It is',
-  '  reachable from this command only: a pipeline RUN with no worktree-create.*',
-  '  still halts, exactly as before.',
+  '  A hook, where one exists, PROVISIONS THE SLOT — the built-in provisioner',
+  '  does not run beside it: the worktree, the branch and the env file are the',
+  "  hook's. It is NOT inert in every respect, and the exception is PORTS, which",
+  '  fall back PER FIELD (D14): a hook that returns `ports: {}` / `port_base: 0`',
+  '  — i.e. any hook written before ports existed — still gets the CLI\'s block,',
+  '  appended to the env file the hook itself reported. Only a hook that returns',
+  '  NON-EMPTY ports overrides. See PORTS below.',
+  '  The provisioner is reachable from this command only: a pipeline RUN with no',
+  '  worktree-create.* still halts, exactly as before.',
+  '  --json reports the slot\'s SUBMODULE directories whichever side provisioned',
+  '  it (submodule_slots[].dir, with `source` and `exists`) — a worker works in',
+  '  the submodule slot, and the parent slot is empty by design.',
   '  Environment: PIPELINE_WT_ROOT (where slots live; default C:/tmp on Windows,',
   '  else the system temp dir) · PIPELINE_WT_INTEGRATION_BRANCH (default `next`)',
   '  · PIPELINE_WT_FETCH=1 (fetch origin first; off by default so create never',
@@ -1261,7 +1489,10 @@ const USAGE = [
   '            is kept for post-mortem. With no hook, the built-in teardown',
   '            reaps a slot this command provisioned (--json: teardown_by).',
   '  list      The slots this command provisioned, and whether each is still on',
-  '            disk. Leak detection and reaping belong to `pipeline gc`.',
+  '            disk — INCLUDING each slot\'s submodule directories, for a hook-',
+  '            provisioned slot too. That is where a dispatched worker works, so',
+  '            it is what a resumed run must inspect before concluding a slot is',
+  '            empty. Leak detection and reaping belong to `pipeline gc`.',
   '',
   'Exit: 0 success · 1 the hook failed (soft-fail {"ok":false} or hard-fail;',
   '      `detail` says which) · 2 usage / invalid --name / invalid --outcome.',
