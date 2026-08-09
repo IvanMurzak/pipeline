@@ -25,7 +25,7 @@
 // developer's real slot root.
 
 import { test, expect, afterEach } from 'bun:test';
-import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { callGc, callGcJson, cleanupCreated, ident, mkTmp, sh } from './_gc-world';
 import { runWorktree } from '../src/commands/worktree';
@@ -249,6 +249,49 @@ test('a built-in slot whose run died before destroy is FOUND: gc reports it (and
     expect(again.report.builtin_slots).toEqual([]);
     expect(again.report.cleaned!.reaped_slots).toEqual([]);
     expect(again.report.cleaned!.kept_slots).toEqual([]);
+  });
+}, 300000);
+
+test('the other half of the leak: a slot whose WORKTREE died and whose record outlived it — the record, branch and port reservation are stranded, and gc reaps all three', () => {
+  const root = scaffold();
+  inProject(root, '24300-24399', ({ wtRoot }) => {
+    const created = wt(['create', '--name', 'ghost', '--ports', '2']);
+    const slot = created.worktree_path as string;
+    const envFile = created.env_file as string;
+    const portBase = created.port_base as number;
+
+    // The directory goes — a partially-failed removal, a `rm -rf` of a temp
+    // dir, a cleaner that swept the slot root. Nothing else does: the record
+    // still names it, git still registers it, the ports are still claimed.
+    rmSync(slot, { recursive: true, force: true });
+    expect(`record: ${existsSync(slotFile(root, 'ghost'))}`).toBe('record: true');
+    expect(`branch: ${branchThere(root, 'worktree-ghost')}`).toBe('branch: true');
+    expect(reservations(wtRoot, portBase, 2)).toEqual([true, true]);
+
+    const dry = callGcJson(['--project', root]).report;
+    const s = slotByPath(dry, slot);
+    expect(s.orphaned).toBe(true);
+    expect(s.record).toBe('builtin');
+    expect(s.exists).toBe(false);
+    expect(s.reason).toContain('already gone');
+
+    const c = callGcJson(['--project', root, '--clean']).report.cleaned!;
+    expect(c.reaped_slots.length).toBe(1);
+    expect(c.reaped_slots[0]!.name).toBe('ghost');
+    // Nothing to remove from disk — the point is what SURVIVED the directory.
+    expect(c.reaped_slots[0]!.removed_worktrees).toEqual([]);
+    expect(c.reaped_slots[0]!.removed_env_file).toBe(toPosixPath(envFile));
+    expect(c.reaped_slots[0]!.removed_record).toBe(true);
+    expect(c.reaped_slots[0]!.released_ports).toBe(2);
+
+    expect(`record: ${existsSync(slotFile(root, 'ghost'))}`).toBe('record: false');
+    expect(`env file: ${existsSync(envFile)}`).toBe('env file: false');
+    expect(`registered: ${registeredCount(root)}`).toBe('registered: 1');
+    expect(reservations(wtRoot, portBase, 2)).toEqual([false, false]);
+    // The branch was detached by the prune and then safe-deleted by this
+    // command's own policy, because it is merged.
+    expect(c.deleted_branches).toContain('worktree-ghost');
+    expect(`branch: ${branchThere(root, 'worktree-ghost')}`).toBe('branch: false');
   });
 }, 300000);
 
