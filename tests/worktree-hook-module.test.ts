@@ -118,8 +118,11 @@ interface Scaffold {
 }
 
 /** Temp consumer project (git repo) + an `isolation: external` pipeline + hook
- *  scripts. `createHook: null` omits the create hook (the D9 guard). */
-function scaffold(opts: { createHook?: string | null; submodules?: string } = {}): Scaffold {
+ *  scripts. `createHook: null` omits the create hook and `destroyHook: null`
+ *  the destroy hook (the two D9 guards — a3's provisioner and a5's teardown). */
+function scaffold(
+  opts: { createHook?: string | null; destroyHook?: string | null; submodules?: string } = {},
+): Scaffold {
   const project = mkGitRepo();
   const home = mkTmp('wthookhome-');
   const pipelineRoot = join(project, '.pipeline', 'demo');
@@ -131,7 +134,7 @@ function scaffold(opts: { createHook?: string | null; submodules?: string } = {}
   mkdirSync(hooksDir, { recursive: true });
   if (opts.createHook !== null) writeFileSync(join(hooksDir, 'worktree-create.js'), opts.createHook ?? CREATE_HOOK);
   writeFileSync(join(hooksDir, 'worktree-finalize.js'), FINALIZE_HOOK);
-  writeFileSync(join(hooksDir, 'worktree-destroy.js'), DESTROY_HOOK);
+  if (opts.destroyHook !== null) writeFileSync(join(hooksDir, 'worktree-destroy.js'), opts.destroyHook ?? DESTROY_HOOK);
   return { project, home, pipelineRoot };
 }
 
@@ -481,18 +484,57 @@ test('D9: an isolated run with no worktree-create.* still HALTS after the extrac
   });
 }, 30000);
 
-test('D9, structurally: the run path does not IMPORT the provisioner — the standalone command is its only caller', () => {
+test('D9: a run whose repository has no worktree-destroy.* still reports a FAILED teardown — teardown is not the back door either (a5)', () => {
+  // a5 gave the standalone command a built-in TEARDOWN for a missing
+  // `worktree-destroy.*`. D9 says the run path must not acquire it: a run that
+  // silently reaped a slot the consumer meant to keep is the same class of
+  // change as a run that silently provisions one.
+  const s = scaffold({ destroyHook: null });
+  const runId = 'driftrun6';
+  inProject(s.project, s.home, (root) => {
+    expect(nextCall(s.pipelineRoot, runId).json.action).toBe('run-step');
+    const r2 = nextCall(
+      s.pipelineRoot,
+      runId,
+      record({ kind: 'step', outcome: 'completed', next_iteration: 'PIPELINE_COMPLETE' }),
+    );
+    expect(r2.json.action).toBe('done');
+    // The run finalized (that hook exists) and then FAILED its teardown, with
+    // the same message it printed before a5 existed.
+    expect(r2.json.finalized).toEqual({ ok: true, detail: 'pushed 1 commit' });
+    expect(r2.json.teardown.ok).toBe(false);
+    expect(r2.json.teardown.detail).toContain('worktree-destroy.*');
+    expect(r2.json.teardown.detail).toContain('no ');
+    // And nothing of the built-in path ran on the way: the slot root it would
+    // have used is empty, and no slot record was written for the run.
+    expect(readdirSync(process.env.PIPELINE_WT_ROOT!)).toEqual([]);
+    expect(existsSync(join(root, '.pipeline', '.runtime', 'worktrees'))).toBe(false);
+  });
+}, 60000);
+
+test('D9, structurally: the run path does not IMPORT the provisioner OR the teardown — the standalone command is their only caller', () => {
   const src = (rel: string): string => readFileSync(join(import.meta.dir, '..', 'src', rel), 'utf8');
   // A runtime halt proves this run did not provision; the import graph proves
-  // no run ever can. A future edit that wires the provisioner into the engine
-  // fails HERE, before anyone has to notice a silent provision in production.
+  // no run ever can. A future edit that wires either half into the engine fails
+  // HERE, before anyone has to notice a silent provision — or a silent reap —
+  // in production.
   for (const rel of ['commands/next.ts', 'lib/worktree-hooks.ts', 'lib/next.ts']) {
     expect(`${rel}: ${/from '.*worktree-provision'/.test(src(rel)) ? 'IMPORTS' : 'clean'}`).toBe(`${rel}: clean`);
-    expect(`${rel}: ${src(rel).includes('provisionSlot(') ? 'CALLS' : 'clean'}`).toBe(`${rel}: clean`);
+    for (const fn of ['provisionSlot(', 'teardownSlot(']) {
+      expect(`${rel} ${fn}: ${src(rel).includes(fn) ? 'CALLS' : 'clean'}`).toBe(`${rel} ${fn}: clean`);
+    }
   }
-  // Not vacuous: the standalone command really does import and call it, so a
-  // rename that silences the checks above fails here instead.
+  // Not vacuous, in BOTH directions: the standalone command really does import
+  // the module and really does call each half, so a rename that silences the
+  // checks above fails here instead — and a teardown that quietly moved to
+  // another module (where the loop above would no longer see it) fails here too.
   const cmd = src('commands/worktree.ts');
   expect(/from '..\/lib\/worktree-provision'/.test(cmd)).toBe(true);
   expect(cmd.includes('provisionSlot(')).toBe(true);
+  expect(cmd.includes('teardownSlot(')).toBe(true);
+  // The teardown lives in the module the import check names — otherwise
+  // "commands/next.ts does not import worktree-provision" would stop meaning
+  // "commands/next.ts cannot reach the teardown".
+  const provision = src('lib/worktree-provision.ts');
+  expect(provision.includes('export function teardownSlot(')).toBe(true);
 });
