@@ -1,0 +1,21 @@
+apps/pipeline-ui/web/package.json
+  s_fba2da69c23670::t_e9cbd34d86c18c 21-23,29
+apps/pipeline-ui/web/src/components/__tests__/RunsOverview.test.tsx
+  s_fba2da69c23670::t_8c40df842dbcfb 1-154
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "9d23c14fa859820754044a180a0592e8e28592c5",
+  "prompts": {},
+  "sessions": {
+    "s_fba2da69c23670": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_fba2da69c23670",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

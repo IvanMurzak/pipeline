@@ -1,0 +1,31 @@
+apps/pipeline-cli/src/commands/next.ts
+  s_f9bd48b89a0af2::t_3a13c02471b6d5 91
+apps/pipeline-cli/src/lib/envelope.ts
+  s_f9bd48b89a0af2::t_ea72360b29207a 115-119,124-125,127-136
+  s_f9bd48b89a0af2::t_8dfb00a79f4ae9 18-19
+  s_f9bd48b89a0af2::t_7572d9283c9f4f 120-123,126
+hooks/stats_relay.ts
+  s_f9bd48b89a0af2::t_866b2129edf2a7 25-38,54,56,59-64,70,91,95-107
+  s_f9bd48b89a0af2::t_b05684f3582379 93
+apps/pipeline-cli/src/lib/stats-backfill.ts
+  s_f9bd48b89a0af2::t_c8c1b2fc0184b3 12-24,37-45,54,64,104-107,112-114,116-141,144-152,161,173,179-180,183-225,227,251,253-266,291-301,303-304,308,311,313,315-316
+apps/pipeline-cli/src/commands/drive.ts
+  s_f9bd48b89a0af2::t_e0ad07d2550ce4 742-744
+  s_f9bd48b89a0af2::t_1bd689d7b532b5 96
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "41118bdee8525a3cd392c902f866cc871c992955",
+  "prompts": {},
+  "sessions": {
+    "s_f9bd48b89a0af2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cac9d280-0593-447c-a8f5-2a3ff91785c5",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

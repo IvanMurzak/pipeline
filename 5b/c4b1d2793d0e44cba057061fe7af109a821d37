@@ -1,0 +1,31 @@
+.claude-plugin/plugin.json
+  s_00674308787e9a::t_34bba8ebc1c1f2 8
+apps/pipeline-cli/src/commands/init.ts
+  s_00674308787e9a::t_2e89606a8f4d8b 324
+README.md
+  s_00674308787e9a::t_2e89606a8f4d8b 3,16,35
+apps/pipeline-cli/tests/ci-wait.test.ts
+  s_00674308787e9a::t_af7e6d090674d5 367
+apps/pipeline-cli/package.json
+  s_00674308787e9a::t_34bba8ebc1c1f2 9
+apps/pipeline-ui/tests/registry-poll-hygiene.test.ts
+  s_00674308787e9a::t_af7e6d090674d5 45-46
+.claude-plugin/marketplace.json
+  s_00674308787e9a::t_94c9c89a57a83b 2,6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "5bc4b1d2793d0e44cba057061fe7af109a821d37",
+  "prompts": {},
+  "sessions": {
+    "s_00674308787e9a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fc68b-66ca-7b61-87f4-1d0a34ed1d0b",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

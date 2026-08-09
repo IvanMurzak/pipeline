@@ -1,0 +1,19 @@
+.claude-plugin/plugin.json
+  s_8c19f166a0a4cd::t_17e918e5d4bf70 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "d89926a004eb284fd875ea45cfb0e763699b908a",
+  "prompts": {},
+  "sessions": {
+    "s_8c19f166a0a4cd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df8298f2-beea-41ba-9052-0bf0c5fc46f2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

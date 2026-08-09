@@ -1,0 +1,21 @@
+skills/clone/SKILL.md
+  s_a0187f20d63fae::t_d283530bd5fe7a 1-76
+README.md
+  s_a0187f20d63fae::t_9ef64b563899f2 19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "d7c431c42c05e36af6bbf159e7ce0cbac8f7f6da",
+  "prompts": {},
+  "sessions": {
+    "s_a0187f20d63fae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "92a83b9b-471a-4dfb-a4d5-cc213d191839",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

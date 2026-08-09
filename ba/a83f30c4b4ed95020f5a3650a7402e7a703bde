@@ -1,0 +1,23 @@
+src/commands/next.ts
+  s_8dfcde698251b9::t_6d21d0a93f6f83 25-26,74,102-112,825-832,839-856,863-869,871,873-874,879-880,888-893,896-898,905-909,913-914,921-925
+src/lib/worktree-hooks.ts
+  s_8dfcde698251b9::t_8b77c0ba2ea5ff 1-412
+tests/worktree-hook-module.test.ts
+  s_8dfcde698251b9::t_ca927ceae3d94a 1-324
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "baa83f30c4b4ed95020f5a3650a7402e7a703bde",
+  "prompts": {},
+  "sessions": {
+    "s_8dfcde698251b9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_8dfcde698251b9",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

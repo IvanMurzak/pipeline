@@ -1,0 +1,65 @@
+apps/pipeline-cli/src/commands/stats.ts
+  s_d0f7e7b6eff56e::t_24fa7d59c3e1cb 197-199
+  s_d0f7e7b6eff56e::t_55c3623e118978 237,250
+apps/pipeline-cli/src/lib/telemetry-outbox.ts
+  s_d0f7e7b6eff56e::t_4d2d986ca5aade 1272
+  s_d0f7e7b6eff56e::t_d75b49a48d0c54 296,1465-1484
+  s_d0f7e7b6eff56e::t_0c05f7306ba0e3 1393-1394,1397-1398
+  s_d0f7e7b6eff56e::t_64134eda36ab57 732-746
+  s_d0f7e7b6eff56e::t_46ce45b1be0984 1071
+  s_d0f7e7b6eff56e::t_f823c5a1cec49e 808-813
+  s_d0f7e7b6eff56e::t_3b6da7016eba41 240-244,264-275,285-288,290-292,1464
+  s_d0f7e7b6eff56e::t_4b786948c83a6c 110-120
+  s_d0f7e7b6eff56e::t_5a91fdf981aae0 441-443
+  s_d0f7e7b6eff56e::t_662a9c62134582 657,665-668
+  s_d0f7e7b6eff56e::t_4862c7436c6d8f 1085-1096
+  s_d0f7e7b6eff56e::t_390252a537336f 1417
+  s_d0f7e7b6eff56e::t_53a5a65ad88922 1187-1192,1217-1257
+  s_d0f7e7b6eff56e::t_3787098bbebeac 289
+  s_d0f7e7b6eff56e::t_3c81c71eb3f32d 302,304-306
+  s_d0f7e7b6eff56e::t_5f7c2246381c93 360-366
+  s_d0f7e7b6eff56e::t_360e7646c392f3 293-295
+  s_d0f7e7b6eff56e::t_4e2e25da91aee7 297
+  s_d0f7e7b6eff56e::t_23bd5d07fe6e5e 1258
+apps/pipeline-cli/tests/telemetry-outbox.test.ts
+  s_d0f7e7b6eff56e::t_fe6edafa94bfb8 473,475-477,479,482-483,485-486,490-492,496-514,518-520
+  s_d0f7e7b6eff56e::t_e4405240395cca 515-517
+  s_d0f7e7b6eff56e::t_3fe1d0129a555b 532,535
+  s_d0f7e7b6eff56e::t_600de88acb8f8d 385,387-392,396,399-412
+  s_d0f7e7b6eff56e::t_ab89370c72c962 521,523-531,533-534,536-551
+  s_db0323f35fd469::t_51980747ff6f07 522
+apps/pipeline-cli/tests/telemetry-status.test.ts
+  s_d0f7e7b6eff56e::t_9b6b0a92f4df79 246
+  s_d0f7e7b6eff56e::t_3ea8a27ef67f4b 324-334
+  s_d0f7e7b6eff56e::t_0b56a458515706 86-89
+  s_d0f7e7b6eff56e::t_56219bf781b1e1 63-65
+apps/pipeline-cli/src/lib/telemetry-status.ts
+  s_d0f7e7b6eff56e::t_c52c897a79b9db 83-86,89-90,102-108
+  s_db0323f35fd469::t_5eb8731c7f1dfa 109
+apps/pipeline-cli/tests/stats-telemetry.test.ts
+  s_d0f7e7b6eff56e::t_ce2a74b4863460 222-244
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "ca049d6266b6b693d4a16d92ddef42beff328bee",
+  "prompts": {},
+  "sessions": {
+    "s_d0f7e7b6eff56e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d2cb2e21-f860-44f1-adcc-fe66015824da",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_db0323f35fd469": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cab1ca42-e747-417c-b961-e8aa4a3e2a58",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

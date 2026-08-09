@@ -1,0 +1,146 @@
+apps/pipeline-cli/tests/transcript-opt-out.test.ts
+  s_d0f7e7b6eff56e::t_e3c3460be0272a 2-26
+  s_d0f7e7b6eff56e::t_406792094a0d7f 46-63
+  s_d0f7e7b6eff56e::t_b16b075a3a6dd9 78
+  s_d0f7e7b6eff56e::t_b8c261439f29a2 261
+  s_d0f7e7b6eff56e::t_95fe6195a643ee 248-249
+docs/running-pipelines.md
+  s_d0f7e7b6eff56e::t_636a6041c9064e 162-181
+  s_d0f7e7b6eff56e::t_043ba87f816130 6-11
+docs/events.md
+  s_d0f7e7b6eff56e::t_53810ea160dfae 531-533
+  s_d0f7e7b6eff56e::t_aef8e531c1788d 1-15
+  s_d0f7e7b6eff56e::t_f11e26206d6b8d 111
+  s_d0f7e7b6eff56e::t_fa02e6deb47a33 445-447
+  s_d0f7e7b6eff56e::t_e86c20d2931080 453-455
+  s_d0f7e7b6eff56e::t_be98341816ee18 515
+  s_d0f7e7b6eff56e::t_29d7fbd3d989bf 523-524
+  s_d0f7e7b6eff56e::t_7e69a68d568360 463-499
+  s_d0f7e7b6eff56e::t_4105d65623e7bd 102
+  s_d0f7e7b6eff56e::t_6fe1e1c4c15ab9 163
+hooks/session_relay.ts
+  s_d0f7e7b6eff56e::t_ecb39d9ee58b20 202,204-212
+  s_d0f7e7b6eff56e::t_30ea594227a81c 1-201,203
+apps/pipeline-cli/tests/hook-step-binding.test.ts
+  s_d0f7e7b6eff56e::t_8434dbcdf1952e 48-50
+apps/pipeline-cli/tests/hook-runid-shape-ownership.test.ts
+  s_d0f7e7b6eff56e::t_132d6627b30cc6 69
+docs/journal-and-hooks.md
+  s_d0f7e7b6eff56e::t_c4dc961fc05bde 1-57
+apps/pipeline-cli/src/commands/init.ts
+  s_d0f7e7b6eff56e::t_6173230ae98c74 531-534
+hooks/hooks.json
+  s_d0f7e7b6eff56e::t_b7c5e09ccb25d2 38
+  s_1b7b04cd0654e2::t_7723c0a4879c5f 2
+apps/pipeline-cli/tests/journal-end-to-end.test.ts
+  s_d0f7e7b6eff56e::t_33e5fe3718a2d7 1-319
+apps/pipeline-cli/tests/mirror-scope-discipline.test.ts
+  s_d0f7e7b6eff56e::t_fef2dd21cc5b5e 139-142
+  s_d0f7e7b6eff56e::t_180a9016e6a00a 51-52
+  s_d0f7e7b6eff56e::t_16018dc7efa2ba 3,5,7-36,57-62,81
+apps/pipeline-cli/src/cli.ts
+  s_d0f7e7b6eff56e::t_e29a708a171263 4,8-12
+  s_d0f7e7b6eff56e::t_a20b84f45e9ec1 31-32,122,193-194,416
+apps/pipeline-cli/tests/resolve-parity.test.ts
+  s_d0f7e7b6eff56e::t_a7cb6b1f692290 38-40
+  s_d0f7e7b6eff56e::t_67c9dbf8b14798 42-44
+  s_d0f7e7b6eff56e::t_f0793fed2edd39 212-213
+  s_d0f7e7b6eff56e::t_332f5d857a110b 106
+  s_d0f7e7b6eff56e::t_e2756ce6fac5f0 4,8-22
+.claude-plugin/plugin.json
+  s_d0f7e7b6eff56e::t_c65c6f18c6ab0e 3
+CHANGELOG.md
+  s_d0f7e7b6eff56e::t_938d104fba45d8 7-47
+CLAUDE.md
+  s_d0f7e7b6eff56e::t_a1d96b8c828247 18,24,49,66,70-71,75,77-78,190,192
+README.md
+  s_d0f7e7b6eff56e::t_70271fce45cb5e 3,39,45,322,431-432,619,621-622,624-632,634-638,640-645,647,649,663,665,667-669,676,678,680-681,683,685,687,689,698,701,704-705,707,730-731,733,735
+agents/pipeline-manager.md
+  s_d0f7e7b6eff56e::t_6e4d39469ac82d 40,42,45-46
+apps/pipeline-cli/README.md
+  s_d0f7e7b6eff56e::t_7000a35760762e 7-8,13,161,167
+apps/pipeline-cli/package.json
+  s_d0f7e7b6eff56e::t_ff8f7b87eedc1c 3
+apps/pipeline-cli/src/commands/fix.ts
+  s_d0f7e7b6eff56e::t_3f764900d922c9 8
+apps/pipeline-cli/src/commands/logs.ts
+  s_d0f7e7b6eff56e::t_579ff5eee08531 419
+apps/pipeline-cli/src/commands/telemetry-daemon.ts
+  s_d0f7e7b6eff56e::t_047098a41d021a 30,152,228
+apps/pipeline-cli/src/lib/event.ts
+  s_d0f7e7b6eff56e::t_3f8452c1b4bc47 1-5,43,47-49,61-62,70,75-77,80,135,138-139,179,181,401,464,533,633-634,703-705,711,718
+apps/pipeline-cli/src/lib/stats-backfill.ts
+  s_d0f7e7b6eff56e::t_738601eb9fd47a 35,68
+apps/pipeline-cli/src/lib/stats.ts
+  s_d0f7e7b6eff56e::t_a61dc2927756b4 18
+apps/pipeline-cli/src/lib/step-transcripts.ts
+  s_d0f7e7b6eff56e::t_3e51c83d55f5e8 18
+apps/pipeline-cli/src/lib/telemetry-outbox.ts
+  s_d0f7e7b6eff56e::t_fd4ce692a6c2a0 1468
+apps/pipeline-cli/tests/drive-session-binding.test.ts
+  s_d0f7e7b6eff56e::t_480699d28caf82 15
+apps/pipeline-cli/tests/drive-telemetry-link.test.ts
+  s_d0f7e7b6eff56e::t_f3204ff2405adb 11
+apps/pipeline-cli/tests/hook-department-notifier.test.ts
+  s_d0f7e7b6eff56e::t_478e04e714844a 27
+apps/pipeline-cli/tests/hook-pretool-binding.test.ts
+  s_d0f7e7b6eff56e::t_e237e1895c55d9 185
+apps/pipeline-cli/tests/ids.test.ts
+  s_d0f7e7b6eff56e::t_ec6e8d7ab2b88e 420,541
+apps/pipeline-cli/tests/mirror-binding.test.ts
+  s_d0f7e7b6eff56e::t_d0e60177821d6f 19-20
+apps/pipeline-cli/tests/packed-artifact.test.ts
+  s_d0f7e7b6eff56e::t_876587756abf65 5
+apps/pipeline-cli/tests/telemetry-daemon-ensure.test.ts
+  s_d0f7e7b6eff56e::t_e7ee500e4b8671 5
+apps/pipeline-cli/tests/telemetry-daemon.test.ts
+  s_d0f7e7b6eff56e::t_9ed62c65563440 8
+docs/cli.md
+  s_d0f7e7b6eff56e::t_297b4cb1810fe8 5,9,17,26,36
+docs/departments-mcp.md
+  s_d0f7e7b6eff56e::t_4adeb6fd854db2 176,179-180,213
+docs/execution-modes.md
+  s_d0f7e7b6eff56e::t_e1d4124d4a31a7 5,13,19
+docs/script-steps.md
+  s_d0f7e7b6eff56e::t_03b1b7dffbde5a 344
+hooks/analytics_relay.ts
+  s_d0f7e7b6eff56e::t_7652ca9c607f25 174,665,1207,1255,1370,1377,1581
+hooks/department_notifier_relay.ts
+  s_d0f7e7b6eff56e::t_ad7d3f5a074343 28,93,151
+hooks/prompt_match_relay.ts
+  s_d0f7e7b6eff56e::t_790367238fb6ad 81
+hooks/stats_relay.ts
+  s_d0f7e7b6eff56e::t_4874537bd684ee 13
+skills/clone/SKILL.md
+  s_d0f7e7b6eff56e::t_f87f9faadf64fc 59-60,63-64,68
+skills/dispatch/SKILL.md
+  s_d0f7e7b6eff56e::t_697f772ef1bd01 43
+skills/find/SKILL.md
+  s_d0f7e7b6eff56e::t_2c7eac7b6071d2 37
+skills/run/SKILL.md
+  s_d0f7e7b6eff56e::t_fcbc1d35e4154d 17,61,63,79-80,83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "6d42e23633dd8c237722ef5745b8256f18aced6b",
+  "prompts": {},
+  "sessions": {
+    "s_1b7b04cd0654e2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a3805986562355e52",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_d0f7e7b6eff56e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d2cb2e21-f860-44f1-adcc-fe66015824da",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

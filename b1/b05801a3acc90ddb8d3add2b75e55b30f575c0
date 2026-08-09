@@ -1,0 +1,33 @@
+CLAUDE.md
+  s_fa12da096e3b8a::t_32ce6588dacb32 48
+apps/pipeline-cli/src/commands/drive.ts
+  s_fa12da096e3b8a::t_02d2fcf473a8a4 138,1066-1072
+apps/pipeline-cli/src/lib/event.ts
+  s_fa12da096e3b8a::t_128eb80f269ea9 33,215-218
+apps/pipeline-cli/src/lib/generated-dir.ts
+  s_fa12da096e3b8a::t_5d595d0e7fd1dd 1-49
+apps/pipeline-cli/src/lib/stats-backfill.ts
+  s_fa12da096e3b8a::t_d3ba8e55ebbb50 236-277,315-317,347
+apps/pipeline-cli/src/lib/stats.ts
+  s_fa12da096e3b8a::t_bcf074a12322cf 35,407,764
+apps/pipeline-cli/tests/generated-dir.test.ts
+  s_fa12da096e3b8a::t_94c018785749c4 1-76
+apps/pipeline-cli/tests/stats-backfill.test.ts
+  s_fa12da096e3b8a::t_f5f7d6bd6b26ba 478-553
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "b1b05801a3acc90ddb8d3add2b75e55b30f575c0",
+  "prompts": {},
+  "sessions": {
+    "s_fa12da096e3b8a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_fa12da096e3b8a",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

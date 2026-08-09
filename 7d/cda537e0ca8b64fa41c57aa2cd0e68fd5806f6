@@ -1,0 +1,61 @@
+apps/pipeline-ui/tests/hook-telemetry-daemon-lock-cross-process.test.ts
+  s_716a2f2d4693eb::t_34c1ee544590fd 1-27,35-73,83-85,87-101,106-108,110-113,115-119,165-168
+  s_716a2f2d4693eb::t_3336b4bbcc9544 28-34,74-82,86,102-105,109,114,120-164
+apps/pipeline-ui/tests/hook-telemetry-daemon-lock.test.ts
+  s_716a2f2d4693eb::t_bcebed5e4c964a 1-183,197-204,206-207,209-334
+  s_716a2f2d4693eb::t_7d9b8494c38890 184-196,205,208
+apps/pipeline-ui/tests/fixtures/telemetry-lock-race-worker.ts
+  s_716a2f2d4693eb::t_4e8d54b6b5acab 75
+  s_716a2f2d4693eb::t_03220b8626cf73 1-27,45-47,49-51,54,56-61,63-74,82
+  s_716a2f2d4693eb::t_fc1a1b867aaa4a 55
+  s_716a2f2d4693eb::t_b21705d5a0c3f7 28-44,48,52-53,62,76-81
+apps/pipeline-cli/src/cli.ts
+  s_716a2f2d4693eb::t_13494f8e8b19f9 448-455
+  s_716a2f2d4693eb::t_3752c582547cbe 338-346
+apps/pipeline-cli/src/lib/telemetry-upload.ts
+  s_716a2f2d4693eb::t_34da0b07d9b37a 109
+hooks/analytics_relay.ts
+  s_716a2f2d4693eb::t_5cd555fa4962b7 1347-1356,1358-1366,1371-1388,1391-1412,1414-1416,1420,1422,1425-1427
+  s_716a2f2d4693eb::t_0e7bcd63cd7734 1342,1390
+  s_716a2f2d4693eb::t_64d9946e54e618 101,108
+  s_716a2f2d4693eb::t_2f19fc0b6b8173 1298-1305,1310-1311
+  s_716a2f2d4693eb::t_fadbf810165cfc 1616-1624
+  s_716a2f2d4693eb::t_31e57229df741c 1357
+  s_716a2f2d4693eb::t_a33a9efb167aa8 1178-1237,1249-1297,1306-1309,1312-1341,1343-1346,1367-1370,1389,1413,1421,1423-1424,1428-1500,1502-1520
+  s_716a2f2d4693eb::t_593c5f34976ff8 1419
+  s_716a2f2d4693eb::t_6e182c782cd821 2299-2303,2305
+  s_716a2f2d4693eb::t_8e0fe10258f7ba 1501
+  s_716a2f2d4693eb::t_acaf232cd61548 1238-1248
+  s_716a2f2d4693eb::t_f1228ebf4ea9db 1417-1418
+apps/pipeline-cli/tests/telemetry-daemon.test.ts
+  s_716a2f2d4693eb::t_d1a3e992a696a8 1-515
+apps/pipeline-cli/src/commands/telemetry-daemon.ts
+  s_716a2f2d4693eb::t_8e6c75300c3810 216,225-233
+  s_716a2f2d4693eb::t_61147ec641eb59 272,277-283
+  s_716a2f2d4693eb::t_f88f7df51b52d4 89-90
+  s_716a2f2d4693eb::t_b5692d70b48d6a 1-21,35-88,93-215,217-224,234-271,273-275,284-300,305-422,425-444
+  s_716a2f2d4693eb::t_2fcc0237f71862 91
+  s_716a2f2d4693eb::t_1d30be2760b8c2 301-304
+  s_716a2f2d4693eb::t_8c1d0769feec17 92
+  s_716a2f2d4693eb::t_41a73467d209a7 276
+  s_716a2f2d4693eb::t_9887f88fd35ae1 423-424
+  s_716a2f2d4693eb::t_8871bf8a2cfd14 22-34
+apps/pipeline-cli/tests/telemetry-daemon-lock-parity.test.ts
+  s_716a2f2d4693eb::t_97401977994cc4 1-43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "7dcda537e0ca8b64fa41c57aa2cd0e68fd5806f6",
+  "prompts": {},
+  "sessions": {
+    "s_716a2f2d4693eb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "30b2d290-214d-4259-afb7-f324c8e3daac",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

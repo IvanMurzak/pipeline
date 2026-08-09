@@ -1,0 +1,41 @@
+docs/cli.md
+  s_80d8a4d2762d16::t_9eff7681381dec 32
+apps/pipeline-cli/tests/ci-wait.test.ts
+  s_80d8a4d2762d16::t_6d7c9fc2cbeb93 38-46,48,53,55-57,60,74
+  s_80d8a4d2762d16::t_1d2d685b24fffc 6-17
+  s_80d8a4d2762d16::t_6778da6046a578 315-322,324,327-328
+  s_80d8a4d2762d16::t_bfb423849a5e80 354-571
+apps/pipeline-cli/src/cli.ts
+  s_80d8a4d2762d16::t_0acc258a86b1de 203-207
+  s_80d8a4d2762d16::t_5734926a41ebcd 194-195
+apps/pipeline-cli/src/commands/ci-wait.ts
+  s_80d8a4d2762d16::t_9fc9e8a7d9ed3e 402-403
+  s_80d8a4d2762d16::t_e327e0ff6f52d7 421-429
+  s_80d8a4d2762d16::t_4b395a626d73f3 59,65-68
+  s_80d8a4d2762d16::t_0d60bea9809151 450
+  s_80d8a4d2762d16::t_d879490a8ba9e6 458
+  s_80d8a4d2762d16::t_e8aad0b04384d1 516
+  s_80d8a4d2762d16::t_4a458fabc19079 329-330
+  s_80d8a4d2762d16::t_853440090f758b 392-393
+  s_80d8a4d2762d16::t_7d248acb26b336 23-36
+  s_80d8a4d2762d16::t_12716cbfd55015 49-51
+  s_80d8a4d2762d16::t_f0eb9dd60be49c 353,357,362
+  s_80d8a4d2762d16::t_c9d0d336b87b6d 238-295
+  s_80d8a4d2762d16::t_796f5ec270a31d 1-2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "3df334e2ff4694275bdf636ba729b4281779a23b",
+  "prompts": {},
+  "sessions": {
+    "s_80d8a4d2762d16": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f54d89d0-5566-489a-8344-2d8201a09e3f",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

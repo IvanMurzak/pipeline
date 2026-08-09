@@ -1,0 +1,25 @@
+.github/workflows/ci.yml
+  s_0437b8a8fbb7aa::t_6e2b6c5db559d9 64-68
+apps/pipeline-cli/tests/submodule-modes.test.ts
+  s_0437b8a8fbb7aa::t_c077e21d86dc36 7-9
+apps/pipeline-cli/tests/event.test.ts
+  s_0437b8a8fbb7aa::t_c7cfc4a2d83be0 12-15
+apps/pipeline-cli/tests/submodule-orphan.test.ts
+  s_0437b8a8fbb7aa::t_c465a1289e139d 8-10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "c3a8bdef1bdc7518f0557c1c6459d46234f54d9a",
+  "prompts": {},
+  "sessions": {
+    "s_0437b8a8fbb7aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "aca23227-fb01-4357-947a-d2d68329d5df",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

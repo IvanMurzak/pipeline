@@ -1,0 +1,25 @@
+.claude-plugin/plugin.json
+  s_92614d3660bc9b::t_192b4f1d0e8ed7 3
+apps/pipeline-cli/src/commands/cloud.ts
+  s_92614d3660bc9b::t_8ff32b6c1f5908 8-11,17-32,36-46,70-73,76-80,228-231,233-236,350-355,367-377,379-383,385-386,394-395,398,406-418,424,440,442-447,464,480-485,492,765-769,774
+apps/pipeline-cli/src/lib/cloud-config.ts
+  s_92614d3660bc9b::t_b5b5b2d27d0672 81-87
+apps/pipeline-cli/tests/cloud.test.ts
+  s_92614d3660bc9b::t_20f8f0e844bb48 34-37,87-93,112,122,134-136,139-142,313,316,318-320,326,328,331-335,337,372,374,377-470,519,575,584-585,603,634,637,641,645,647-653,664,686,705,801-803,830,836,839-990
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "574c5e9cce4b2f610bcb24856027260d5f839142",
+  "prompts": {},
+  "sessions": {
+    "s_92614d3660bc9b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a2054e2f8e85a643f",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

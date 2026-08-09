@@ -1,0 +1,52 @@
+apps/pipeline-ui/web/src/types.ts
+  s_a0187f20d63fae::t_d4a108701a37a9 287-298
+  s_a0187f20d63fae::t_49ce027238bf53 310-312
+apps/pipeline-ui/web/src/lib/api.ts
+  s_a0187f20d63fae::t_2990daef62d3df 38-39
+apps/pipeline-ui/web/src/lib/launch.ts
+  s_a0187f20d63fae::t_3178f174458830 1
+  s_a0187f20d63fae::t_f659ea53c27740 20-66
+apps/pipeline-ui/web/src/components/LaunchPanel.tsx
+  s_a0187f20d63fae::t_ca639a27c7f72c 2,7
+  s_a0187f20d63fae::t_bbe96bfbaccaf5 42-44
+  s_a0187f20d63fae::t_6d4fa69cea9585 125-126,130,133
+  s_a0187f20d63fae::t_e45ef636362d22 188,198
+  s_a0187f20d63fae::t_f734c3a5fd296a 151-162
+  s_a0187f20d63fae::t_a0e6580526ac3c 165-166,172
+  s_a0187f20d63fae::t_f81674dbc1f7ab 308-361
+apps/pipeline-ui/web/src/lib/__tests__/launch.test.ts
+  s_a0187f20d63fae::t_c89967a98c54f7 2-9,11-15,25,31-36
+  s_a0187f20d63fae::t_e9cf469ce3102f 70-116
+  s_a0187f20d63fae::t_67f5e962147de3 37
+apps/pipeline-ui/launcher.ts
+  s_a0187f20d63fae::t_cb589d5bfe9f01 11-12
+  s_a0187f20d63fae::t_57750f415e2ccd 258-264
+  s_a0187f20d63fae::t_e0a229df35a2c7 279
+  s_a0187f20d63fae::t_4dba039cfada3d 103-106
+  s_a0187f20d63fae::t_2267bffa912f7d 535-546
+  s_a0187f20d63fae::t_46bee68f67123b 559-561
+  s_a0187f20d63fae::t_aff4f53417ade7 456-485,497-501
+  s_a0187f20d63fae::t_ff2f82d88fc8ea 75-91
+apps/pipeline-ui/tests/launcher.test.ts
+  s_a0187f20d63fae::t_22f25d70d02d3e 18
+  s_a0187f20d63fae::t_4bdf26526e65f7 30
+  s_a0187f20d63fae::t_15179cee902126 139-156
+  s_a0187f20d63fae::t_824c8b367776b8 214-256
+  s_a0187f20d63fae::t_263e63f694e9f7 313-358
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "7e41e7ea8669c66246f7a0821e68f73d4c4db19a",
+  "prompts": {},
+  "sessions": {
+    "s_a0187f20d63fae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "92a83b9b-471a-4dfb-a4d5-cc213d191839",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

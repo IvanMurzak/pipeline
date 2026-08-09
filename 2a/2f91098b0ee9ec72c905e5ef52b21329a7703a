@@ -1,0 +1,44 @@
+apps/pipeline-cli/src/commands/drive.ts
+  s_716a2f2d4693eb::t_5294b60b3fa1da 174,176-181
+  s_716a2f2d4693eb::t_1ab590d8eddc7c 199-258
+  s_716a2f2d4693eb::t_5c901981108bad 1418-1427
+  s_716a2f2d4693eb::t_feb43c0d26dfd9 1282-1296
+apps/pipeline-cli/tests/telemetry-daemon-ensure.test.ts
+  s_716a2f2d4693eb::t_f3b98bb3920c1e 1-223
+apps/pipeline-cli/tests/telemetry-outbox-interleaving.test.ts
+  s_716a2f2d4693eb::t_c891856cd38c1b 33
+  s_716a2f2d4693eb::t_a3b0e52b77bd09 1-32,34-217
+apps/pipeline-cli/src/lib/telemetry-tail.ts
+  s_716a2f2d4693eb::t_4134b0fbc149c9 1-72
+apps/pipeline-cli/src/lib/telemetry-upload.ts
+  s_716a2f2d4693eb::t_52caffb5689c6c 487-521
+apps/pipeline-cli/src/commands/next.ts
+  s_716a2f2d4693eb::t_b35e823c5c916e 96-98
+  s_716a2f2d4693eb::t_4aee9168bb0352 2629-2647
+apps/pipeline-cli/tests/drive-telemetry-link.test.ts
+  s_716a2f2d4693eb::t_c2637e8bffba41 1-240
+apps/pipeline-cli/src/lib/telemetry-outbox.ts
+  s_716a2f2d4693eb::t_dcf6497eaa1972 751-766,773,776-789,791-794
+  s_716a2f2d4693eb::t_f6c8e72abd108d 767-772,790,795-801
+  s_716a2f2d4693eb::t_beffef5fb0f5fb 864
+apps/pipeline-cli/src/commands/telemetry-daemon.ts
+  s_716a2f2d4693eb::t_f59163d230fc3a 126-214,219-222,229,233-236,240-328
+  s_716a2f2d4693eb::t_53a321dac7021c 86,88-89,91
+  s_716a2f2d4693eb::t_7e2d54ac004567 215-218,223-228,230-232,237-239
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "2a2f91098b0ee9ec72c905e5ef52b21329a7703a",
+  "prompts": {},
+  "sessions": {
+    "s_716a2f2d4693eb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "30b2d290-214d-4259-afb7-f324c8e3daac",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,40 @@
+apps/pipeline-cli/README.md
+  s_a0187f20d63fae::t_8a705ed6d69675 29-54
+apps/pipeline-cli/src/cli.ts
+  s_a0187f20d63fae::t_30b0048795219e 24
+  s_a0187f20d63fae::t_dad15e56b22080 58-65
+  s_a0187f20d63fae::t_5cb950d7688a4a 258-259
+apps/pipeline-cli/src/commands/clone.ts
+  s_a0187f20d63fae::t_f710e61e8a3816 1-163
+docs/cli.md
+  s_a0187f20d63fae::t_6b0c1fcd24473e 5-6
+apps/pipeline-cli/src/lib/templates.ts
+  s_a0187f20d63fae::t_92ecdb1946a964 1-79
+apps/pipeline-cli/templates/example-minimal/steps/01-prepare.md
+  s_a0187f20d63fae::t_4095d0445d928c 1-18
+apps/pipeline-cli/templates/example-minimal/steps/02-finish.md
+  s_a0187f20d63fae::t_bd336004a1b58b 1-17
+apps/pipeline-cli/templates/example-minimal/PIPELINE.md
+  s_a0187f20d63fae::t_b4de1f3dc27b38 1-26
+apps/pipeline-cli/tests/packed-artifact.test.ts
+  s_a0187f20d63fae::t_99dace1677d44a 122-134
+apps/pipeline-cli/tests/clone.test.ts
+  s_a0187f20d63fae::t_99aeb3b1fe0715 1-149,153-200
+  s_a0187f20d63fae::t_e5738258c94037 150-152
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "7299240188da94df2e335f81686a7ac15bbc3de2",
+  "prompts": {},
+  "sessions": {
+    "s_a0187f20d63fae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "92a83b9b-471a-4dfb-a4d5-cc213d191839",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

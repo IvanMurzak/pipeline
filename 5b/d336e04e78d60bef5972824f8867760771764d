@@ -1,0 +1,75 @@
+tests/fixtures/stats_relay.pre-refactor.ts
+  s_d0f7e7b6eff56e::t_db0d91c4a0cc51 9
+apps/pipeline-cli/tests/ids.test.ts
+  s_d0f7e7b6eff56e::t_ac6017bc1baaa8 420,541
+.github/workflows/ci.yml
+  s_d0f7e7b6eff56e::t_978554a8592aa9 48-91
+tests/hook-awaiting-input.test.ts
+  s_d0f7e7b6eff56e::t_d291be84b87d33 23,25
+apps/pipeline-cli/tests/telemetry-daemon-ensure.test.ts
+  s_d0f7e7b6eff56e::t_22f33b47c3c1ec 5
+tests/fixtures/telemetry-lock-race-worker.ts
+  s_d0f7e7b6eff56e::t_e125bc9534ebbc 56
+tests/hook-bypass-detection.test.ts
+  s_d0f7e7b6eff56e::t_7b9be817761432 50
+tests/hook-run-shim.test.ts
+  s_d0f7e7b6eff56e::t_a56f945b42613b 45
+tests/cli-package-self-contained.test.ts
+  s_d0f7e7b6eff56e::t_e90ea1006debc1 2-3,5,7-13,15-18,20-30,33-35,37-39,41-66,69-73,75-89,91-106,108-112,114-116,118,120,122-123,126-147,150-163,166-179
+tests/mirror-scope-discipline.test.ts
+  s_d0f7e7b6eff56e::t_a9dd556f2dc808 40
+tests/mirror-binding.test.ts
+  s_d0f7e7b6eff56e::t_5acb9b58680d08 49
+hooks/session_relay.ts
+  s_d0f7e7b6eff56e::t_41f960fc6ad269 63
+tests/hook-pretool-binding.test.ts
+  s_d0f7e7b6eff56e::t_aac08965acffe9 51,185
+tests/hook-subagent-stop.test.ts
+  s_d0f7e7b6eff56e::t_9ad304fc1709fc 45
+tests/hook-telemetry-daemon-lock.test.ts
+  s_d0f7e7b6eff56e::t_67efae57c1077b 8-10,63
+tests/hook-runid-session-fallback.test.ts
+  s_d0f7e7b6eff56e::t_1e7e302b31d13b 53
+apps/pipeline-cli/tests/drive-telemetry-link.test.ts
+  s_d0f7e7b6eff56e::t_72ef093bf45d0d 11
+apps/pipeline-cli/src/commands/telemetry-daemon.ts
+  s_d0f7e7b6eff56e::t_33ec4ec9169c2e 35,105,152,154,228,373
+docs/journal-and-hooks.md
+  s_d0f7e7b6eff56e::t_6d432486e1b62f 36,39-40,44-45
+docs/events.md
+  s_d0f7e7b6eff56e::t_386002266546d5 519,537
+apps/pipeline-cli/tests/telemetry-daemon.test.ts
+  s_d0f7e7b6eff56e::t_8605c8874f17ed 8,213
+tests/hook-cwd-gate.test.ts
+  s_d0f7e7b6eff56e::t_8a5c04cbfb06dd 26
+tests/hook-stats-relay.test.ts
+  s_d0f7e7b6eff56e::t_59bfae5bb71bc5 23
+apps/pipeline-cli/src/lib/event.ts
+  s_d0f7e7b6eff56e::t_d52d76b1190482 181
+tests/hook-bypass-id-determinism.test.ts
+  s_d0f7e7b6eff56e::t_654756c1815432 26
+CLAUDE.md
+  s_d0f7e7b6eff56e::t_a5db440c2591c5 70,74-75,175-205
+tests/hook-telemetry-daemon-lock-cross-process.test.ts
+  s_d0f7e7b6eff56e::t_19777e66f419db 41
+apps/pipeline-cli/tests/drive-session-binding.test.ts
+  s_d0f7e7b6eff56e::t_4adb20539d5de5 15
+hooks/analytics_relay.ts
+  s_d0f7e7b6eff56e::t_37f072c2417441 1208,1371,1378,1582
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "5bd336e04e78d60bef5972824f8867760771764d",
+  "prompts": {},
+  "sessions": {
+    "s_d0f7e7b6eff56e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d2cb2e21-f860-44f1-adcc-fe66015824da",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

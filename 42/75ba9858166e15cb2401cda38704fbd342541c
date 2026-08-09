@@ -1,0 +1,27 @@
+.claude-plugin/plugin.json
+  s_5f95ee8a7f35a3::t_ec724c18d5aea4 3
+CLAUDE.md
+  s_5f95ee8a7f35a3::t_a4f5c76fe8acac 74
+apps/pipeline-cli/tests/hook-run-shim.test.ts
+  s_5f95ee8a7f35a3::t_45d7f8cfb04fda 1-228
+hooks/hooks.json
+  s_5f95ee8a7f35a3::t_42ef1b619dfa50 9,13,24,28,38,42,53,63,73,83
+hooks/run-hook.sh
+  s_5f95ee8a7f35a3::t_8e484eac3d7c1d 1-75
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "4275ba9858166e15cb2401cda38704fbd342541c",
+  "prompts": {},
+  "sessions": {
+    "s_5f95ee8a7f35a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-acf55e8f55b7b247f",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

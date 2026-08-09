@@ -1,0 +1,20 @@
+apps/pipeline-cli/tests/template-support-answer.test.ts
+  s_8a736801219e6a::t_3aaf492668ac00 345-350
+  s_8a736801219e6a::t_0df6f851e1f7cd 21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "8034434f94d47985e440e675018bfa99f048e858",
+  "prompts": {},
+  "sessions": {
+    "s_8a736801219e6a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1685b869-ab38-4f45-984f-1531360dc186",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

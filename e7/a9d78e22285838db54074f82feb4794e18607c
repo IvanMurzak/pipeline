@@ -1,0 +1,53 @@
+apps/pipeline-cli/tests/hash.test.ts
+  s_b430d43adfbb4b::t_c068af634314b1 1-2,6-7
+  s_b430d43adfbb4b::t_449787e761ef36 3
+  s_b430d43adfbb4b::t_94dacd2a33eea7 319-471,473-484
+  s_b430d43adfbb4b::t_eaad8caa499a44 472
+apps/pipeline-cli/src/lib/cloud-config.ts
+  s_b430d43adfbb4b::t_01dd44fd8bb27f 301-339,346
+  s_b430d43adfbb4b::t_d9f6212a1045a6 226-238
+apps/pipeline-cli/src/cli.ts
+  s_b430d43adfbb4b::t_8a334bc0e863a4 84,87-89
+apps/pipeline-cli/src/commands/hash.ts
+  s_b430d43adfbb4b::t_cb1e0194039643 131
+  s_b430d43adfbb4b::t_8f50f52168f2d2 1,6-20,22-28,32,35-57,59,62-63,70-73,84-91,110,112-130,132-134,137
+apps/pipeline-cli/tests/run-identity.test.ts
+  s_b430d43adfbb4b::t_7c85c6e65872b4 350,354-368,373,377,383,387-388,391-399
+apps/pipeline-cli/src/lib/run-identity.ts
+  s_b430d43adfbb4b::t_43da1e570b38b5 22-32
+  s_b430d43adfbb4b::t_4bbed336d8defa 469-482
+  s_b430d43adfbb4b::t_80a0d0e5b21f33 513
+  s_b430d43adfbb4b::t_92fc06129c2b7e 65-68,72-85
+  s_b430d43adfbb4b::t_8878a2c682f5ba 434-441,445
+apps/pipeline-cli/src/lib/fingerprint-salt.ts
+  s_b430d43adfbb4b::t_3268f05f80da5f 108-109
+  s_b430d43adfbb4b::t_b915b37555ffcd 154
+  s_b430d43adfbb4b::t_50315c9e3a7fb4 1-107,110-153,155-173
+apps/pipeline-cli/tests/fingerprint-salt.test.ts
+  s_b430d43adfbb4b::t_f980ade72c2484 73
+  s_b430d43adfbb4b::t_d3b710349661db 10-11,13-14
+  s_b430d43adfbb4b::t_74b602606db8ad 132
+  s_b430d43adfbb4b::t_c3b0e72e08dbb2 16
+  s_b430d43adfbb4b::t_cbbc08f809bbee 365-368,372
+  s_b430d43adfbb4b::t_345bbb31bf403b 1-9,12,15,17-72,74-80,82-131,133-194,196,217-364,369-371,373-385
+  s_b430d43adfbb4b::t_d649a7642ce128 195,197-216
+  s_b430d43adfbb4b::t_26f9b2840e8f07 81
+docs/cli.md
+  s_b430d43adfbb4b::t_50cc01efe172db 15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "e7a9d78e22285838db54074f82feb4794e18607c",
+  "prompts": {},
+  "sessions": {
+    "s_b430d43adfbb4b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "714866ae-09f9-41b6-8ba8-5b3d31dd52bd",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

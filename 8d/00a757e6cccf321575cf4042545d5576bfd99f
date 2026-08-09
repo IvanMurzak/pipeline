@@ -1,0 +1,22 @@
+.claude-plugin/marketplace.json
+  s_364be739bc892c::t_e9c3e56c7664d7 6
+  s_364be739bc892c::t_6be6405fcb73e3 1-5,7-15
+README.md
+  s_364be739bc892c::t_4e0fcc0aac4d43 7-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "8d00a757e6cccf321575cf4042545d5576bfd99f",
+  "prompts": {},
+  "sessions": {
+    "s_364be739bc892c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b8f91f54-742b-4579-9e3a-eeb38012be81",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+README.md
+  s_a45815951e406c::t_7550bd82f4a118 400-410
+docs/cli.md
+  s_a45815951e406c::t_64a9e8ac5bbe3c 338,358-403,483-488,502-510
+src/commands/worktree.ts
+  s_a45815951e406c::t_5863faec325b21 105-135,147,388-515,691-705,834-837,861-865,984-992,999-1005,1015-1017,1318-1327,1329-1334,1349-1353,1367-1373,1413-1424,1492-1495
+tests/worktree-submodule-slots.test.ts
+  s_a45815951e406c::t_9900d4acd3b219 1-669
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "ca49b3d5ca472737dbd796b305980a04491e6de5",
+  "prompts": {},
+  "sessions": {
+    "s_a45815951e406c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_a45815951e406c",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

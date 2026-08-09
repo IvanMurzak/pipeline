@@ -1,0 +1,21 @@
+src/lib/worktree-provision.ts
+  s_c39e9273a81a7f::t_5774d682840bfe 135,137-149,157,163-165
+tests/worktree-provision.test.ts
+  s_c39e9273a81a7f::t_aa39b912ae4e14 423,425-428,470-474
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "ee3a05d495742ed378fc6f0674877c4af323baf7",
+  "prompts": {},
+  "sessions": {
+    "s_c39e9273a81a7f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1654f175-e571-4771-baf1-06f03062b3fe",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

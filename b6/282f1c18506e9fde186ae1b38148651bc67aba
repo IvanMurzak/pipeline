@@ -1,0 +1,41 @@
+src/lib/telemetry-upload.ts
+  s_4bfd91e2e834e8::t_f95ed96c9d87e6 736-738
+  s_4bfd91e2e834e8::t_5e9adb06d46b10 411-438,446-450,456
+  s_4bfd91e2e834e8::t_96992afa4b9955 493
+  s_4bfd91e2e834e8::t_598ad2f46b9971 470-474,484
+src/lib/telemetry-history.ts
+  s_4bfd91e2e834e8::t_799f75f92f9f48 60,64-67
+  s_4bfd91e2e834e8::t_3acc369760e5c0 137-147
+  s_4bfd91e2e834e8::t_fcdcf4ade8fb23 49-54
+src/lib/stats.ts
+  s_4bfd91e2e834e8::t_38c5a8f96461e9 516-518
+  s_4bfd91e2e834e8::t_33ad5430137678 123-155
+  s_4bfd91e2e834e8::t_3adddf8880be00 662-664
+  s_4bfd91e2e834e8::t_0451efa763ece1 37
+  s_4bfd91e2e834e8::t_8fa32473acecd1 698-702
+  s_4bfd91e2e834e8::t_decc06f4fd9615 484-487
+tests/stats-run-exit-ship.test.ts
+  s_4bfd91e2e834e8::t_0fbf58b5534ca7 451
+  s_4bfd91e2e834e8::t_bf46a25c880746 1-325,373-450,452-457
+  s_4bfd91e2e834e8::t_8009777d4d1730 326-372
+src/lib/telemetry-ship.ts
+  s_4bfd91e2e834e8::t_116d2a25ee5636 1-153
+tests/telemetry-upload.test.ts
+  s_4bfd91e2e834e8::t_f766827ed9aa38 266,269,273
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "b6282f1c18506e9fde186ae1b38148651bc67aba",
+  "prompts": {},
+  "sessions": {
+    "s_4bfd91e2e834e8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a726bff4-8e95-41dc-9561-141ab1618d49",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

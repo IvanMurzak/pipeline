@@ -1,0 +1,19 @@
+apps/pipeline-ui/tests/launcher.test.ts
+  s_5c01f199af2719::t_848558f2ed8153 40-43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "8e60d427c7c9af1c478ed9bca0e8d65e2a3c0d75",
+  "prompts": {},
+  "sessions": {
+    "s_5c01f199af2719": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_5c01f199af2719",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

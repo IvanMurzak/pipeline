@@ -1,0 +1,22 @@
+apps/pipeline-cli/src/commands/gc.ts
+  s_0437b8a8fbb7aa::t_b96f2ad294b76a 686-698
+apps/pipeline-cli/tests/event.test.ts
+  s_0437b8a8fbb7aa::t_f564eb3c182cb3 324,329
+  s_0437b8a8fbb7aa::t_7396d1a5ab28fb 19,31,36-50,56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "b4f7fb00f09b746669ffccdd48fc98ced44c485a",
+  "prompts": {},
+  "sessions": {
+    "s_0437b8a8fbb7aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "aca23227-fb01-4357-947a-d2d68329d5df",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

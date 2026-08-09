@@ -1,0 +1,28 @@
+apps/pipeline-cli/package.json
+  s_364be739bc892c::t_433a9244d34199 11,27-29
+  s_8c19f166a0a4cd::t_615581e728f067 7-10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "9917329c6044f89cf78c690eb051cd6769e9564d",
+  "prompts": {},
+  "sessions": {
+    "s_364be739bc892c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b8f91f54-742b-4579-9e3a-eeb38012be81",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_8c19f166a0a4cd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df8298f2-beea-41ba-9052-0bf0c5fc46f2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

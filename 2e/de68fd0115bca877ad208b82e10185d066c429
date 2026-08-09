@@ -1,0 +1,14 @@
+package.json
+  h_8325a340bf5897 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "2ede68fd0115bca877ad208b82e10185d066c429",
+  "prompts": {},
+  "humans": {
+    "h_8325a340bf5897": {
+      "author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

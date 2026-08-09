@@ -1,0 +1,42 @@
+apps/pipeline-cli/tests/migrate-to-manifest.test.ts
+  s_69ec513d2e61d8::t_3274b706ed0e1c 125-126
+  s_69ec513d2e61d8::t_0d23d8fc63deb2 109,111-116
+  s_69ec513d2e61d8::t_2973deb8fcf47e 142-144,149
+  s_69ec513d2e61d8::t_fbf3803272a23f 227
+  s_69ec513d2e61d8::t_8df13b0e1250ee 1-108,110,117-124,127-141,145-148,150-226,228-263
+apps/pipeline-cli/src/commands/migrate.ts
+  s_69ec513d2e61d8::t_f99f0cf51d3140 120-121,123-133
+  s_69ec513d2e61d8::t_35b1b280443f19 41
+  s_69ec513d2e61d8::t_f6d8f031f3fbd8 74-77,85,88-92,236-240
+apps/pipeline-cli/src/commands/migrate-to-manifest.ts
+  s_69ec513d2e61d8::t_5075724cacce34 129-146
+  s_69ec513d2e61d8::t_fa443be39fa68e 203-205
+  s_69ec513d2e61d8::t_cc688df77bfac1 1-128,147-202,206-221
+apps/pipeline-cli/src/cli.ts
+  s_69ec513d2e61d8::t_46fca5d623b08d 248-257
+apps/pipeline-cli/tests/migrate-command.test.ts
+  s_69ec513d2e61d8::t_05557efe46f8db 59,62,204,207
+apps/pipeline-cli/src/lib/manifest-emit.ts
+  s_69ec513d2e61d8::t_e1484b38bc04de 1-194,207-306
+  s_69ec513d2e61d8::t_08961cc6c01623 195-206
+apps/pipeline-cli/README.md
+  s_69ec513d2e61d8::t_f7838d513c02ef 73-103
+apps/pipeline-cli/src/lib/plan.ts
+  s_69ec513d2e61d8::t_029b8daf46ba6f 940-950
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "e664162afda307baaa9f13362cd1d391c9c3a4a9",
+  "prompts": {},
+  "sessions": {
+    "s_69ec513d2e61d8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2333b0af-97e3-4675-85f9-28bab5ff7022",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
