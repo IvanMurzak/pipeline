@@ -19,7 +19,9 @@
 //   2. Create a throwaway worktree off origin/<base> on a collision-proof branch.
 //   3. Stage each gitlink surgically via `update-index --cacheinfo 160000,...`.
 //   4. Commit → push -u origin <branch>.
-//   5. gh pr create → gh pr merge --squash --delete-branch (--admin fallback).
+//   5. gh pr create → gh pr merge --squash --delete-branch (--admin fallback,
+//      ON by default; `adminFallback: false` reports a refused merge instead of
+//      retrying it with elevation, and never invokes gh with --admin at all).
 //   6. Reconcile the shared checkout NON-branch-switchingly with a BOUNDED RETRY:
 //      loop fetch + merge --ff-only until HEAD contains the authoritative merge
 //      commit (immune to a premature "Already up to date" / propagation lag).
@@ -88,6 +90,25 @@ export interface GitlinkChange {
 export type LandStatus = 'committed' | 'noop' | 'dry-run' | 'halted';
 export type ReconcileStatus = 'ff' | 'skipped' | 'failed' | 'na';
 
+/**
+ * What happened at Step 5b, the ONE place this primitive can elevate.
+ *
+ *   'plain'   — `gh pr merge --squash --delete-branch` succeeded as-is.
+ *   'admin'   — the plain merge was refused and the `--admin` retry succeeded
+ *               (only reachable with `adminFallback` on).
+ *   'refused' — the merge did not happen and was REPORTED, not forced. With
+ *               `adminFallback` off this is the terminal state of a refusal and
+ *               no `--admin` invocation was ever made; with it on it means even
+ *               the elevated retry failed.
+ *   null      — the merge step was never reached (dry-run, noop, or an earlier
+ *               halt).
+ *
+ * `mergedViaAdmin` is kept as a separate boolean because it is already part of
+ * the published `--json` contract; this field is the machine-readable
+ * discriminator that a free-text `haltReason` cannot be.
+ */
+export type MergeOutcome = 'plain' | 'admin' | 'refused';
+
 export interface LandResult {
   status: LandStatus;
   branch: string | null;
@@ -97,6 +118,7 @@ export interface LandResult {
   mergeSha: string | null;
   reconcileStatus: ReconcileStatus;
   mergedViaAdmin: boolean;
+  mergeOutcome: MergeOutcome | null;
   plannedActions: string[];
   diff: string | null;
   haltReason: string | null;
@@ -113,6 +135,12 @@ export interface LandOptions {
   dryRun?: boolean;
   /** Parent dir for the throwaway worktree (default: a fresh OS temp dir). */
   worktreesDir?: string;
+  /**
+   * Retry a refused `gh pr merge` with `--admin` (branch-protection bypass).
+   * DEFAULT `true`, for compatibility with existing callers — a caller that
+   * must never elevate has to pass `false` EXPLICITLY. With `false`, a refused
+   * merge halts and is reported and NO `--admin` invocation is made.
+   */
   adminFallback?: boolean;
   uniqueBranch?: boolean;
   reconcileAttempts?: number;
@@ -244,6 +272,7 @@ function emptyResult(branch: string | null): LandResult {
     mergeSha: null,
     reconcileStatus: 'na',
     mergedViaAdmin: false,
+    mergeOutcome: null,
     plannedActions: [],
     diff: null,
     haltReason: null,
@@ -396,20 +425,33 @@ export function landToMain(root: string, opts: LandOptions): LandResult {
     result.prRef = prRef;
 
     // ---- Step 5b: merge the PR (squash + delete-branch), --admin fallback. ----
+    //
+    // This is the ONLY place the primitive can elevate. With `adminFallback`
+    // off, a refusal returns HERE and unconditionally — there is no second
+    // merge attempt of any kind below this block, so the refusal is reported,
+    // never retried with elevation.
     const merge = gh(['pr', 'merge', prRef, '--squash', '--delete-branch'], tmp);
     if (merge.code !== 0) {
       if (!adminFallback) {
-        result.haltReason = `could not merge the landing PR (${prRef})`;
+        result.mergeOutcome = 'refused';
+        result.haltReason =
+          `could not merge the landing PR (${prRef}) and the --admin fallback is disabled — ` +
+          `reporting the refusal instead of bypassing branch protection. The scratch branch's ` +
+          `commit is on origin and the PR is open; merge it through whatever gate refused it.`;
         result.stderr = merge.stderr.trim();
         return result;
       }
       const mergeAdmin = gh(['pr', 'merge', prRef, '--squash', '--delete-branch', '--admin'], tmp);
       if (mergeAdmin.code !== 0) {
+        result.mergeOutcome = 'refused';
         result.haltReason = `could not merge the landing PR (${prRef})`;
         result.stderr = [merge.stderr.trim(), mergeAdmin.stderr.trim()].filter(Boolean).join('\n');
         return result;
       }
       result.mergedViaAdmin = true;
+      result.mergeOutcome = 'admin';
+    } else {
+      result.mergeOutcome = 'plain';
     }
 
     // ---- Step 5c: capture the AUTHORITATIVE merge commit sha. ----
