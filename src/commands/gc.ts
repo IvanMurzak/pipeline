@@ -30,7 +30,7 @@
 //     SUPERPROJECT's `.claude/worktrees/` (leaked registrations), and its
 //     prunable records. Uninitialized submodules are skipped silently and
 //     counted. `--no-submodules` disables the whole submodule pass.
-//   - the BUILT-IN SLOT ROOT — see the section below.
+//   - the BUILT-IN SLOT ROOT **and the SLOT REGISTRY** — see the sections below.
 //
 // ── THE BUILT-IN SLOT ROOT (taskflow-v2 a8 / finding F-10) ──────────────────
 //
@@ -56,7 +56,9 @@
 //     consumer's `worktree-create.*` did, and a5's SYMMETRY RULE governs here
 //     exactly as it does in `destroy`: the built-in path never reaps a hook's
 //     slot, because a hook keeps bookkeeping this CLI never wrote. Such a slot
-//     is REPORTED and left alone, with the reason stated.
+//     is REPORTED and left alone, with the reason stated. (a12 adds the one
+//     exception that is not one: a hook's row that names NOTHING on disk — see
+//     the slot-registry section — where the stale row, not the slot, is reaped.)
 //   * A record whose worktree is STILL ON DISK is `pipeline worktree destroy
 //     --name <n>`'s to reap, not gc's — gc reaps what no command can, and a
 //     directory that may hold a live worker is not that. It is reported as
@@ -74,6 +76,56 @@
 //     one more: the path must lie under the project-scoped, hash-suffixed slot
 //     root this CLI computed. Nothing else derives that spelling.
 //   * A slot preserved on purpose (`destroy --outcome halted`) is never reaped.
+//
+// ── THE SLOT REGISTRY (taskflow-v2 a12 / finding P-5) ──────────────────────
+//
+// The section above scans a DIRECTORY: `slotRootFor(<project>)`. That is where
+// the BUILT-IN provisioner puts slots, and only there. A consumer's
+// `worktree-create.*` puts its slot wherever it likes — this repository's own
+// reference hook uses `PIPELINE_WT_ROOT/<name>`, which is the slot root's PARENT
+// and therefore outside the scan — so between a8 and a12 a hook-provisioned slot
+// was invisible to gc no matter how thoroughly it had leaked, and **a clean gc
+// report was not evidence that nothing had leaked.** The second proving run
+// established that mechanism; the first had already recorded its gc confirmation
+// as a "false clean" and suspected it.
+//
+// It matters because 03-execution-flows.md F10 case 4 and F11 both lean on this
+// command as the janitor of record — "a slot with no matching row → a leak;
+// `pipeline gc` reports it, `--clean` reaps it" — which is only true of slots gc
+// can SEE. So gc now also scans the SLOT REGISTRY
+// (`.pipeline/.runtime/worktrees/<name>.json`) and reports every slot it names,
+// wherever that slot's directory is, whichever side provisioned it.
+//
+// TWO PATHS IN, ONE CLASSIFIER. A candidate is either a directory found under
+// the slot root or a row found in the registry (`GcSlot.source` says which);
+// both go through `classifySlot`, so the guards and the symmetry rule cannot
+// apply to one and not the other. Where a candidate is reached both ways, the
+// directory scan names it first and the registry row simply attaches to it.
+//
+// A REGISTRY ROW IS NOT A LICENCE TO DELETE — it is the opposite. A row can name
+// ANY path a hook chose, so the guards matter more here than in the directory
+// scan, not less, and they are applied FIRST: a row naming an implausible path
+// is a refusal, not a target. The symmetry rule then keeps the built-in path off
+// a live hook slot exactly as it does in `destroy`.
+//
+// The one thing gc will reap for a hook-provisioned slot is a row that names
+// NOTHING ON DISK — no worktree, and no submodule slot either. That last clause
+// is a11's lesson, and skipping it would re-open the data loss a11 exists to
+// prevent: a dispatched worker's PARENT slot is empty (often absent) by design
+// because the work happens in the SUBMODULE slot, so "the recorded worktree_path
+// is gone" is not "the slot held nothing". The submodule directories are
+// resolved through a11's own `reportedSubmoduleSlots` (record → env file →
+// convention) rather than a second resolver — two resolvers that can disagree is
+// the R3 failure this project has already paid for once. When every part really
+// is gone, the row and the a4 port block — this CLI's OWN bookkeeping, not the
+// hook's — are dropped, and nothing on disk is touched.
+//
+// ⚠ WHAT STILL CANNOT BE SEEN, stated so a clean report is read for what it is:
+// a hook's slot DIRECTORY whose registry row is also gone. Under the built-in
+// slot root that case is the a8 scan's ("a slot with no matching row"); outside
+// it there is nothing left to enumerate from — a hook may put its slot anywhere,
+// and gc will not walk the filesystem hunting for one. Every slot this CLI ever
+// recorded is now visible, and that is the claim a12 makes.
 //
 // `--no-submodules` does NOT narrow this pass. The provisioner cuts one
 // worktree per declared submodule BESIDE the parent slot (`<name>--<slug>`),
@@ -115,6 +167,9 @@
 //     parent worktree, every submodule worktree, the env file) — never a second
 //     removal implementation — then drops its stale slot record and hands its
 //     a4 PORT RESERVATIONS back, exactly as `destroy --outcome completed` does;
+//   - drops each STALE REGISTRY ROW that names nothing on disk (a12), handing
+//     its port block back too — and, for a hook-provisioned slot, deleting
+//     nothing on disk at all;
 //   - prints exactly what was kept and why.
 //
 // `--force-worktree-branches` (opt-in, requires --clean): additionally
@@ -151,7 +206,13 @@ import {
   toPosixPath,
   type TeardownSubmodule,
 } from '../lib/worktree-provision';
-import { deleteSlot as deleteSlotRecord, listSlots, type SlotRecord } from './worktree';
+import {
+  deleteSlot as deleteSlotRecord,
+  listSlots,
+  reportedSubmoduleSlots,
+  type ReportedSubmoduleSlot,
+  type SlotRecord,
+} from './worktree';
 
 export interface GcWorktree {
   path: string;
@@ -177,29 +238,62 @@ export interface GcSubmoduleReport {
   prunable: string[];
 }
 
-/** One entry of the BUILT-IN SLOT ROOT scan (taskflow-v2 a8 / F-10): a slot the
- *  built-in provisioner put OUTSIDE the repository, classified. */
+/** One submodule slot of a registry-known slot, AS RESOLVED — a11's shape,
+ *  narrowed to what a janitor's report needs. `dir` is where the work is when
+ *  the parent slot is empty, `source` says which channel named it, and `exists`
+ *  is the only thing that decides whether the slot still has parts on disk. */
+export interface GcSlotSubmodule {
+  path: string;
+  dir: string;
+  source: ReportedSubmoduleSlot['source'];
+  exists: boolean;
+}
+
+/** One entry of the SLOT SCAN: a slot found under the built-in slot root
+ *  (taskflow-v2 a8 / F-10) or named by the slot registry (a12 / P-5),
+ *  classified. */
 export interface GcSlot {
-  /** The slot name — its directory's basename, which is also what
-   *  `pipeline worktree destroy --name` takes. */
+  /** The slot name — its directory's basename, or the registry row's `name`,
+   *  which is what `pipeline worktree destroy --name` takes. */
   name: string;
   /** The slot directory, in the provisioner's own forward-slash spelling. */
   path: string;
   /** What the slot record says provisioned it; null when NO record names it. */
   record: 'builtin' | 'hook' | null;
+  /** How gc found this candidate: a directory under `slot_root`, or a row of
+   *  the slot registry. `registry` entries may live ANYWHERE (a12 / P-5). */
+  source: 'slot-root' | 'registry';
   exists: boolean;
+  /** The slot's submodule directories, resolved through a11's own
+   *  `reportedSubmoduleSlots` (record → env file → convention). `[]` when no
+   *  record names this candidate, since there is then nothing to resolve from.
+   *
+   *  ⚠ Read these before concluding a slot is empty: a dispatched worker's
+   *  PARENT slot is empty — often absent — by design, because the work happens
+   *  here. That is the a11 data loss, and gc must not repeat it. */
+  submodule_slots: GcSlotSubmodule[];
   /** True when gc treats it as a reapable leak — `--clean` acts on exactly
-   *  these and on nothing else under the slot root. */
+   *  these and on nothing else. */
   orphaned: boolean;
   /** Why it is a leak, or why it is left alone. Always stated, both ways. */
   reason: string;
 }
 
-/** One orphaned built-in slot `--clean` actually reaped. */
+/** One orphaned slot `--clean` actually reaped. */
 export interface GcReapedSlot {
   name: string;
   path: string;
-  /** What a5's teardown removed (parent first, then each submodule slot). */
+  /** WHICH reap ran (a12).
+   *  `builtin-teardown` — a5's `teardownSlot`: worktrees, env file, then the
+   *      record and the ports. The only path that deletes anything on disk, and
+   *      it runs for built-in slots only.
+   *  `record-only`      — a registry row that named nothing on disk: the row and
+   *      the a4 port block go back, and NOTHING on disk is touched. This is what
+   *      a hook-provisioned slot gets, because the symmetry rule forbids the
+   *      built-in path from reaping a hook's directories. */
+  reaped_by: 'builtin-teardown' | 'record-only';
+  /** What a5's teardown removed (parent first, then each submodule slot).
+   *  Always `[]` under `record-only`. */
   removed_worktrees: string[];
   removed_env_file: string | null;
   /** The stale `.pipeline/.runtime/worktrees/<name>.json` was dropped. */
@@ -232,10 +326,10 @@ export interface GcCleaned {
    *  populated under --force-worktree-branches. */
   force_deleted_branches: string[];
   submodules: GcSubmoduleCleaned[];
-  /** Orphaned BUILT-IN slots reaped from the slot root (a8). */
+  /** Orphaned slots reaped from the slot root (a8) or the registry (a12). */
   reaped_slots: GcReapedSlot[];
-  /** Orphaned built-in slots the teardown could NOT reap, and why (a locked or
-   *  in-use directory — the Windows case — reads exactly like this). */
+  /** Orphaned slots the teardown could NOT reap, and why (a locked or in-use
+   *  directory — the Windows case — reads exactly like this). */
   kept_slots: Array<{ path: string; reason: string }>;
 }
 
@@ -252,7 +346,12 @@ export interface GcReport {
   /** Where the built-in provisioner puts THIS project's slots — reported even
    *  when it holds nothing, because "gc looked there" is the claim a8 makes. */
   slot_root: string;
-  /** The built-in slot root scan: every candidate, classified (a8). */
+  /** Every slot candidate, classified: the built-in slot root scan (a8) AND
+   *  every row of the slot registry, wherever its directory is (a12 / P-5).
+   *
+   *  The field name predates a12 and is kept for compatibility; `GcSlot.source`
+   *  is what distinguishes the two scans, and `GcSlot.record` which side
+   *  provisioned each slot. */
   builtin_slots: GcSlot[];
   cleaned: GcCleaned | null;
 }
@@ -462,8 +561,16 @@ export function gcReport(
 }
 
 // ---------------------------------------------------------------------------
-// The BUILT-IN SLOT ROOT scan (a8 / F-10) — see the module header
+// The SLOT scan: the built-in slot root (a8 / F-10) + the slot registry
+// (a12 / P-5) — see the module header
 // ---------------------------------------------------------------------------
+
+/** What `--clean` will do with a candidate.
+ *
+ *  Three values rather than a boolean because "reap" is not one operation:
+ *  a5's teardown DELETES DIRECTORIES, and the symmetry rule forbids running it
+ *  over a hook's slot. `drop-record` is the reap that touches nothing on disk. */
+type SlotAction = 'keep' | 'reap' | 'drop-record';
 
 /** A scanned slot plus the record that proves (or fails to prove) it is ours.
  *  `GcSlot` is the reportable projection of this. */
@@ -471,9 +578,27 @@ interface SlotCandidate {
   name: string;
   path: string;
   record: SlotRecord | null;
+  source: GcSlot['source'];
   exists: boolean;
+  /** a11's resolution of this slot's submodule directories; `[]` with no
+   *  record. The parts that decide whether a slot is really gone. */
+  submodule_slots: GcSlotSubmodule[];
+  action: SlotAction;
   orphaned: boolean;
   reason: string;
+}
+
+/** The parts of a slot still on disk: its own directory, plus every submodule
+ *  slot a11's resolution found there.
+ *
+ *  THE PARENT PATH ALONE IS NOT THE ANSWER. A dispatched worker's parent slot is
+ *  empty by design because the worker works in the submodule slot — the
+ *  reasoning that reaped 21,880 bytes of finished work in the incident a11 was
+ *  written for. "Nothing on disk" has to mean nothing, or a12 re-opens it. */
+function liveParts(cand: { path: string; exists: boolean; submodule_slots: GcSlotSubmodule[] }): string[] {
+  const parts = cand.exists ? [toPosixPath(cand.path)] : [];
+  for (const s of cand.submodule_slots) if (s.exists) parts.push(toPosixPath(s.dir));
+  return parts;
 }
 
 /** Immediate subdirectory NAMES of `dir`, sorted; [] when it is absent. */
@@ -492,54 +617,87 @@ function listDirNames(dir: string): string[] {
 
 /** Is this candidate a leak gc may reap, or is it somebody else's? Both
  *  answers carry their reason: an operator reading a report that says "kept"
- *  without saying why cannot tell a rule from a bug. */
+ *  without saying why cannot tell a rule from a bug.
+ *
+ *  ORDER MATTERS, and a12 moved the deletion guards to the FRONT. A candidate
+ *  can now arrive from the slot REGISTRY, where the path is whatever a hook
+ *  wrote into a plain JSON file — so an implausible path must be refused as a
+ *  path, before any rule about provenance gets to have an opinion about it. The
+ *  guards never widen what is reaped, so putting them first can only refuse
+ *  more; every case the a8 order decided, it still decides the same way. */
 function classifySlot(
-  cand: { name: string; path: string; record: SlotRecord | null; exists: boolean },
+  cand: {
+    name: string;
+    path: string;
+    record: SlotRecord | null;
+    exists: boolean;
+    submodule_slots: GcSlotSubmodule[];
+  },
   root: string,
   slotRoot: string,
-): { orphaned: boolean; reason: string } {
+): { action: SlotAction; reason: string } {
   const rec = cand.record;
   const p = toPosixPath(cand.path);
+  const keep = (reason: string): { action: SlotAction; reason: string } => ({ action: 'keep', reason });
 
-  // 1. THE SYMMETRY RULE (a5). A hook provisioned its slot with bookkeeping
-  //    this CLI never saw — its own registrations, branches, env files — so
-  //    reaping one from the built-in path would silently orphan them. Same
-  //    boundary `pipeline worktree destroy` enforces, same direction.
-  if (rec !== null && rec.provisioner === 'hook') {
-    return {
-      orphaned: false,
-      reason:
-        `slot record '${rec.name}' says a worktree-create.* HOOK provisioned it — the built-in path never reaps a hook's slot ` +
-        `(the symmetry rule: a hook keeps bookkeeping this CLI never wrote). Its worktree-destroy.* owns it.`,
-    };
+  // 1. a5's THREE DELETION GUARDS, applied here rather than only inside the
+  //    teardown, so an implausible path is refused where it is CLASSIFIED and
+  //    never becomes a target in the first place. They gate the registry scan
+  //    too — that is the whole reason they run first (a12).
+  if (isUnderOrEqual(cand.path, root)) {
+    return keep(
+      `refused: ${p} is inside the repository ${toPosixPath(root)}, and the built-in provisioner never creates a slot there`,
+    );
+  }
+  if (isUnderOrEqual(process.cwd(), cand.path)) {
+    return keep(`refused: ${p} is (or contains) the current working directory`);
+  }
+  if (tooShallowToDelete(cand.path)) {
+    return keep(`refused: a slot lives at <root>/<project>/<name> and ${p} is too close to a filesystem root to be one`);
   }
 
   // 2. Preserved ON PURPOSE. `destroy --outcome halted` keeps a slot whole for
   //    post-mortem and resume; a janitor that reaped it would delete the thing
-  //    halting exists to save.
+  //    halting exists to save. Ahead of the symmetry rule because it is the more
+  //    specific answer and it holds for BOTH provisioners — a halted hook slot
+  //    was preserved deliberately, and its record is part of what was preserved.
   if (rec !== null && rec.outcome === 'halted') {
-    return {
-      orphaned: false,
-      reason: `slot record '${rec.name}' was PRESERVED by \`pipeline worktree destroy --outcome halted\` — re-run that with --outcome completed to reap it`,
-    };
+    return keep(
+      `slot record '${rec.name}' was PRESERVED by \`pipeline worktree destroy --outcome halted\` — re-run that with --outcome completed to reap it`,
+    );
   }
 
-  // 3. a5's THREE DELETION GUARDS, applied here rather than only inside the
-  //    teardown, so an implausible recorded path is refused where it is
-  //    CLASSIFIED and never becomes a target in the first place.
-  if (isUnderOrEqual(cand.path, root)) {
+  // 3. THE SYMMETRY RULE (a5). A hook provisioned its slot with bookkeeping
+  //    this CLI never saw — its own registrations, branches, env files — so
+  //    reaping one from the built-in path would silently orphan them. Same
+  //    boundary `pipeline worktree destroy` enforces, same direction.
+  //
+  //    a12 splits it on ONE question: is any part of the slot still there?
+  //    While something is, the answer is unchanged — report it, touch nothing.
+  //    When the row names nothing at all, the row itself is the leak: its ports
+  //    are still claimed and `destroy` cannot help (with no worktree-destroy.*
+  //    it REFUSES a hook's slot outright), so gc drops the row and the port
+  //    block — its own bookkeeping — and still deletes nothing on disk.
+  if (rec !== null && rec.provisioner === 'hook') {
+    const live = liveParts(cand);
+    const symmetry =
+      `slot record '${rec.name}' says a worktree-create.* HOOK provisioned it — the built-in path never reaps a hook's slot ` +
+      `(the symmetry rule: a hook keeps bookkeeping this CLI never wrote). Its worktree-destroy.* owns it.`;
+    if (live.length) {
+      // Said explicitly when the PARENT is gone but a submodule slot is not:
+      // that combination is exactly what a resume misread in the a11 incident,
+      // and a janitor's report is the wrong place to leave it implicit.
+      const note = cand.exists
+        ? ''
+        : ` The recorded worktree is gone, but the slot is NOT empty — ${live.join(', ')} ${live.length === 1 ? 'is' : 'are'} still on disk (a dispatched worker's parent slot is empty by design; the work is in the submodule slot).`;
+      return keep(`${symmetry}${note}`);
+    }
     return {
-      orphaned: false,
-      reason: `refused: ${p} is inside the repository ${toPosixPath(root)}, and the built-in provisioner never creates a slot there`,
-    };
-  }
-  if (isUnderOrEqual(process.cwd(), cand.path)) {
-    return { orphaned: false, reason: `refused: ${p} is (or contains) the current working directory` };
-  }
-  if (tooShallowToDelete(cand.path)) {
-    return {
-      orphaned: false,
-      reason: `refused: a slot lives at <root>/<project>/<name> and ${p} is too close to a filesystem root to be one`,
+      action: 'drop-record',
+      reason:
+        `slot record '${rec.name}' names a HOOK-provisioned slot with nothing left on disk — neither ${p} nor any of its ` +
+        `${cand.submodule_slots.length} submodule slot${cand.submodule_slots.length === 1 ? '' : 's'} is there. The stale record and its port ` +
+        `reservation are dropped; nothing on disk is touched, because the symmetry rule leaves a hook's directories to its own worktree-destroy.*`,
     };
   }
 
@@ -548,47 +706,51 @@ function classifySlot(
   //    hash-suffixed slot root this CLI computed. Nothing else derives that
   //    spelling, so a path outside it is not something the built-in provisioner
   //    produced — whatever a record claims.
+  //
+  //    Only the BUILT-IN path reaches this: a hook's slot returned above, at the
+  //    symmetry rule, and it must — a hook's slot is outside this root by
+  //    construction (the reference hook uses the root's PARENT), which is the
+  //    mechanism P-5 names. Refusing it here would report it and then explain
+  //    the wrong reason for leaving it alone.
   if (!isUnder(cand.path, slotRoot)) {
-    return {
-      orphaned: false,
-      reason:
-        `refused: ${p} is not under this project's built-in slot root ${slotRoot} — ` +
+    return keep(
+      `refused: ${p} is not under this project's built-in slot root ${slotRoot} — ` +
         `gc reaps only what the built-in provisioner would have created`,
-    };
+    );
   }
 
   // 5. A record whose worktree is still on disk is `destroy`'s to reap. gc
   //    reaps what NO command can reach, and a directory that may still hold a
   //    live worker is emphatically not that.
   if (cand.exists && rec !== null) {
-    return {
-      orphaned: false,
-      reason: `tracked by slot record '${rec.name}' — \`pipeline worktree destroy --name ${rec.name}\` owns it; gc reaps only what no command can name`,
-    };
+    return keep(
+      `tracked by slot record '${rec.name}' — \`pipeline worktree destroy --name ${rec.name}\` owns it; gc reaps only what no command can name`,
+    );
   }
 
   // 6. The two leaks.
   if (!cand.exists) {
     return {
-      orphaned: true,
+      action: 'reap',
       reason: `slot record '${rec?.name ?? cand.name}' names a worktree that is already gone — its branch, env file and port reservation are stranded`,
     };
   }
   return {
-    orphaned: true,
+    action: 'reap',
     reason:
       'no slot record names it — nothing can reach this slot by name, so no `pipeline worktree destroy` can reap it; ' +
       'a run that died before destroy is what leaves one',
   };
 }
 
-/** Scan the built-in slot root. READ-ONLY — this is what a plain `gc` reports.
+/** Scan the built-in slot root AND the slot registry. READ-ONLY — this is what
+ *  a plain `gc` reports.
  *
  *  `submodulePaths` are the project's initialized submodules (empty under
  *  `--no-submodules`): the provisioner cuts one worktree per declared submodule
  *  BESIDE the parent slot, as `<name>--<submodule slug>`, and those belong to
  *  their parent rather than standing as slots of their own. */
-function scanSlotRoot(root: string, slotRoot: string, submodulePaths: string[]): SlotCandidate[] {
+function scanSlots(root: string, slotRoot: string, submodulePaths: string[]): SlotCandidate[] {
   // A record that cannot be read is not a record: listSlots already drops
   // unparseable files, which is the conservative direction (an unreadable
   // record makes its slot look record-LESS, and the guards still gate it).
@@ -601,41 +763,60 @@ function scanSlotRoot(root: string, slotRoot: string, submodulePaths: string[]):
   const byPath = new Map<string, SlotRecord>();
   for (const r of records) byPath.set(normPath(r.worktree_path), r);
 
+  // a11's RESOLUTION, once per record, imported rather than re-derived: record →
+  // env file → convention, with `source` saying which channel answered. gc needs
+  // exactly what `list --json` needs, and two resolvers that can disagree about
+  // where a worker's commits are is the failure a11 exists to prevent.
+  const subSlotsOf = new Map<string, GcSlotSubmodule[]>();
+  for (const r of records) {
+    subSlotsOf.set(
+      r.name,
+      reportedSubmoduleSlots(r).map((s) => ({ path: s.path, dir: s.dir, source: s.source, exists: s.exists })),
+    );
+  }
+
   const dirNames = listDirNames(slotRoot);
 
   // Directories that BELONG to another slot: a submodule slot is reaped WITH
   // its parent, from that submodule's own repository, and must never be
-  // mistaken for an orphan in its own right.
+  // mistaken for an orphan in its own right. Resolved, not read off the record's
+  // own field — that field is `[]` for every hook-provisioned slot by design.
   const owned = new Set<string>();
-  for (const r of records) for (const s of r.submodule_slots) owned.add(normPath(s.dir));
+  for (const r of records) for (const s of subSlotsOf.get(r.name) ?? []) owned.add(normPath(s.dir));
   for (const n of dirNames) {
     for (const rel of submodulePaths) owned.add(normPath(derivedSubmoduleSlotDir(`${slotRoot}/${n}`, n, rel)));
   }
 
   const out: SlotCandidate[] = [];
   const seen = new Set<string>();
-  const add = (name: string, path: string): void => {
+  const add = (name: string, path: string, source: GcSlot['source']): void => {
     const key = normPath(path);
     if (seen.has(key)) return;
     seen.add(key);
     const record = byPath.get(key) ?? null;
-    const exists = existsSync(path);
-    const base = { name, path: toPosixPath(path), record, exists };
-    out.push({ ...base, ...classifySlot(base, root, slotRoot) });
+    const base = {
+      name,
+      path: toPosixPath(path),
+      record,
+      source,
+      exists: existsSync(path),
+      submodule_slots: record === null ? [] : (subSlotsOf.get(record.name) ?? []),
+    };
+    const verdict = classifySlot(base, root, slotRoot);
+    out.push({ ...base, ...verdict, orphaned: verdict.action !== 'keep' });
   };
 
   for (const n of dirNames) {
     const p = `${slotRoot}/${n}`;
     if (owned.has(normPath(p))) continue;
-    add(n, p);
+    add(n, p, 'slot-root');
   }
-  // Records whose directory is already GONE never appear in the listing above
-  // — and a record naming a path OUTSIDE the slot root has to be seen to be
-  // refused rather than silently skipped.
-  for (const r of records) {
-    if (r.provisioner !== 'builtin') continue;
-    add(r.name, r.worktree_path);
-  }
+  // EVERY registry row (a12 / P-5). Before a12 this loop took `builtin` records
+  // only, so a hook-provisioned slot — whose directory is wherever the hook put
+  // it, routinely outside the scan above — was invisible to gc entirely, and a
+  // clean report proved nothing. A row is also the ONLY way a slot whose
+  // directory is already gone can be seen at all.
+  for (const r of records) add(r.name, r.worktree_path, 'registry');
   return out;
 }
 
@@ -645,13 +826,15 @@ function toGcSlot(c: SlotCandidate): GcSlot {
     name: c.name,
     path: c.path,
     record: c.record?.provisioner ?? null,
+    source: c.source,
     exists: c.exists,
+    submodule_slots: c.submodule_slots,
     orphaned: c.orphaned,
     reason: c.reason,
   };
 }
 
-/** Reap the orphans `scanSlotRoot` found, through a5's `teardownSlot`.
+/** Reap the orphans `scanSlots` found, through a5's `teardownSlot`.
  *
  *  `deleteBranches: false` on purpose — see the module header: this command
  *  never force-deletes a branch under plain `--clean`, and detaching the branch
@@ -670,8 +853,40 @@ function reapSlots(
   const reservationDir = reservationDirFor(slotRootBase());
 
   for (const c of cands) {
-    if (!c.orphaned) continue;
+    if (c.action === 'keep') continue;
     const rec = c.record;
+
+    // THE RECORD-ONLY REAP (a12). A registry row that names nothing on disk —
+    // classifySlot proved that, submodule slots included — for a slot a hook
+    // provisioned. There is nothing to tear down and, by the symmetry rule,
+    // nothing gc may tear down: what goes is this CLI's OWN bookkeeping, the
+    // stale row and the a4 port block it still holds. `teardownSlot` is
+    // deliberately NOT called; it would derive submodule directories by the
+    // built-in convention and delete whatever it found at them, which is
+    // precisely the guess the symmetry rule forbids.
+    if (c.action === 'drop-record') {
+      if (rec === null) continue; // unreachable: only a hook RECORD yields this
+      // A reservation is identified by name AND the slot path AS RECORDED at
+      // allocation time (a4) — and on the hook path that is the hook's VERBATIM
+      // spelling, which need not be this module's normalized one. Both are
+      // tried, or a hook that wrote backslashes would leave its port block
+      // claimed forever by a slot that no longer exists.
+      let released_ports = releaseReservations(reservationDir, rec.name, c.path);
+      if (rec.worktree_path !== c.path) {
+        released_ports += releaseReservations(reservationDir, rec.name, rec.worktree_path);
+      }
+      reaped.push({
+        name: rec.name,
+        path: c.path,
+        reaped_by: 'record-only',
+        removed_worktrees: [],
+        removed_env_file: null,
+        removed_record: deleteSlotRecord(root, rec.name),
+        released_ports,
+      });
+      continue;
+    }
+
     // What create RECORDED, where there is a record; otherwise the same
     // derivation the provisioner used, over every declared submodule. A derived
     // directory that was never cut simply is not there, and the teardown
@@ -711,6 +926,7 @@ function reapSlots(
     reaped.push({
       name: c.name,
       path: c.path,
+      reaped_by: 'builtin-teardown',
       removed_worktrees: res.removed_worktrees,
       removed_env_file: res.removed_env_file,
       removed_record,
@@ -945,17 +1161,26 @@ function humanReport(
     for (const b of report.branches) out.push(`  ${mergedTag(b.merged).padEnd(8)}  ${b.branch}`);
   }
 
-  // The built-in slot root (a8). Printed only when it holds something —
-  // otherwise every report in every repository would grow a line about a
-  // directory that does not exist.
+  // The slot scan (a8 + a12). Printed only when it found something — otherwise
+  // every report in every repository would grow a line about a directory that
+  // does not exist.
   if (report.builtin_slots.length) {
     const orphans = report.builtin_slots.filter((s) => s.orphaned).length;
+    const fromRegistry = report.builtin_slots.filter((s) => s.source === 'registry').length;
     out.push(
-      `built-in worktree slots under ${report.slot_root} (${report.builtin_slots.length}, ${orphans} orphaned):`,
+      `built-in worktree slots under ${report.slot_root}, plus every slot the registry names ` +
+        `(${report.builtin_slots.length}, ${fromRegistry} from the registry, ${orphans} orphaned):`,
     );
     for (const s of report.builtin_slots) {
-      out.push(`  ${(s.orphaned ? 'orphaned' : 'kept').padEnd(8)}  ${s.path}`);
+      const tag = s.source === 'registry' ? '  [registry]' : '';
+      out.push(`  ${(s.orphaned ? 'orphaned' : 'kept').padEnd(8)}  ${s.path}${tag}`);
       out.push(`            ${s.reason}`);
+      // The submodule directories, when a12's resolution found any: they are
+      // where a dispatched worker's commits actually are, and an operator
+      // deciding what to do with the parent has to be able to see them.
+      for (const sub of s.submodule_slots) {
+        out.push(`            submodule ${sub.path}: ${sub.dir} (${sub.source}, ${sub.exists ? 'on disk' : 'gone'})`);
+      }
     }
   }
 
@@ -999,7 +1224,18 @@ function humanReport(
     !report.submodules.some(subHasFindings) &&
     !report.builtin_slots.some((s) => s.orphaned)
   ) {
-    out.push('no leaks detected');
+    // QUALIFIED when the slot scan reported slots gc will not act on (a12). P-5
+    // is the finding that a clean gc report was read as "nothing leaked"; a bare
+    // "no leaks detected" printed directly beneath a hook-provisioned slot this
+    // command has just said it cannot reap invites exactly that reading again.
+    // The leading phrase is unchanged — this qualifies the sentence, it does not
+    // replace it.
+    const reported = report.builtin_slots.length;
+    out.push(
+      reported === 0
+        ? 'no leaks detected'
+        : `no leaks detected — but ${plural(reported, 'slot')} above ${reported === 1 ? 'is' : 'are'} reported and left to ${reported === 1 ? 'its' : 'their'} owner: read the reasons before concluding nothing leaked`,
+    );
   }
 
   const c = report.cleaned;
@@ -1012,8 +1248,11 @@ function humanReport(
     for (const p of c.removed_dirs) out.push(`    ${p}`);
     out.push(`  reaped built-in slots: ${c.reaped_slots.length}`);
     for (const s of c.reaped_slots) {
+      // `record-only` is spelled out: "reaped" must never let an operator think
+      // a hook's directories were deleted when nothing on disk was touched.
+      const how = s.reaped_by === 'record-only' ? ', stale registry row only — nothing on disk touched' : '';
       out.push(
-        `    ${s.path} (${plural(s.removed_worktrees.length, 'worktree')}, ${plural(s.released_ports, 'port')} released${s.removed_record ? ', slot record dropped' : ''})`,
+        `    ${s.path} (${plural(s.removed_worktrees.length, 'worktree')}, ${plural(s.released_ports, 'port')} released${s.removed_record ? ', slot record dropped' : ''}${how})`,
       );
     }
     out.push(`  deleted branches (git branch -d): ${c.deleted_branches.length}`);
@@ -1135,9 +1374,12 @@ export function runGc(args: string[], git: GitRunner = realGit): number {
   });
   const protectedPaths = submodules.flatMap((s) => s.worktrees.map((w) => w.path));
 
-  // The built-in slot root (a8) — read-only, and outside the repository, which
-  // is exactly why nothing else looks there. Taken from slotRootFor(), never
-  // re-derived, so the janitor and the provisioner cannot disagree.
+  // The built-in slot root (a8) AND the slot registry (a12) — read-only, and
+  // outside the repository, which is exactly why nothing else looks there. The
+  // root is taken from slotRootFor(), never re-derived, so the janitor and the
+  // provisioner cannot disagree; the registry is read through the same
+  // `listSlots` the `worktree` command group writes with, and its slots'
+  // submodule directories through a11's own resolution.
   //
   // The declared submodules are resolved for this pass EVEN UNDER
   // `--no-submodules`, and that is deliberate: the provisioner cuts one
@@ -1148,7 +1390,7 @@ export function runGc(args: string[], git: GitRunner = realGit): number {
   // off half of a slot's shape, because a slot is reaped whole or not at all.
   const slotRoot = slotRootFor(root);
   const slotSubs = parsed.submodules ? subs.initialized : listSubmodules(git, root).initialized;
-  const slotCandidates = scanSlotRoot(root, slotRoot, slotSubs);
+  const slotCandidates = scanSlots(root, slotRoot, slotSubs);
 
   // Snapshot the report FIRST so --clean output shows what was found, then act.
   const report: GcReport = {

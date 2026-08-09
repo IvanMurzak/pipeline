@@ -557,6 +557,26 @@ test('D9, structurally: the run path does not IMPORT the provisioner OR the tear
   expect(`commands/gc.ts provisionSlot(: ${gc.includes('provisionSlot(') ? 'CALLS' : 'clean'}`).toBe(
     'commands/gc.ts provisionSlot(: clean',
   );
+  // a12 widened that import surface: gc now reads the SLOT REGISTRY as well as
+  // the slot root, and resolves a registry slot's submodule directories through
+  // a11's `reportedSubmoduleSlots` rather than a second copy of that resolution.
+  // Both are asserted for the same reason the two above are — the transitive
+  // check at the top of this test is only meaningful while the routes it names
+  // are the routes that exist, and a duplicated resolver is the specific defect
+  // a11 was written for.
+  expect(/from '.\/worktree'/.test(gc)).toBe(true);
+  expect(gc.includes('listSlots(')).toBe(true);
+  expect(gc.includes('reportedSubmoduleSlots(')).toBe(true);
+  expect(cmd.includes('export function reportedSubmoduleSlots(')).toBe(true);
+  // Non-vacuous the other way too: gc must not grow its OWN derivation of a
+  // submodule slot directory beside the one it imports. `derivedSubmoduleSlotDir`
+  // is the shared convention (it is imported, and the teardown fallback needs
+  // it); a second `SUBMODULE_`-parsing env-file reader in the janitor would be
+  // the two-resolvers failure, so that is what is checked for.
+  expect(`commands/gc.ts SUBMODULE_ parsing: ${gc.includes('SUBMODULE_') ? 'DUPLICATED' : 'clean'}`).toBe(
+    'commands/gc.ts SUBMODULE_ parsing: clean',
+  );
+  expect(cmd.includes('SUBMODULE_')).toBe(true);
   // The teardown lives in the module the import check names — otherwise
   // "commands/next.ts does not import worktree-provision" would stop meaning
   // "commands/next.ts cannot reach the teardown".
