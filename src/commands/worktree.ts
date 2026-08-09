@@ -56,6 +56,16 @@
 // lib/worktree-hooks.ts uses, so "is there a hook?" cannot answer differently
 // in the two places.
 //
+// PORTS (taskflow-v2 a4; 02-target-architecture.md §4.2 item 3). Every slot
+// gets a contiguous block of free ports, because a worktree isolates files and
+// not TCP ports — two workers each starting a dev server on 3000 is the failure
+// that makes file-level isolation insufficient on its own. lib/port-alloc.ts
+// owns the allocator; this command owns the PRECEDENCE (D14, per field: a hook
+// returning `ports: {}` still gets the CLI's block, and only a hook returning
+// non-empty ports overrides) and the reporting (`--json` reads the env file
+// back, because the env file — not the hook's JSON — is the channel the frozen
+// contract leaves ports in).
+//
 // SLOT BOOKKEEPING. `finalize`/`destroy` must tell the hook WHICH worktree
 // (`PIPELINE_WT_WORKTREE_PATH`), and `list` must be able to answer at all. The
 // run path reads that from its run state; there is none here, so `create`
@@ -74,19 +84,31 @@
 //   2  usage error: unknown flag/verb, missing value, invalid `--name` (SG6),
 //      invalid `--outcome`, invalid `--ports`.
 
-import { existsSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { parseEnvFile } from '../lib/env-file';
 import { ensureGeneratedDir } from '../lib/generated-dir';
 import { iterWorktrees, realGit, type GitRunner } from '../lib/git';
 import { resolveHookScript } from '../lib/hooks';
 import { newId } from '../lib/ids';
-import { provisionSlot, type ProvisionedSubmodule } from '../lib/worktree-provision';
+import {
+  allocatePorts,
+  DEFAULT_PORT_COUNT,
+  PORT_BASE_KEY,
+  portEnvEntries,
+  readPortsFromEnv,
+  releaseReservations,
+  reservationDirFor,
+  resolvePortRange,
+} from '../lib/port-alloc';
+import { provisionSlot, slotRootBase, unsafeEnvEntry, type ProvisionedSubmodule } from '../lib/worktree-provision';
 import {
   noopEmitter,
   runCreateFailedCleanup,
   runCreateHook,
   runDestroyHook,
   runFinalizeHook,
+  type HookPorts,
   type WorktreeHookPaths,
 } from '../lib/worktree-hooks';
 
@@ -142,9 +164,15 @@ export interface SlotRecord {
   submodules: string[];
   /** The hook dir AS DECLARED (possibly relative) — replayed by finalize/destroy. */
   hook_dir: string;
-  /** `--ports N` as requested. NOT allocated yet — allocation ships with the
-   *  built-in provisioner (taskflow-v2 a4). */
+  /** The EFFECTIVE block size for this slot: `--ports N`, or the default when
+   *  the flag was omitted. `0` means the slot was provisioned with no ports.
+   *  Older records predate allocation and read back as null. */
   ports_requested: number | null;
+  /** First port of the slot's block, null when it has none. The authoritative
+   *  copy lives in the env file (that is the channel steps read); this is here
+   *  so `list` can answer "which ports is that slot holding" without opening a
+   *  file that a consumer hook, not this CLI, may own. */
+  port_base: number | null;
   /** Which side provisioned this slot: the consumer's `worktree-create.*`
    *  (`hook`) or the CLI's built-in provisioner (`builtin`). Recorded because
    *  teardown differs — a hook-made slot is the hook's to reap. Older records
@@ -183,6 +211,7 @@ export function readSlot(projectRoot: string, name: string): SlotRecord | null {
       submodules: Array.isArray(raw.submodules) ? raw.submodules.filter((s): s is string => typeof s === 'string') : [],
       hook_dir: typeof raw.hook_dir === 'string' ? raw.hook_dir : DEFAULT_HOOK_DIR,
       ports_requested: typeof raw.ports_requested === 'number' ? raw.ports_requested : null,
+      port_base: typeof raw.port_base === 'number' ? raw.port_base : null,
       provisioner: raw.provisioner === 'builtin' ? 'builtin' : 'hook',
       created_at: typeof raw.created_at === 'string' ? raw.created_at : '',
       updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : '',
@@ -382,8 +411,19 @@ export interface CreateOutput {
   base_branch: string;
   submodules: string[];
   hook_dir: string;
-  /** Always null today: `--ports` is recorded, not allocated (taskflow-v2 a4). */
-  ports: null;
+  /** The slot's ports, READ BACK from its env file — the channel, not the
+   *  intention (taskflow-v2 a4). Keyed by env-file key: `PORT_1`… for the
+   *  built-in allocator, plus any `<ROLE>_PORT` a consumer hook wrote. `{}`
+   *  when the slot has none. */
+  ports: Record<string, number>;
+  /** First port of the block, or null. */
+  port_base: number | null;
+  /** Who the ports came from. `builtin` — this CLI allocated them (including
+   *  the D14 case where a hook returned none and the CLI filled the gap);
+   *  `hook` — the create hook's own, which override; `none` — the slot has no
+   *  ports. */
+  ports_source: 'builtin' | 'hook' | 'none';
+  /** The EFFECTIVE block size asked for: `--ports N`, or the default. */
   ports_requested: number | null;
   /** `hook` when a `worktree-create.*` provisioned the slot, `builtin` when the
    *  CLI's own provisioner did (no hook exists). Additive: a repository with a
@@ -399,11 +439,113 @@ export interface CreateOutput {
   detail: string | null;
 }
 
+/** D14, per field — the whole reason this function exists.
+ *
+ *  A hook that returns `ports: {}` / `port_base: 0` (which is what this
+ *  repository's own reference hook returns, and what any hook that never
+ *  implemented ports returns) must NOT suppress the CLI's allocation:
+ *  hook-wins-wholesale would make ports unreachable in every repository that
+ *  already has a create hook. So an EMPTY answer is filled in, and only a
+ *  NON-EMPTY one overrides.
+ *
+ *  The fill goes into the hook's OWN env file, because that is the channel —
+ *  the create-hook JSON's ports are informational and nothing threads them
+ *  onward. Two things are deliberately never done here: a value already in
+ *  that file is never overwritten (a hook that wrote ports without reporting
+ *  them still wins on the channel that matters), and no second env file is
+ *  invented when the hook reported none — a file no step sources would be a
+ *  worse answer than an honest "no ports". */
+function fillHookSlotPorts(ctx: {
+  name: string;
+  count: number;
+  envFile: string | null;
+  hookPorts: HookPorts | null;
+  worktreePath: string;
+}): { source: CreateOutput['ports_source']; note: string | null } | { error: string } {
+  const hp = ctx.hookPorts;
+  if (hp !== null && (Object.keys(hp.ports).length > 0 || hp.port_base !== null)) {
+    // The hook allocated ports and said so. Its answer stands, both fields of
+    // it: `ports` and `port_base` describe ONE allocation, and filling half of
+    // a pair would publish a block that contradicts its own base.
+    return { source: 'hook', note: null };
+  }
+  if (ctx.count <= 0) return { source: 'none', note: null };
+  if (ctx.envFile === null) {
+    return {
+      source: 'none',
+      note: `the worktree-create hook returned no env_file, so there is nowhere to publish ports — ${ctx.count} were not allocated`,
+    };
+  }
+  let text = '';
+  try {
+    text = readFileSync(ctx.envFile, 'utf8');
+  } catch {
+    text = ''; // the hook named a file it did not write; the fill creates it
+  }
+  const already = readPortsFromEnv(parseEnvFile(text));
+  if (already.port_base !== null || Object.keys(already.ports).length > 0) return { source: 'hook', note: null };
+
+  const range = resolvePortRange();
+  if ('error' in range) return { error: range.error };
+  const alloc = allocatePorts({
+    name: ctx.name,
+    count: ctx.count,
+    reservationDir: reservationDirFor(slotRootBase()),
+    livePath: ctx.worktreePath,
+    range,
+  });
+  if (!alloc.ok) return { error: alloc.detail };
+
+  const entries = portEnvEntries(alloc.base, alloc.ports.length);
+  for (const [k, v] of entries) {
+    const problem = unsafeEnvEntry(k, v);
+    if (problem) return { error: problem };
+  }
+  const body =
+    (text.length && !text.endsWith('\n') ? `${text}\n` : text) +
+    '# ports allocated by `pipeline worktree create` — the hook returned none (D14)\n' +
+    entries.map(([k, v]) => `${k}=${v}`).join('\n') +
+    '\n';
+  try {
+    // The hook DECLARED this path; a hook that names an env file it has not
+    // written yet is common enough (and was harmless before ports existed)
+    // that the directory is created rather than treated as an error.
+    mkdirSync(dirname(ctx.envFile), { recursive: true });
+    writeFileSync(ctx.envFile, body, 'utf8');
+  } catch (e) {
+    // NOT a failed create. Exhaustion is this CLI's problem to report; a file
+    // this CLI does not own being unwritable is the hook's, and turning it into
+    // a failure would break slots that provisioned fine before ports existed.
+    // The block is handed back so it does not stay reserved for nothing.
+    releaseReservations(reservationDirFor(slotRootBase()), ctx.name, ctx.worktreePath);
+    return {
+      source: 'none',
+      note: `could not publish ports into the hook's env file ${ctx.envFile} (${String((e as Error).message ?? e)}) — the slot has none`,
+    };
+  }
+  return { source: 'builtin', note: null };
+}
+
+/** The slot's ports as its env file publishes them — the read-BACK direction
+ *  DoD 8 asks for. Best-effort: an unreadable file reports no ports rather
+ *  than failing a create that already succeeded. */
+function readPortsBack(envFile: string | null): { port_base: number | null; ports: Record<string, number> } {
+  if (envFile === null) return { port_base: null, ports: {} };
+  try {
+    return readPortsFromEnv(parseEnvFile(readFileSync(envFile, 'utf8')));
+  } catch {
+    return { port_base: null, ports: {} };
+  }
+}
+
 function createSlot(args: WorktreeArgs, git: GitRunner): { output: CreateOutput; code: number } {
   const projectRoot = projectRootOf();
   const name = args.name!;
   const hookDir = args.hookDir ?? DEFAULT_HOOK_DIR;
   const paths = hookPathsFor(projectRoot, hookDir);
+  /** `--ports N`, or the default when the flag was omitted. Explicit `0` is a
+   *  slot with no ports; nothing else opts out. */
+  const portCount = args.ports ?? DEFAULT_PORT_COUNT;
 
   // D9's decision point, and the ONLY one: a hook that exists is run and wins;
   // its absence is what the built-in provisioner fills, HERE, in the standalone
@@ -421,20 +563,50 @@ function createSlot(args: WorktreeArgs, git: GitRunner): { output: CreateOutput;
         paths,
         noopEmitter,
       )
-    : provisionSlot({ name, base_branch: args.base, submodules: args.submodules, projectRoot }, git);
+    : provisionSlot({ name, base_branch: args.base, submodules: args.submodules, projectRoot, ports: portCount }, git);
   const submoduleSlots = hasHook ? [] : (res as { submodule_slots: ProvisionedSubmodule[] }).submodule_slots;
 
-  const base: Omit<CreateOutput, 'ok' | 'status' | 'reused' | 'reused_evidence' | 'worktree_path' | 'branch' | 'env_file' | 'detail'> = {
+  const base: Omit<
+    CreateOutput,
+    | 'ok'
+    | 'status'
+    | 'reused'
+    | 'reused_evidence'
+    | 'worktree_path'
+    | 'branch'
+    | 'env_file'
+    | 'detail'
+    | 'ports'
+    | 'port_base'
+    | 'ports_source'
+  > = {
     command: 'worktree create',
     name,
     base_branch: args.base,
     submodules: args.submodules,
     hook_dir: hookDir,
-    ports: null,
-    ports_requested: args.ports,
+    ports_requested: portCount,
     provisioner: hasHook ? 'hook' : 'builtin',
     submodule_slots: submoduleSlots,
   };
+  /** A create that produced no usable slot: no path, no branch, no ports. */
+  const failure = (detail: string | null): { output: CreateOutput; code: number } => ({
+    output: {
+      ...base,
+      ok: false,
+      status: 'failed',
+      reused: false,
+      reused_evidence: null,
+      worktree_path: null,
+      branch: null,
+      env_file: null,
+      ports: {},
+      port_base: null,
+      ports_source: 'none',
+      detail,
+    },
+    code: 1,
+  });
 
   if (!res.ok || res.provisioned === null) {
     // Same best-effort cleanup the run path performs: a create that failed
@@ -452,23 +624,45 @@ function createSlot(args: WorktreeArgs, git: GitRunner): { output: CreateOutput;
         noopEmitter,
       );
     }
-    return {
-      output: {
-        ...base,
-        ok: false,
-        status: 'failed',
-        reused: false,
-        reused_evidence: null,
-        worktree_path: null,
-        branch: null,
-        env_file: null,
-        detail: res.detail,
-      },
-      code: 1,
-    };
+    return failure(res.detail);
   }
 
   const { worktree_path, branch, env_file } = res.provisioned;
+
+  // ---- ports --------------------------------------------------------------
+  // The built-in provisioner allocated them itself (they are already in the
+  // env file it wrote). On the HOOK path the decision is D14's, per field.
+  let portsSource: CreateOutput['ports_source'] = 'none';
+  let portsNote: string | null = null;
+  if (hasHook) {
+    const filled = fillHookSlotPorts({
+      name,
+      count: portCount,
+      envFile: env_file,
+      hookPorts: (res as { hook_ports: HookPorts | null }).hook_ports,
+      worktreePath: worktree_path,
+    });
+    // A slot that cannot be given the ports it was asked for is a FAILED
+    // create, not a silent zero-port slot. Nothing is torn down: the hook's
+    // slot is real and is evidence, and `pipeline gc` reaps what is left.
+    if ('error' in filled) return failure(filled.error);
+    portsSource = filled.source;
+    portsNote = filled.note;
+  } else if ((res as { ports: { base: number } | null }).ports !== null) {
+    portsSource = 'builtin';
+  }
+
+  const readBack = readPortsBack(env_file);
+  const hookPorts = hasHook ? (res as { hook_ports: HookPorts | null }).hook_ports : null;
+  // The file is the channel, so it is what gets reported — with the hook's own
+  // answer overlaid when the hook is the one that owns the ports.
+  const ports =
+    portsSource === 'hook' && hookPorts !== null ? { ...readBack.ports, ...hookPorts.ports } : readBack.ports;
+  const portBase =
+    portsSource === 'hook' && hookPorts !== null && hookPorts.port_base !== null
+      ? hookPorts.port_base
+      : readBack.port_base;
+
   const sameSlotOnDisk =
     known !== null && normPath(known.worktree_path) === normPath(worktree_path) && existsSync(worktree_path);
   const evidence: CreateOutput['reused_evidence'] = sameSlotOnDisk
@@ -486,7 +680,8 @@ function createSlot(args: WorktreeArgs, git: GitRunner): { output: CreateOutput;
     base_branch: args.base,
     submodules: args.submodules,
     hook_dir: hookDir,
-    ports_requested: args.ports,
+    ports_requested: portCount,
+    port_base: portBase,
     provisioner: hasHook ? 'hook' : 'builtin',
     created_at: known?.created_at || at,
     updated_at: at,
@@ -504,7 +699,10 @@ function createSlot(args: WorktreeArgs, git: GitRunner): { output: CreateOutput;
       worktree_path,
       branch,
       env_file,
-      detail: null,
+      ports,
+      port_base: portBase,
+      ports_source: portsSource,
+      detail: portsNote,
     },
     code: 0,
   };
@@ -521,8 +719,16 @@ function humanCreate(o: CreateOutput): string {
   ];
   for (const s of o.submodule_slots) lines.push(`  submodule ${s.name}: ${s.dir}  [base ${s.base}]`);
   if (o.reused) lines.push(`  reused:   yes (${o.reused_evidence}) — an orchestrator should treat this as a duplicate dispatch`);
-  if (o.ports_requested !== null)
-    lines.push(`  ports:    requested ${o.ports_requested}, NOT allocated — allocation ships with the built-in provisioner`);
+  const portNames = Object.keys(o.ports).sort((a, b) => (o.ports[a] ?? 0) - (o.ports[b] ?? 0));
+  if (portNames.length) {
+    const by = o.ports_source === 'hook' ? `${o.hook_dir}/worktree-create.*` : 'the built-in allocator';
+    lines.push(
+      `  ports:    ${portNames.length} from ${o.port_base ?? portNames[0]} — ${portNames.map((k) => `${k}=${o.ports[k]}`).join(' ')}  [by ${by}]`,
+    );
+  } else {
+    lines.push(`  ports:    none${o.ports_requested === 0 ? ' (--ports 0)' : ''}`);
+  }
+  if (o.detail) lines.push(`  note:     ${o.detail}`);
   return lines.join('\n') + '\n';
 }
 
@@ -616,6 +822,11 @@ function destroySlot(args: WorktreeArgs): { output: DestroyOutput; code: number 
   const reaped = res.ok && args.outcome === 'completed';
   if (reaped) {
     deleteSlot(projectRoot, name);
+    // The slot is gone, so its ports go back to the pool NOW rather than
+    // waiting for some later allocation to notice the reservation is stale.
+    // Identified by name AND worktree path — the registry is machine-wide and
+    // slot names (task ids) repeat across projects.
+    if (slot) releaseReservations(reservationDirFor(slotRootBase()), name, slot.worktree_path);
   } else if (slot) {
     slot.outcome = args.outcome;
     slot.updated_at = nowIso();
@@ -701,10 +912,13 @@ const USAGE = [
   '  * one worktree per --submodules entry, cut from THAT submodule\'s own',
   '    integration branch (`next` where it exists, else --base) — not from the',
   '    commit the parent pins;',
+  '  * a contiguous block of FREE ports, one block per slot (a worktree isolates',
+  '    files, not TCP ports);',
   '  * an env file beside the slot: RUN_ID, WORKTREE_NAME/PATH/BRANCH,',
-  '    PROJECT_ROOT, BASE_BRANCH, SUBMODULE_* — dotenv, values UNQUOTED and free',
-  '    of spaces and shell metacharacters (it is also read with `set -a &&',
-  '    source`), so paths are written with forward slashes on every platform.',
+  '    PROJECT_ROOT, BASE_BRANCH, PORT_BASE/PORT_COUNT/PORT_1..N, SUBMODULE_* —',
+  '    dotenv, values UNQUOTED and free of spaces and shell metacharacters (it is',
+  '    also read with `set -a && source`), so paths are written with forward',
+  '    slashes on every platform.',
   '  A hook, where one exists, ALWAYS wins — the provisioner is inert then. It is',
   '  reachable from this command only: a pipeline RUN with no worktree-create.*',
   '  still halts, exactly as before. `create` ONLY: finalize and destroy still',
@@ -712,7 +926,21 @@ const USAGE = [
   '  Environment: PIPELINE_WT_ROOT (where slots live; default C:/tmp on Windows,',
   '  else the system temp dir) · PIPELINE_WT_INTEGRATION_BRANCH (default `next`)',
   '  · PIPELINE_WT_FETCH=1 (fetch origin first; off by default so create never',
-  '  blocks on a remote). Requires git 2.20+.',
+  '  blocks on a remote) · PIPELINE_WT_PORT_RANGE=min-max (default 20000-32767).',
+  '  Requires git 2.20+.',
+  '',
+  'PORTS. Every slot gets its own contiguous block of FREE ports — --ports N,',
+  '  default 4, `--ports 0` for none — published in the env file as PORT_BASE,',
+  '  PORT_COUNT and PORT_1..PORT_N. The base is DETERMINISTIC per slot name, so',
+  '  re-provisioning the same name returns the same ports while they are free;',
+  '  occupied ports are skipped, and a block is reserved as it is handed out so',
+  '  two concurrent creates cannot be given overlapping ones. A worker is TOLD',
+  '  its ports and never searches for them. Exhaustion is a stated failure',
+  '  naming the range tried, never a slot with silently no ports.',
+  '  A repository WITH a create hook gets them too, per field (D14): a hook that',
+  '  returns `ports: {}` / `port_base: 0` — i.e. any hook that never implemented',
+  '  ports — has the block appended to the env file it reported; only a hook that',
+  '  returns NON-EMPTY ports overrides. --json reports what the env file says.',
   '',
   'Standalone context — stated because the contract is frozen:',
   '  PIPELINE_WT_PIPELINE_ROOT and PIPELINE_WT_PIPELINE_NAME are the EMPTY',
@@ -726,7 +954,8 @@ const USAGE = [
   '            name by frozen contract: a second create REUSES the slot and',
   '            reports status "reused" (--json: reused + reused_evidence) —',
   '            an orchestrator treats that as a duplicate dispatch.',
-  '            --ports <n> is RECORDED, NOT ALLOCATED yet.',
+  '            --ports <n> allocates a contiguous block of n free ports',
+  '            (default 4; 0 for none) — see PORTS above.',
   '  finalize  Run the mandatory terminal hook for the slot (strict',
   '            must-succeed: only an explicit {"ok":true} passes).',
   '  destroy   Tear the slot down. --outcome completed (default) REAPS —',

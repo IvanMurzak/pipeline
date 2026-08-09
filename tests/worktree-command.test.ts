@@ -117,11 +117,18 @@ function scaffold(hooks: HookSet = {}): string {
 
 function inProject<T>(root: string, fn: () => T): T {
   const prev = process.cwd();
+  const savedRoot = process.env.PIPELINE_WT_ROOT;
   try {
     process.chdir(root);
+    // These are HOOK-provisioned slots, so the CLI's own slot root is used for
+    // one thing only: the port-reservation registry (a4). Point it at a temp
+    // dir per test so the suite never writes into the developer's real one.
+    process.env.PIPELINE_WT_ROOT = mkTmp('wtcmd-slots-');
     return fn();
   } finally {
     process.chdir(prev);
+    if (savedRoot === undefined) delete process.env.PIPELINE_WT_ROOT;
+    else process.env.PIPELINE_WT_ROOT = savedRoot;
   }
 }
 
@@ -231,7 +238,6 @@ test('create --json emits the documented shape and hands the hook the STANDALONE
     expect(r.json.base_branch).toBe('next');
     expect(r.json.submodules).toEqual(['AppX', 'McpY']);
     expect(r.json.hook_dir).toBe('.pipeline/.hooks');
-    expect(r.json.ports).toBeNull();
     expect(r.json.detail).toBeNull();
     expect(existsSync(r.json.worktree_path)).toBe(true);
 
@@ -588,17 +594,25 @@ test('list reports the provisioned slots (and whether each is still on disk); it
 }, 30000);
 
 // ---------------------------------------------------------------------------
-// (9) --ports is accepted and RECORDED, not allocated (a4 owns allocation)
+// (9) --ports N is ALLOCATED (a4) — and never through the frozen env contract
 // ---------------------------------------------------------------------------
 
-test('--ports N is recorded, reported as not-allocated, and never invented into the env', () => {
+test('--ports N allocates a block for a HOOK-provisioned slot too (D14), and adds nothing to the frozen PIPELINE_WT_* the hook receives', () => {
   const root = scaffold();
   inProject(root, () => {
     const r = callJson(['create', '--name', 'ported', '--ports', '3']);
     expect(r.code).toBe(0);
-    expect(r.json.ports).toBeNull();
     expect(r.json.ports_requested).toBe(3);
-    expect(call(['create', '--name', 'ported2', '--ports', '3']).out).toContain('NOT allocated');
+    // This fixture's hook returns no ports at all — absent, not just empty —
+    // so per-field precedence has the CLI fill them (a4's own suite,
+    // tests/worktree-ports.test.ts, owns the rest of D14).
+    expect(r.json.ports_source).toBe('builtin');
+    expect(Object.keys(r.json.ports).length).toBe(3);
+    expect(r.json.port_base).toBe(Math.min(...(Object.values(r.json.ports) as number[])));
+    expect(call(['create', '--name', 'ported2', '--ports', '3']).out).toContain('ports:    3 from ');
+
+    // THE ASSERTION THIS TEST EXISTS FOR: the hook's environment is the FROZEN
+    // contract and gained no port variable. Ports travel in the env FILE.
     const env = envDump(root, 'create');
     expect(Object.keys(env).some((k) => /PORT/i.test(k))).toBe(false);
   });
