@@ -44,7 +44,7 @@
 
 import { test, expect, afterEach } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { cleanupCreated, ident, mkTmp } from './_git-sandbox';
 import { runWorktree } from '../src/commands/worktree';
@@ -74,6 +74,32 @@ function sh(args: string[], cwd?: string, check = true): GitResult {
 function gitRoot(dir: string): string {
   const top = sh(['rev-parse', '--show-toplevel'], dir).stdout.trim();
   return process.platform === 'win32' ? top.replace(/\//g, '\\') : top;
+}
+
+/** The OS's own canonical spelling of a path, for comparing OUR path against
+ *  GIT's.
+ *
+ *  `realpathSync.native`, not a string compare, and it is not paranoia — it is
+ *  the same trap `samePath` exists for in `src/lib/worktree-provision.ts`.
+ *  GitHub's Windows runner hands out an **8.3 short** TEMP path
+ *  (`C:\Users\RUNNER~1\…`), plain `realpathSync` leaves those segments alone,
+ *  and **git always prints the long form** (`C:\Users\runneradmin\…`). A hook
+ *  that derives its slot from `PIPELINE_WT_ROOT` therefore reports the short
+ *  spelling while `rev-parse --show-toplevel` answers with the long one.
+ *
+ *  Neither spelling is wrong and the CLI is right to report the hook's answer
+ *  VERBATIM — rewriting a hook's own path would make `submodule_slots[].dir`
+ *  disagree with the `SUBMODULE_*_DIR` the same hook wrote, which is two
+ *  channels contradicting each other to fix a cosmetic difference. So the
+ *  comparison normalizes, rather than the production code. */
+function nativePath(p: string): string {
+  let out: string;
+  try {
+    out = toPosixPath(realpathSync.native(p));
+  } catch {
+    out = toPosixPath(p);
+  }
+  return process.platform === 'win32' ? out.toLowerCase() : out;
 }
 
 interface World {
@@ -330,7 +356,10 @@ test('DoD 1: create --json on a HOOK-provisioned slot with declared submodules r
       // field would be worth nothing if it named a path that is not there.
       expect(s.exists).toBe(true);
       expect(existsSync(s.dir)).toBe(true);
-      expect(toPosixPath(sh(['rev-parse', '--show-toplevel'], s.dir).stdout.trim())).toBe(toPosixPath(s.dir));
+      // Compared through `nativePath` on BOTH sides — see its doc comment: on
+      // GitHub's Windows runner the hook's spelling is 8.3-short and git's is
+      // long, and the reported path is deliberately the hook's.
+      expect(nativePath(sh(['rev-parse', '--show-toplevel'], s.dir).stdout.trim())).toBe(nativePath(s.dir));
       expect(sh(['rev-parse', '--abbrev-ref', 'HEAD'], s.dir).stdout.trim()).toBe('worktree-hooked');
       // The hook published these in its env file, so that is where they came
       // from — not from a convention this command hoped the hook followed.
