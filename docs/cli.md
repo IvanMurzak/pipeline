@@ -335,7 +335,7 @@ as a duplicate dispatch, not an error.
   "hook_dir": ".pipeline/.hooks",
   "ports_requested": 4,
   "provisioner": "builtin",           // "hook" | "builtin" — who made the slot
-  "submodule_slots": [],              // populated only on the builtin path — see below
+  "submodule_slots": [],              // where a worker actually works — see below
   "ok": true,
   "status": "created",                // "created" | "reused" | "failed"
   "reused": false,
@@ -355,12 +355,52 @@ are `null`, `ports` is `{}`, and `detail` states the reason — nothing is torn
 down on a failed create (a partial slot is evidence; a retry reuses what
 survived).
 
-`submodule_slots` is populated **only** on the built-in-provisioner path — one
-entry per `--submodules` path it actually cut a worktree for:
-`{ path, name, dir, base }` (`base` is the submodule's own resolved integration
-branch). It is always `[]` on the hook path: the frozen contract does not
-report submodule slots, and this command does not invent them on the hook's
-behalf.
+##### `submodule_slots` — where a worker actually works
+
+One entry per declared submodule, **whichever side provisioned the slot**:
+
+```jsonc
+"submodule_slots": [
+  {
+    "path": "pkg/protocol",           // as declared on --submodules
+    "name": "protocol",               // its basename
+    "dir":  "C:/tmp/pipeline-worktrees/myproj-18946a9b/a4--protocol",
+    "base": "next",                   // the submodule's own integration branch
+    "source": "record",               // "record" | "env-file" | "derived"
+    "exists": true                    // is `dir` on disk right now
+  }
+]
+```
+
+`[]` — never `null`, never absent — when no submodules were declared.
+
+**Read `dir`, not `worktree_path`, when asking whether a slot holds work.** A
+dispatched worker commits in the *submodule* slot; the parent slot is empty and
+clean **by design**. A reconciliation that inspects only `worktree_path` sees an
+empty shell and is wrong about it.
+
+`source` says which channel named the directory, so a derived answer is never
+mistaken for a reported one:
+
+| `source` | where `dir` came from | how solid |
+| --- | --- | --- |
+| `record` | the **built-in provisioner** reported it as it cut it, and the slot record kept it | authoritative |
+| `env-file` | the slot's env file publishes it (`SUBMODULE_<n>_DIR`) — a **hook's** own answer, on the channel the frozen contract leaves for it | authoritative |
+| `derived` | neither channel named it, so this is the layout convention the built-in provisioner and the reference hook both follow (`<parent slot's directory>/<name>--<submodule basename>`) — the same one the built-in teardown reaps by | a well-founded guess; check `exists` |
+
+A `derived` entry carries `base: ""`: the integration branch is a fact about the
+submodule repository, not about the layout, and it is left empty rather than
+guessed. The key is always present either way.
+
+> **Before taskflow-v2 `a11` this field was always `[]` on the hook path**, on
+> the reasoning that the frozen contract does not make a hook enumerate its
+> submodule slots. It does not — and that is why the directory is *derived*
+> rather than demanded. But an empty list read as "there is nothing here" about
+> the only directory that ever holds the work, and a resumed parallel run
+> reconciled two hook-provisioned slots on exactly that reading, called them
+> empty shells, and reaped them. The frozen `PIPELINE_WT_*` contract is
+> unchanged by this: it changed what the **CLI reports**, not what a **hook
+> receives**.
 
 #### `finalize`
 
@@ -440,7 +480,12 @@ case it is. See ["The symmetry rule"](#the-symmetry-rule).
     {
       "name": "a4",
       "worktree_path": "...", "branch": "...", "env_file": "...",
-      "base_branch": "main", "submodules": [], "submodule_slots": [],
+      "base_branch": "main", "submodules": ["pkg/protocol"],
+      "submodule_slots": [            // same shape as `create` — see above
+        { "path": "pkg/protocol", "name": "protocol",
+          "dir": "C:/tmp/pipeline-worktrees/myproj-18946a9b/a4--protocol",
+          "base": "next", "source": "env-file", "exists": true }
+      ],
       "hook_dir": ".pipeline/.hooks",
       "ports_requested": 4, "port_base": 31561,
       "provisioner": "builtin",
@@ -453,6 +498,15 @@ case it is. See ["The symmetry rule"](#the-symmetry-rule).
   ]
 }
 ```
+
+⚠ **`list` is the verb a resume calls**, and `submodule_slots` here is the whole
+reason the field exists: `create`'s output is long gone by the time a run is
+reconciled. It is derived at list time (record → env file → convention), so a
+slot this process did not create answers just as fully as one it did.
+
+⚠ **`exists` is the PARENT slot's path.** `exists: true` with a clean tree is
+not evidence that a slot holds nothing — a worker works in the submodule slot.
+Read `submodule_slots[].dir` before concluding a slot is empty.
 
 `list` reports only the slots **this command's own registry** knows about —
 one JSON file per slot under `<project>/.pipeline/.runtime/worktrees/<name>.json`,
