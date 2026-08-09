@@ -38,7 +38,9 @@ bun run build          # → dist/cli.mjs (Node-compatible ESM)
 ## Documentation
 
 - **[`docs/cli.md`](docs/cli.md)** — telemetry (`pipeline stats telemetry`), the
-  opt-out switches, where the CLI writes on disk, and the uploader's lifecycle.
+  opt-out switches, where the CLI writes on disk, and the uploader's lifecycle;
+  plus the full `pipeline worktree` reference (JSON shapes, the built-in
+  provisioner/teardown, ports, the standalone hook context).
 - [Privacy tiers](https://github.com/IvanMurzak/pipeline-claude/blob/main/docs/privacy-tiers.md)
   — field by field, what leaves your machine.
 - [Connecting to the cloud](https://github.com/IvanMurzak/pipeline-claude/blob/main/docs/cloud-connect.md)
@@ -342,6 +344,20 @@ plugin's `docs/worktree-hook-contract.md`) through the **same** code path
 `PIPELINE_WT_*` assembly — the contract is frozen, so it is single-homed and an
 anti-drift test compares the two callers' environments byte for byte.
 
+**No `worktree-create.*` / `worktree-destroy.*` hook?** `create` and `destroy`
+fall back to a **built-in provisioner and teardown** — a plain `git worktree`
+outside the repository, one worktree per `--submodules` entry, an env file, and
+a block of free ports — so a repository with no hooks at all still runs
+`create → finalize → destroy` end to end (`finalize`'s built-in half is a
+no-op that reports `ok`). **That fallback is reachable from this command only**
+— a pipeline **run** with no `worktree-create.*`/`worktree-destroy.*` still
+halts / reports a failed teardown, exactly as it always has (D9). A hook,
+where one exists, always wins, including over a slot the built-in provisioner
+made. Full reference, JSON shapes, the port-precedence rule for hook authors
+(D14), and two documented limitations (`pipeline gc` does not reap
+built-in-provisioned slots; a project path with a space or shell metacharacter
+is refused): **[`docs/cli.md`](docs/cli.md#pipeline-worktree--the-worktree-hook-lifecycle-without-a-run)**.
+
 **Standalone context** (stated because the contract is frozen):
 
 - `PIPELINE_WT_PIPELINE_ROOT` and `PIPELINE_WT_PIPELINE_NAME` are the **empty
@@ -370,9 +386,14 @@ anti-drift test compares the two callers' environments byte for byte.
   post-mortem.
 - `list` reports the slots this command provisioned (recorded under
   `.pipeline/.runtime/worktrees/`) and whether each is still on disk. Finding and
-  reaping *leaked* worktrees and branches remains `pipeline gc`'s job.
-- `--ports <n>` is accepted and **recorded, not allocated** — port allocation
-  arrives with the built-in default provisioner.
+  reaping *leaked* worktrees and branches is `pipeline gc`'s job for the
+  hook-provisioned convention (`.claude/worktrees/`) — it does **not** reach
+  built-in-provisioned slots; see `docs/cli.md` for why.
+- `--ports <n>` sizes a contiguous block of free ports (default `4`; `0` for
+  none), allocated and published into the slot's env file. A `worktree-create.*`
+  hook that reports no ports of its own still gets the block appended to the
+  env file it named (D14) — only a hook that reports *non-empty* ports
+  overrides it.
 
 Exit code: `0` success · `1` the hook failed (soft-fail `{"ok":false,"detail"}`
 or hard-fail — `detail` says which) · `2` usage / invalid `--name` / invalid
