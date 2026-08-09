@@ -1,6 +1,7 @@
-// The BUILT-IN worktree provisioner — what `pipeline worktree create` does when
-// the repository has authored NO `worktree-create.*` hook (taskflow-v2 a3;
-// 02-target-architecture.md §4.2, 04-subsystem-rules.md §3).
+// The BUILT-IN worktree provisioner AND its teardown — what `pipeline worktree
+// create` / `destroy` do when the repository has authored NO `worktree-create.*`
+// / `worktree-destroy.*` hook (taskflow-v2 a3 + a5; 02-target-architecture.md
+// §4.2, 03-execution-flows.md F7, 04-subsystem-rules.md §3).
 //
 // It provisions the same three things a consumer create hook returns — a
 // worktree, its branch, an env file — plus one worktree per declared submodule.
@@ -10,15 +11,38 @@
 // repository that adopts the built-in provisioner and one that keeps the hook
 // hand a worker the SAME shaped slot.
 //
+// ── WHAT IT MAKES, IT ALSO REAPS (a5 / F-7) ─────────────────────────────────
+//
+// a3 shipped the create half alone, which left a hook-less repository able to
+// PROVISION a slot and unable to DESTROY it: `03-execution-flows.md` F7 step 4
+// is `pipeline worktree destroy`, and `08-user-workflows.md`'s release gate is
+// that no journey requires the user to write a hook. `teardownSlot` below
+// closes that: it undoes exactly what `provisionSlot` did — the parent
+// worktree, every submodule worktree, the `worktree-<name>` branch in each of
+// those repositories when `delete_branches` says so, and the env file. Port
+// reservations are released by the command (lib/port-alloc.ts owns them and
+// the hook path releases them the same way).
+//
+// THE SYMMETRY RULE, and it is the command that enforces it: a slot record
+// carries `provisioner: 'hook' | 'builtin'`, and the built-in teardown runs for
+// a `builtin` slot ONLY. A hook provisioned its slot with bookkeeping this CLI
+// cannot see — registrations, branches, env files it never wrote — so reaping
+// one from here would silently orphan it. The reverse is equally true and is
+// why a repository that grew a `worktree-destroy.*` after a built-in create
+// gets the HOOK: whichever side is asked to tear a slot down must be the side
+// that can describe what is there.
+//
 // ── D9: WHO MAY CALL THIS ───────────────────────────────────────────────────
 //
 // ONLY commands/worktree.ts — the standalone command. NOT the pipeline run
 // path. On a run, a missing `worktree-create.*` still HALTS (commands/next.ts,
-// via lib/worktree-hooks.ts), exactly as it did before this module existed.
-// Filling that branch would turn a loud halt into a silent provision and change
-// live behavior for every existing consumer, so this module is deliberately
-// NOT imported by commands/next.ts or lib/worktree-hooks.ts, and
-// tests/worktree-hook-module.test.ts asserts that absence in the source itself.
+// via lib/worktree-hooks.ts), exactly as it did before this module existed, and
+// a missing `worktree-destroy.*` still reports a failed teardown there rather
+// than falling through to the built-in. Filling either branch would turn a loud
+// failure into a silent one and change live behavior for every existing
+// consumer, so this module is deliberately NOT imported by commands/next.ts or
+// lib/worktree-hooks.ts, and tests/worktree-hook-module.test.ts asserts that
+// absence in the source itself — for the teardown as well as the provisioner.
 //
 // A repository that HAS a create hook never reaches this module at all: the
 // hook resolves, runs, and wins.
@@ -64,7 +88,7 @@
 // to `source`.
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { branchExists, iterWorktrees, type GitRunner } from './git';
@@ -651,4 +675,291 @@ export function integrationBranchFor(git: GitRunner, submoduleRepo: string, base
   if (refExists(git, submoduleRepo, `refs/remotes/origin/${wanted}`)) return wanted;
   if (refExists(git, submoduleRepo, `refs/heads/${wanted}`)) return wanted;
   return base;
+}
+
+// ---------------------------------------------------------------------------
+// The built-in TEARDOWN (a5 / F-7)
+// ---------------------------------------------------------------------------
+
+/** One submodule slot to reap: the declared path plus the directory the
+ *  provisioner cut for it. The caller takes both from the SLOT RECORD rather
+ *  than recomputing them, so a slot is reaped where it was made even if
+ *  `PIPELINE_WT_ROOT` moved between create and destroy. */
+export interface TeardownSubmodule {
+  /** Repository-relative submodule path, as it was declared on `--submodules`. */
+  path: string;
+  /** That submodule's slot directory. */
+  dir: string;
+}
+
+export interface TeardownRequest {
+  /** The slot name — already SG6-validated by the command. */
+  name: string;
+  /** The parent slot's worktree, from the slot record. */
+  worktreePath: string;
+  /** The slot's branch, from the record. `worktree-<name>` when absent. */
+  branch: string | null;
+  /** The env file the provisioner wrote, from the record. */
+  envFile: string | null;
+  submodules: TeardownSubmodule[];
+  /** The consumer project root (the command passes `process.cwd()`). */
+  projectRoot: string;
+  /** `PIPELINE_WT_DELETE_BRANCHES` in the frozen contract's terms: true on a
+   *  COMPLETED teardown, false otherwise. */
+  deleteBranches: boolean;
+}
+
+export interface TeardownOutcome {
+  /** Everything asked for is gone. False leaves the slot record in place —
+   *  a half-reaped slot must stay nameable, or it becomes a leak with no
+   *  handle. */
+  ok: boolean;
+  /** Worktrees that WERE there and are not any more (parent first). A slot
+   *  already gone is not listed — a retry must not claim a second removal. */
+  removed_worktrees: string[];
+  /** `<repo>: <branch>` per branch actually deleted. */
+  removed_branches: string[];
+  removed_env_file: string | null;
+  /** What survived, and why. Non-empty exactly when `ok` is false. */
+  kept: Array<{ path: string; reason: string }>;
+  /** The refusal/failure summary; null when ok. */
+  detail: string | null;
+}
+
+/** The branch namespace this teardown may delete in — the same one
+ *  `provisionSlot` creates in. A record naming anything else describes a branch
+ *  this module did not make, and it is kept rather than guessed at. */
+const OWNED_BRANCH_RE = /^worktree-[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** True when two spellings name the same path. `norm` alone is not enough on
+ *  Windows: git prints the LONG canonical path while a recorded 8.3 segment
+ *  (`RUNNER~1` — GitHub's Windows TEMP) survives `resolve()` untouched, so a
+ *  registered worktree would not be recognized as its own slot and the removal
+ *  would silently miss. `realpathSync.native` is what expands it. */
+function samePath(a: string, b: string): boolean {
+  if (norm(a) === norm(b)) return true;
+  const native = (p: string): string => {
+    try {
+      return norm(realpathSync.native(p));
+    } catch {
+      return norm(p);
+    }
+  };
+  return native(a) === native(b);
+}
+
+/** True when `p` is too close to a filesystem root to be a slot.
+ *
+ *  A slot lives at `<slot root>/<project-slug>/<name>` — at least two segments
+ *  below the root. The slot record is a plain JSON file on disk that a crash, a
+ *  bad merge or a text editor can shorten, and `rmSync(recursive)` over `C:/`
+ *  or `/home` on the strength of one is not a risk worth carrying when the
+ *  check costs three lines. */
+function tooShallowToDelete(p: string): boolean {
+  const body = toPosixPath(p)
+    .replace(/^[A-Za-z]:\//, '')
+    .replace(/^\/+/, '');
+  return body.split('/').filter(Boolean).length < 2;
+}
+
+/** Remove ONE slot worktree from `repo` — the parent's, or a submodule's.
+ *
+ *  Three cases, in order:
+ *    * registered with git → `git worktree remove --force` (the record and the
+ *      directory die together, which `rmSync` alone cannot do);
+ *    * a directory with no registration (crash debris, or a `worktree remove`
+ *      that half-ran) → deleted directly;
+ *    * neither → nothing to do, and NOT reported as a removal, so a retry after
+ *      a partial failure does not claim work it did not perform.
+ *
+ *  `existed:false` distinguishes the third case for the caller. */
+function removeSlotWorktree(
+  git: GitRunner,
+  repo: string,
+  slotPath: string,
+  repoTop: string,
+  label: string,
+): { ok: true; existed: boolean } | { ok: false; reason: string } {
+  // Two refusals before anything is deleted. The built-in provisioner only ever
+  // creates slots OUTSIDE the project (it fails the create otherwise), so a
+  // record naming a path inside it describes something this module did not
+  // make — and deleting the user's checkout is the one mistake with no undo.
+  if (isUnder(slotPath, repoTop)) {
+    return {
+      ok: false,
+      reason: `refusing to delete the ${label} ${toPosixPath(slotPath)}: it is inside the repository ${toPosixPath(repoTop)}, and the built-in provisioner never creates a slot there`,
+    };
+  }
+  if (isUnder(process.cwd(), slotPath)) {
+    return {
+      ok: false,
+      reason: `refusing to delete the ${label} ${toPosixPath(slotPath)}: it is (or contains) the current working directory`,
+    };
+  }
+  if (tooShallowToDelete(slotPath)) {
+    return {
+      ok: false,
+      reason: `refusing to delete the ${label} ${toPosixPath(slotPath)}: a slot lives at <root>/<project>/<name> and this path is too close to a filesystem root to be one`,
+    };
+  }
+
+  git(['worktree', 'prune'], repo); // drop records whose directory already went
+  const registered = iterWorktrees(git, repo).find((w) => samePath(w.path, slotPath));
+  const onDisk = existsSync(slotPath);
+  if (!registered && !onDisk) return { ok: true, existed: false };
+
+  if (registered) {
+    // `--force`: the slot is a machine-made scratch checkout and a worker's
+    // uncommitted droppings must not strand it. Git still refuses when the
+    // directory is LOCKED or in use — the Windows case — and that refusal is
+    // returned rather than worked around.
+    const rm = git(['worktree', 'remove', '--force', registered.path], repo);
+    if (rm.code !== 0) {
+      return {
+        ok: false,
+        reason: `git worktree remove failed for the ${label} ${toPosixPath(slotPath)} (exit ${rm.code}): ${(rm.stderr || rm.stdout).trim() || 'no output'}`,
+      };
+    }
+  }
+  if (existsSync(slotPath)) {
+    try {
+      rmSync(slotPath, { recursive: true, force: true });
+    } catch (e) {
+      return {
+        ok: false,
+        reason: `could not delete the ${label} directory ${toPosixPath(slotPath)}: ${String((e as Error).message ?? e)}`,
+      };
+    }
+  }
+  git(['worktree', 'prune'], repo);
+  return { ok: true, existed: true };
+}
+
+/** Delete the slot's branch in `repo`, when `delete_branches` says so.
+ *
+ *  `-D`, not `-d`, and deliberately: a run branch is routinely SQUASH-merged,
+ *  which reads as "unmerged" to git forever, so a safe delete could never reap
+ *  a landed slot and DoD 1's "no branch left behind" would be unachievable. The
+ *  blast radius is bounded instead — only the machine-owned `worktree-*`
+ *  namespace this provisioner creates in, only on `--outcome completed` (a
+ *  halted slot keeps its branch, which is the whole point of halting), and only
+ *  after the worktree holding it was successfully removed. */
+function deleteSlotBranch(git: GitRunner, repo: string, branch: string): { deleted: boolean; reason: string | null } {
+  if (!OWNED_BRANCH_RE.test(branch)) {
+    return { deleted: false, reason: `branch '${branch}' is outside the machine-owned worktree-* namespace — left alone` };
+  }
+  if (!branchExists(git, repo, branch)) return { deleted: false, reason: null };
+  const del = git(['branch', '-D', branch], repo);
+  if (del.code !== 0) {
+    return { deleted: false, reason: `git branch -D ${branch} failed (exit ${del.code}): ${(del.stderr || del.stdout).trim() || 'no output'}` };
+  }
+  return { deleted: true, reason: null };
+}
+
+/** Reap the slot `provisionSlot` made.
+ *
+ *  BEST-EFFORT ACROSS PARTS, ALL-OR-NOTHING ABOUT THE RECORD: each worktree is
+ *  attempted even if an earlier one failed (a slot half on disk is worse than a
+ *  slot mostly gone), a branch is only deleted once its own worktree is
+ *  actually gone, and the env file — the channel that DESCRIBES the slot — is
+ *  removed only when nothing is left to describe. Any failure returns
+ *  `ok: false`, which is the caller's signal to KEEP the slot record so the
+ *  teardown can be retried by name.
+ *
+ *  It is idempotent: a second call over an already-reaped slot succeeds and
+ *  reports no removals. */
+export function teardownSlot(req: TeardownRequest, git: GitRunner): TeardownOutcome {
+  const removed_worktrees: string[] = [];
+  const removed_branches: string[] = [];
+  const kept: Array<{ path: string; reason: string }> = [];
+  let removed_env_file: string | null = null;
+
+  const top = git(['rev-parse', '--show-toplevel'], req.projectRoot);
+  if (top.code !== 0 || !top.stdout.trim()) {
+    return {
+      ok: false,
+      removed_worktrees,
+      removed_branches,
+      removed_env_file,
+      kept: [{ path: toPosixPath(req.projectRoot), reason: 'not a git repository' }],
+      detail:
+        `not a git repository: ${toPosixPath(req.projectRoot)} — the built-in worktree teardown needs one ` +
+        `(a worktree-destroy.* hook, if you have one, is used instead and may not)`,
+    };
+  }
+  const repoTop = toPosixPath(top.stdout.trim());
+  const branch = req.branch ?? `worktree-${req.name}`;
+
+  /** One repository's half of the teardown: its worktree, then its branch. */
+  const reap = (repo: string, slotPath: string, label: string): void => {
+    const r = removeSlotWorktree(git, repo, slotPath, repoTop, label);
+    if (!r.ok) {
+      kept.push({ path: toPosixPath(slotPath), reason: r.reason });
+      return;
+    }
+    if (r.existed) removed_worktrees.push(toPosixPath(slotPath));
+    if (!req.deleteBranches) return;
+    const b = deleteSlotBranch(git, repo, branch);
+    if (b.deleted) removed_branches.push(`${toPosixPath(repo)}: ${branch}`);
+    else if (b.reason) kept.push({ path: `${toPosixPath(repo)}#${branch}`, reason: b.reason });
+  };
+
+  // The parent first — it is the slot a worker actually sat in, and the one an
+  // operator watching a failed teardown cares most about.
+  reap(repoTop, req.worktreePath, 'worktree');
+
+  // Then one per submodule, each removed from THAT submodule's repository (a
+  // submodule slot is a worktree of the submodule, not of the superproject —
+  // `git worktree remove` run in the parent would not know it).
+  for (const sub of req.submodules) {
+    reap(`${repoTop}/${sub.path}`, sub.dir, `submodule '${sub.path}' slot`);
+  }
+
+  // The env file describes the slot. While any part of the slot survives, so
+  // must its description.
+  if (req.envFile !== null && kept.length === 0 && existsSync(req.envFile)) {
+    if (isUnder(req.envFile, repoTop)) {
+      // The built-in provisioner writes its env file beside the slot, outside
+      // the repository. One inside it is not ours to delete.
+      kept.push({
+        path: toPosixPath(req.envFile),
+        reason: `refusing to delete the env file: it is inside the repository ${repoTop}, and the built-in provisioner writes its env file beside the slot`,
+      });
+    } else {
+      try {
+        unlinkSync(req.envFile);
+        removed_env_file = toPosixPath(req.envFile);
+      } catch (e) {
+        kept.push({
+          path: toPosixPath(req.envFile),
+          reason: `could not delete the env file: ${String((e as Error).message ?? e)}`,
+        });
+      }
+    }
+  }
+
+  const ok = kept.length === 0;
+  return {
+    ok,
+    removed_worktrees,
+    removed_branches,
+    removed_env_file,
+    kept,
+    detail: ok
+      ? null
+      : `the built-in teardown could not reap ${kept.length === 1 ? 'one part' : `${kept.length} parts`} of slot '${req.name}': ` +
+        kept.map((k) => `${k.path} — ${k.reason}`).join('; ') +
+        `. The slot record is kept so the teardown can be retried by name once the cause is cleared.`,
+  };
+}
+
+/** Where `provisionSlot` would have put the slot directory of submodule `rel`
+ *  for a slot whose PARENT worktree is `worktreePath`.
+ *
+ *  The fallback for slot records written before the submodule directories were
+ *  recorded in them (a3's shape). Derived from the parent's own path rather
+ *  than from `PIPELINE_WT_ROOT`, because the record is what the slot actually
+ *  is and the environment variable is only what it would be today. */
+export function derivedSubmoduleSlotDir(worktreePath: string, name: string, rel: string): string {
+  return `${toPosixPath(dirname(worktreePath))}/${name}--${slugOf(basename(rel))}`;
 }

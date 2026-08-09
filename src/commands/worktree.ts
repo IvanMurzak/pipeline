@@ -56,6 +56,34 @@
 // lib/worktree-hooks.ts uses, so "is there a hook?" cannot answer differently
 // in the two places.
 //
+// THE BUILT-IN TEARDOWN (taskflow-v2 a5; 03-execution-flows.md F7 step 4).
+// What this command can provision, it can also reap: with no
+// `worktree-destroy.*` in the hook dir, `destroy --outcome completed` calls
+// lib/worktree-provision.ts's `teardownSlot` — the parent worktree, every
+// submodule worktree, the branch, the env file — and this command releases the
+// slot's port reservations, exactly as it does after a hook teardown.
+// `--outcome halted` preserves the slot WHOLE, ports included. `finalize` has a
+// built-in too, and it is a NO-OP that reports ok (see `finalizeSlot`).
+//
+// TWO CONDITIONS GATE THE BUILT-IN TEARDOWN, and the second is the symmetry
+// rule that decides every edge case:
+//
+//   1. the hook is ABSENT — a `worktree-destroy.*` that exists always wins,
+//      including over a slot the built-in provisioner made (the JSON says so in
+//      `detail`, so the choice is never silent); and
+//   2. the slot record says `provisioner: 'builtin'` — the built-in teardown
+//      reaps only what the built-in provisioner made. A hook provisioned its
+//      slot with bookkeeping this CLI never saw, so tearing one down from here
+//      would orphan it; that case is REFUSED with a stated reason instead.
+//      Unknown provenance (no record, or a record that predates the field)
+//      reads as `hook` — the conservative half of the rule, and the behavior
+//      this command already had.
+//
+// D9 again: none of the above is reachable from a pipeline RUN either. A run
+// whose repository has no `worktree-destroy.*` still reports a FAILED teardown
+// (lib/worktree-hooks.ts), and tests/worktree-hook-module.test.ts asserts both
+// the runtime behavior and the absence of the import.
+//
 // PORTS (taskflow-v2 a4; 02-target-architecture.md §4.2 item 3). Every slot
 // gets a contiguous block of free ports, because a worktree isolates files and
 // not TCP ports — two workers each starting a dev server on 3000 is the failure
@@ -101,13 +129,22 @@ import {
   reservationDirFor,
   resolvePortRange,
 } from '../lib/port-alloc';
-import { provisionSlot, slotRootBase, unsafeEnvEntry, type ProvisionedSubmodule } from '../lib/worktree-provision';
+import {
+  derivedSubmoduleSlotDir,
+  provisionSlot,
+  slotRootBase,
+  teardownSlot,
+  unsafeEnvEntry,
+  type ProvisionedSubmodule,
+  type TeardownSubmodule,
+} from '../lib/worktree-provision';
 import {
   noopEmitter,
   runCreateFailedCleanup,
   runCreateHook,
   runDestroyHook,
   runFinalizeHook,
+  type FinalizeInfo,
   type HookPorts,
   type WorktreeHookPaths,
 } from '../lib/worktree-hooks';
@@ -162,6 +199,16 @@ export interface SlotRecord {
   env_file: string | null;
   base_branch: string;
   submodules: string[];
+  /** The submodule slots the BUILT-IN provisioner actually cut, as it reported
+   *  them. Always `[]` on the hook path — the frozen contract does not report
+   *  submodule slots and this command must not invent them.
+   *
+   *  Recorded rather than recomputed because it is what teardown reaps: a slot
+   *  must be torn down where it was MADE, and `PIPELINE_WT_ROOT` can move
+   *  between create and destroy. Records that predate the field read back as
+   *  `[]` and teardown falls back to the same derivation the provisioner used
+   *  (`derivedSubmoduleSlotDir`). */
+  submodule_slots: ProvisionedSubmodule[];
   /** The hook dir AS DECLARED (possibly relative) — replayed by finalize/destroy. */
   hook_dir: string;
   /** The EFFECTIVE block size for this slot: `--ports N`, or the default when
@@ -198,6 +245,27 @@ function slotFile(projectRoot: string, name: string): string {
   return join(slotsDir(projectRoot), `${name}.json`);
 }
 
+/** The record's `submodule_slots`, defensively: the file is on disk between
+ *  processes and a truncated or hand-edited entry must not become a PATH that
+ *  teardown then deletes. Only entries with both a declared path and a
+ *  directory survive. */
+function readSubmoduleSlots(raw: unknown): ProvisionedSubmodule[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ProvisionedSubmodule[] = [];
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const e = entry as Partial<ProvisionedSubmodule>;
+    if (typeof e.path !== 'string' || !e.path || typeof e.dir !== 'string' || !e.dir) continue;
+    out.push({
+      path: e.path,
+      name: typeof e.name === 'string' ? e.name : e.path,
+      dir: e.dir,
+      base: typeof e.base === 'string' ? e.base : '',
+    });
+  }
+  return out;
+}
+
 export function readSlot(projectRoot: string, name: string): SlotRecord | null {
   try {
     const raw = JSON.parse(readFileSync(slotFile(projectRoot, name), 'utf8')) as Partial<SlotRecord>;
@@ -209,6 +277,7 @@ export function readSlot(projectRoot: string, name: string): SlotRecord | null {
       env_file: typeof raw.env_file === 'string' ? raw.env_file : null,
       base_branch: typeof raw.base_branch === 'string' ? raw.base_branch : 'main',
       submodules: Array.isArray(raw.submodules) ? raw.submodules.filter((s): s is string => typeof s === 'string') : [],
+      submodule_slots: readSubmoduleSlots(raw.submodule_slots),
       hook_dir: typeof raw.hook_dir === 'string' ? raw.hook_dir : DEFAULT_HOOK_DIR,
       ports_requested: typeof raw.ports_requested === 'number' ? raw.ports_requested : null,
       port_base: typeof raw.port_base === 'number' ? raw.port_base : null,
@@ -679,6 +748,9 @@ function createSlot(args: WorktreeArgs, git: GitRunner): { output: CreateOutput;
     env_file,
     base_branch: args.base,
     submodules: args.submodules,
+    // What teardown will have to reap — recorded now, while the provisioner is
+    // the one saying what it made.
+    submodule_slots: submoduleSlots,
     hook_dir: hookDir,
     ports_requested: portCount,
     port_base: portBase,
@@ -742,7 +814,40 @@ export interface FinalizeOutput {
   name: string;
   worktree_path: string | null;
   outcome: 'completed';
+  /** WHO finalized: the consumer's `worktree-finalize.*` (`hook`), or the
+   *  CLI's built-in no-op (`builtin`). The `ok:true` of a built-in finalize
+   *  means "nothing was required and nothing was done" — NOT "the work was
+   *  landed" — and this field is how an orchestrator tells them apart. */
+  finalized_by: 'hook' | 'builtin';
+  /** Which side provisioned the slot (`hook` when unknown). */
+  provisioner: 'hook' | 'builtin';
   detail: string | null;
+}
+
+/** THE BUILT-IN FINALIZE IS A NO-OP THAT REPORTS OK, and the reasoning is worth
+ *  stating because "do nothing, successfully" looks like a stub:
+ *
+ *  On the run path, `finalize` is where a consumer COMMITS AND PUSHES. There is
+ *  no defensible default for that — which remote, which branch, what message,
+ *  whether to sign, whether to open a pull request, whether to merge — and
+ *  every one of those choices is irreversible in a way the create path's is
+ *  not: a wrong worktree is a directory `destroy` reaps, a wrong push is
+ *  somebody else's history. A built-in provisioner can copy the reference
+ *  hook's layout because a layout is a convention; there is no equivalent
+ *  convention for landing work.
+ *
+ *  Refusing instead (`ok:false`) was the other candidate and it fails the goal:
+ *  it would re-break `create → finalize → destroy` in a hook-less repository,
+ *  which is exactly the asymmetry F-7 exists to close.
+ *
+ *  So: succeed, do nothing, and SAY SO — in `detail` and in `finalized_by`, so
+ *  no caller can read `ok:true` as "my branch is pushed". */
+function builtinFinalizeDetail(hookDirAbs: string): string {
+  return (
+    `no ${hookDirAbs}/worktree-finalize.* hook found — the built-in finalize is a NO-OP: ` +
+    `nothing was committed, pushed, merged or tagged, and the slot is unchanged. ` +
+    `Author a worktree-finalize.* hook if this slot's work has to be landed; a hook always wins over the built-in path.`
+  );
 }
 
 function finalizeSlot(args: WorktreeArgs): { output: FinalizeOutput; code: number } {
@@ -750,18 +855,29 @@ function finalizeSlot(args: WorktreeArgs): { output: FinalizeOutput; code: numbe
   const name = args.name!;
   const slot = readSlot(projectRoot, name);
   const hookDir = args.hookDir ?? slot?.hook_dir ?? DEFAULT_HOOK_DIR;
-  const res = runFinalizeHook(
-    {
-      run_id: name,
-      name,
-      base_branch: args.baseGiven ? args.base : (slot?.base_branch ?? args.base),
-      submodules: args.submodulesGiven ? args.submodules : (slot?.submodules ?? []),
-      worktree_path: slot?.worktree_path ?? null,
-      outcome: 'completed',
-    },
-    hookPathsFor(projectRoot, hookDir),
-    noopEmitter,
-  );
+  const paths = hookPathsFor(projectRoot, hookDir);
+  // Same two conditions as the teardown, and the same conservative default: a
+  // slot whose provenance is unknown is treated as a HOOK's, so a repository
+  // with a create hook and no finalize hook keeps failing loudly exactly as it
+  // did before this path existed.
+  const hasHook = resolveHookScript(paths.hookDirAbs, 'worktree-finalize') !== null;
+  const provisioner: 'hook' | 'builtin' = slot?.provisioner ?? 'hook';
+  const builtin = !hasHook && provisioner === 'builtin' && slot !== null;
+
+  const res: FinalizeInfo = builtin
+    ? { ok: true, detail: builtinFinalizeDetail(paths.hookDirAbs) }
+    : runFinalizeHook(
+        {
+          run_id: name,
+          name,
+          base_branch: args.baseGiven ? args.base : (slot?.base_branch ?? args.base),
+          submodules: args.submodulesGiven ? args.submodules : (slot?.submodules ?? []),
+          worktree_path: slot?.worktree_path ?? null,
+          outcome: 'completed',
+        },
+        paths,
+        noopEmitter,
+      );
   if (slot && res.ok) {
     slot.finalized = true;
     slot.updated_at = nowIso();
@@ -774,6 +890,8 @@ function finalizeSlot(args: WorktreeArgs): { output: FinalizeOutput; code: numbe
       name,
       worktree_path: slot?.worktree_path ?? null,
       outcome: 'completed',
+      finalized_by: builtin ? 'builtin' : 'hook',
+      provisioner,
       detail: res.detail,
     },
     code: res.ok ? 0 : 1,
@@ -796,30 +914,128 @@ export interface DestroyOutput {
   reaped: boolean;
   /** The slot record is still tracked — `halted`, or a teardown that failed. */
   preserved: boolean;
+  /** WHO tore it down — the same distinction `ports_source` draws for ports
+   *  (a4). `hook`: the consumer's `worktree-destroy.*` ran. `builtin`: this
+   *  CLI's own teardown did. `none`: neither, and `detail` says why. */
+  teardown_by: 'hook' | 'builtin' | 'none';
+  /** Which side PROVISIONED the slot, from its record (`hook` when unknown).
+   *  Together with `teardown_by` it makes the symmetry rule readable off the
+   *  JSON: `builtin`/`hook` is a slot whose repository grew a destroy hook. */
+  provisioner: 'hook' | 'builtin';
+  /** Worktrees the BUILT-IN teardown removed (parent first). Always `[]` on the
+   *  hook path — what a hook removes is the hook's to report, in `detail`. */
+  removed_worktrees: string[];
+  /** `<repo>: <branch>` per branch the built-in teardown deleted. */
+  removed_branches: string[];
+  removed_env_file: string | null;
   detail: string | null;
 }
 
-function destroySlot(args: WorktreeArgs): { output: DestroyOutput; code: number } {
+/** The submodule slots to reap for `slot`: what `create` recorded, or — for a
+ *  record written before that field existed — the same derivation the
+ *  provisioner used, from the parent slot's own path. */
+function teardownSubmodulesOf(slot: SlotRecord): TeardownSubmodule[] {
+  if (slot.submodule_slots.length) return slot.submodule_slots.map((s) => ({ path: s.path, dir: s.dir }));
+  return slot.submodules.map((rel) => ({
+    path: rel,
+    dir: derivedSubmoduleSlotDir(slot.worktree_path, slot.name, rel),
+  }));
+}
+
+function destroySlot(args: WorktreeArgs, git: GitRunner): { output: DestroyOutput; code: number } {
   const projectRoot = projectRootOf();
   const name = args.name!;
   const slot = readSlot(projectRoot, name);
   const hookDir = args.hookDir ?? slot?.hook_dir ?? DEFAULT_HOOK_DIR;
+  const paths = hookPathsFor(projectRoot, hookDir);
   // Outcome-aware, mirroring the engine: a COMPLETED slot's branch dies with
   // it; a HALTED one is preserved for post-mortem and resume.
   const deleteBranches = args.outcome === 'completed';
-  const res = runDestroyHook(
-    {
-      run_id: name,
-      name,
-      worktree_path: slot?.worktree_path ?? null,
-      outcome: args.outcome,
-      delete_branches: deleteBranches,
-    },
-    hookPathsFor(projectRoot, hookDir),
-    noopEmitter,
-  );
+  // The SAME resolution function the run path uses (lib/hooks.ts), so "is there
+  // a hook?" cannot answer differently in two places.
+  const hasHook = resolveHookScript(paths.hookDirAbs, 'worktree-destroy') !== null;
+  const provisioner: 'hook' | 'builtin' = slot?.provisioner ?? 'hook';
 
-  const reaped = res.ok && args.outcome === 'completed';
+  let ok: boolean;
+  let detail: string | null;
+  let teardown_by: DestroyOutput['teardown_by'];
+  let removed_worktrees: string[] = [];
+  let removed_branches: string[] = [];
+  let removed_env_file: string | null = null;
+
+  if (hasHook) {
+    // A hook that exists ALWAYS wins — including over a slot the built-in
+    // provisioner made. Said out loud in `detail` rather than left to be
+    // inferred: a repository that grew a destroy hook after the fact is exactly
+    // the case where an operator wants to know which side ran.
+    const res = runDestroyHook(
+      {
+        run_id: name,
+        name,
+        worktree_path: slot?.worktree_path ?? null,
+        outcome: args.outcome,
+        delete_branches: deleteBranches,
+      },
+      paths,
+      noopEmitter,
+    );
+    teardown_by = 'hook';
+    ok = res.ok;
+    const note =
+      provisioner === 'builtin'
+        ? `this slot was provisioned by the built-in provisioner, but ${hookDir}/worktree-destroy.* exists and a hook always wins — the HOOK tore it down`
+        : null;
+    detail = note === null ? res.detail : res.detail === null ? note : `${note} — ${res.detail}`;
+  } else if (provisioner === 'builtin' && slot !== null) {
+    teardown_by = 'builtin';
+    if (args.outcome !== 'completed') {
+      // PRESERVED WHOLE. Nothing is removed on `halted`, which is what makes
+      // the slot resumable — and its port reservation stays claimed for the
+      // same reason (a4): a preserved slot still owns its ports.
+      ok = true;
+      detail =
+        `no ${paths.hookDirAbs}/worktree-destroy.* hook found — the built-in teardown PRESERVED this slot ` +
+        `(--outcome ${args.outcome}): its worktree, branch, env file and port reservation are untouched. ` +
+        `Re-run with --outcome completed to reap it.`;
+    } else {
+      const res = teardownSlot(
+        {
+          name,
+          worktreePath: slot.worktree_path,
+          branch: slot.branch,
+          envFile: slot.env_file,
+          submodules: teardownSubmodulesOf(slot),
+          projectRoot,
+          deleteBranches,
+        },
+        git,
+      );
+      ok = res.ok;
+      removed_worktrees = res.removed_worktrees;
+      removed_branches = res.removed_branches;
+      removed_env_file = res.removed_env_file;
+      detail = res.ok
+        ? `no ${paths.hookDirAbs}/worktree-destroy.* hook found — the built-in teardown reaped this slot (the built-in provisioner made it)`
+        : res.detail;
+    }
+  } else {
+    // THE REFUSAL SIDE OF THE SYMMETRY RULE. A slot this CLI did not provision
+    // is not this CLI's to reap: a hook's bookkeeping is invisible from here,
+    // and a built-in teardown that guessed at it would orphan the parts it
+    // guessed wrong. Same exit code the missing-hook case has always had.
+    teardown_by = 'none';
+    ok = false;
+    detail =
+      slot === null
+        ? `no slot record for '${name}' under .pipeline/.runtime/worktrees/, and no ${paths.hookDirAbs}/worktree-destroy.* hook — ` +
+          `there is nothing this command can safely tear down. Either the slot was already reaped (a completed destroy drops its record), or it was never created here; ` +
+          `a slot this command never recorded may be a hook's, and a hook's bookkeeping is not this CLI's to guess at.`
+        : `slot '${name}' was provisioned by a ${slot.hook_dir}/worktree-create.* hook, and there is no ${paths.hookDirAbs}/worktree-destroy.* hook to reap it. ` +
+          `The built-in teardown REFUSES to reap a hook-provisioned slot: the hook owns bookkeeping this CLI never wrote — its own registrations, branches and env files — and reaping around it would silently orphan them. ` +
+          `Restore the destroy hook (a hook always wins), or tear the slot down by hand and delete .pipeline/.runtime/worktrees/${name}.json.`;
+  }
+
+  const reaped = ok && args.outcome === 'completed';
   if (reaped) {
     deleteSlot(projectRoot, name);
     // The slot is gone, so its ports go back to the pool NOW rather than
@@ -836,17 +1052,34 @@ function destroySlot(args: WorktreeArgs): { output: DestroyOutput; code: number 
   return {
     output: {
       command: 'worktree destroy',
-      ok: res.ok,
+      ok,
       name,
       worktree_path: slot?.worktree_path ?? null,
       outcome: args.outcome,
       delete_branches: deleteBranches,
       reaped,
       preserved: !reaped,
-      detail: res.detail,
+      teardown_by,
+      provisioner,
+      removed_worktrees,
+      removed_branches,
+      removed_env_file,
+      detail,
     },
-    code: res.ok ? 0 : 1,
+    code: ok ? 0 : 1,
   };
+}
+
+function humanDestroy(o: DestroyOutput): string {
+  if (!o.ok) return `worktree destroy ${o.name}: FAILED — ${o.detail ?? 'unknown reason'}\n`;
+  const by =
+    o.teardown_by === 'hook' ? 'a worktree-destroy.* hook' : 'the built-in teardown (no worktree-destroy.* found)';
+  const lines = [`worktree ${o.reaped ? 'destroyed (reaped)' : 'destroyed (preserved)'} ${o.name}`, `  by:       ${by}`];
+  for (const p of o.removed_worktrees) lines.push(`  removed:  ${p}`);
+  for (const b of o.removed_branches) lines.push(`  branch:   ${b} (deleted)`);
+  if (o.removed_env_file) lines.push(`  env file: ${o.removed_env_file} (deleted)`);
+  if (o.detail) lines.push(`  note:     ${o.detail}`);
+  return lines.join('\n') + '\n';
 }
 
 // ---------------------------------------------------------------------------
@@ -921,13 +1154,33 @@ const USAGE = [
   '    slashes on every platform.',
   '  A hook, where one exists, ALWAYS wins — the provisioner is inert then. It is',
   '  reachable from this command only: a pipeline RUN with no worktree-create.*',
-  '  still halts, exactly as before. `create` ONLY: finalize and destroy still',
-  '  require their own hooks; `pipeline gc` reaps what the provisioner made.',
+  '  still halts, exactly as before.',
   '  Environment: PIPELINE_WT_ROOT (where slots live; default C:/tmp on Windows,',
   '  else the system temp dir) · PIPELINE_WT_INTEGRATION_BRANCH (default `next`)',
   '  · PIPELINE_WT_FETCH=1 (fetch origin first; off by default so create never',
   '  blocks on a remote) · PIPELINE_WT_PORT_RANGE=min-max (default 20000-32767).',
   '  Requires git 2.20+.',
+  '',
+  'NO worktree-finalize.* / worktree-destroy.* HOOK? What this command',
+  'provisioned, it also reaps — so a repository with NO hooks at all runs the',
+  'whole lifecycle: create -> finalize -> destroy.',
+  '  * finalize is a NO-OP that reports ok. finalize is where a consumer commits',
+  '    and pushes, and there is no defensible default for which remote, which',
+  '    branch, or what message — so nothing is committed, pushed, merged or',
+  '    tagged, --json says finalized_by=builtin, and the note says so too.',
+  '  * destroy --outcome completed REAPS what the built-in provisioner made: the',
+  '    worktree, every submodule worktree, the worktree-<name> branch in each of',
+  '    those repositories, the env file, the port reservation and the slot',
+  '    record. --outcome halted PRESERVES all of it, ports included.',
+  '  * A worktree-destroy.* hook, where one exists, ALWAYS wins — including over',
+  '    a slot the built-in provisioner made (--json: teardown_by=hook while',
+  '    provisioner=builtin, and the note says which ran).',
+  '  * The reverse is REFUSED: the built-in teardown never reaps a slot a hook',
+  '    provisioned. A hook keeps bookkeeping this CLI never wrote, and guessing',
+  '    at it would orphan it — so `destroy` exits 1 with the reason instead.',
+  '  Reachable from this command only (D9): a pipeline RUN with no',
+  '  worktree-destroy.* still reports a failed teardown, exactly as before.',
+  '  `pipeline gc` remains the janitor for what NO command provisioned.',
   '',
   'PORTS. Every slot gets its own contiguous block of FREE ports — --ports N,',
   '  default 4, `--ports 0` for none — published in the env file as PORT_BASE,',
@@ -957,11 +1210,14 @@ const USAGE = [
   '            --ports <n> allocates a contiguous block of n free ports',
   '            (default 4; 0 for none) — see PORTS above.',
   '  finalize  Run the mandatory terminal hook for the slot (strict',
-  '            must-succeed: only an explicit {"ok":true} passes).',
+  '            must-succeed: only an explicit {"ok":true} passes). With no',
+  '            hook, a built-in NO-OP reports ok for a slot this command',
+  '            provisioned itself (--json: finalized_by).',
   '  destroy   Tear the slot down. --outcome completed (default) REAPS —',
   '            PIPELINE_WT_DELETE_BRANCHES=1 and the slot record is dropped;',
   '            --outcome halted PRESERVES — DELETE_BRANCHES=0 and the record',
-  '            is kept for post-mortem.',
+  '            is kept for post-mortem. With no hook, the built-in teardown',
+  '            reaps a slot this command provisioned (--json: teardown_by).',
   '  list      The slots this command provisioned, and whether each is still on',
   '            disk. Leak detection and reaping belong to `pipeline gc`.',
   '',
@@ -1033,14 +1289,7 @@ export function runWorktree(args: string[], git: GitRunner = realGit): number {
     );
     return code;
   }
-  const { output, code } = destroySlot(parsed);
-  emit(
-    parsed.json,
-    output,
-    output.ok
-      ? `worktree ${output.reaped ? 'destroyed (reaped)' : 'destroyed (preserved)'} ${output.name}` +
-          `${output.detail ? ` — ${output.detail}` : ''}\n`
-      : `worktree destroy ${output.name}: FAILED — ${output.detail ?? 'unknown reason'}\n`,
-  );
+  const { output, code } = destroySlot(parsed, git);
+  emit(parsed.json, output, humanDestroy(output));
   return code;
 }
