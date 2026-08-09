@@ -250,6 +250,7 @@ test('a repository with NO hooks runs the whole lifecycle through the command: c
     expect(existsSync(wt)).toBe(true);
     expect(branchExists(root, 'worktree-solo')).toBe(true);
     expect(readRecord(root, 'solo').finalized).toBe(true);
+    expect(readRecord(root, 'solo').finalized_by).toBe('builtin');
 
     // ---- destroy --outcome completed: it reaps -----------------------------
     const gone = callJson(['destroy', '--name', 'solo', '--outcome', 'completed']);
@@ -701,5 +702,106 @@ test('finalize in a repository WITH a create hook and NO finalize hook still FAI
     expect(ok.code).toBe(0);
     expect(ok.json.finalized_by).toBe('hook');
     expect(ok.json.detail).toBe('pushed 1 commit');
+    // taskflow-v2 a10: PERSISTED, not just reported in the one-shot output —
+    // readable straight off the record, and off `list`, with no finalize
+    // re-run in between.
+    expect(readRecord(root, 'strict').finalized_by).toBe('hook');
+    expect(callJson(['list']).json.slots.find((s: any) => s.name === 'strict').finalized_by).toBe('hook');
   });
 }, 240000);
+
+// ---------------------------------------------------------------------------
+// (9) taskflow-v2 a10 — `finalized_by` is PERSISTED, so `list` can tell
+// a builtin no-op finalize from a real (hook) one WITHOUT re-running finalize.
+// ---------------------------------------------------------------------------
+
+test('a slot finalized by the BUILT-IN no-op and one finalized by a HOOK are distinguishable from `list` alone, in both --json and human output', () => {
+  // ---- builtin: no hooks at all -------------------------------------------
+  const biRoot = scaffold();
+  inProject(biRoot, '23300-23349', () => {
+    expect(callJson(['create', '--name', 'bi', '--ports', '0']).code).toBe(0);
+    const fin = callJson(['finalize', '--name', 'bi']);
+    expect(fin.code).toBe(0);
+    expect(fin.json.finalized_by).toBe('builtin');
+
+    // THE ASSERTION THIS TEST EXISTS FOR: `list`, on its own, after the fact.
+    const listed = callJson(['list']);
+    expect(listed.code).toBe(0);
+    const slot = listed.json.slots.find((s: any) => s.name === 'bi');
+    expect(slot.finalized).toBe(true);
+    expect(slot.finalized_by).toBe('builtin');
+    expect(readRecord(biRoot, 'bi').finalized_by).toBe('builtin');
+
+    const human = call(['list']);
+    expect(human.out).toContain('finalized_by=builtin');
+  });
+
+  // ---- hook: a real worktree-finalize.* ran -------------------------------
+  const hkRoot = scaffold({
+    create: CREATE_HOOK,
+    finalize: `process.stdout.write(JSON.stringify({ ok: true, detail: 'pushed 1 commit' }) + '\\n');`,
+  });
+  inProject(hkRoot, '23350-23399', () => {
+    expect(callJson(['create', '--name', 'hk', '--ports', '0']).code).toBe(0);
+    const fin = callJson(['finalize', '--name', 'hk']);
+    expect(fin.code).toBe(0);
+    expect(fin.json.finalized_by).toBe('hook');
+
+    const listed = callJson(['list']);
+    expect(listed.code).toBe(0);
+    const slot = listed.json.slots.find((s: any) => s.name === 'hk');
+    expect(slot.finalized).toBe(true);
+    expect(slot.finalized_by).toBe('hook');
+    expect(readRecord(hkRoot, 'hk').finalized_by).toBe('hook');
+
+    const human = call(['list']);
+    expect(human.out).toContain('finalized_by=hook');
+  });
+}, 240000);
+
+test('a slot that has NOT been finalized is distinguishable from both — finalized_by is null, never silently defaulted', () => {
+  const root = scaffold();
+  inProject(root, '23400-23449', () => {
+    expect(callJson(['create', '--name', 'untouched', '--ports', '0']).code).toBe(0);
+
+    const listed = callJson(['list']);
+    const slot = listed.json.slots.find((s: any) => s.name === 'untouched');
+    expect(slot.finalized).toBe(false);
+    expect(slot.finalized_by).toBeNull();
+    expect(readRecord(root, 'untouched').finalized_by).toBeNull();
+
+    // Never finalized, so the human line carries no finalized_by note at all —
+    // it must not read as builtin, hook, or even 'unknown'.
+    const human = call(['list']);
+    expect(human.out).not.toContain('finalized_by');
+  });
+}, 60000);
+
+test('a record written before finalized_by existed reads back without crashing, and as null — never impersonating builtin or hook', () => {
+  const root = scaffold();
+  inProject(root, '23450-23499', () => {
+    expect(callJson(['create', '--name', 'legacy', '--ports', '0']).code).toBe(0);
+    expect(callJson(['finalize', '--name', 'legacy']).json.finalized_by).toBe('builtin');
+
+    // Simulate a record written by a pre-a10 build: `finalized: true` landed,
+    // but the field this task adds never did.
+    const rec = readRecord(root, 'legacy');
+    expect(rec.finalized_by).toBe('builtin'); // the premise: it really was set
+    delete rec.finalized_by;
+    writeFileSync(slotFile(root, 'legacy'), JSON.stringify(rec, null, 2));
+
+    // `list` must not die on the older shape, and must not guess.
+    const listed = callJson(['list']);
+    expect(listed.code).toBe(0);
+    const slot = listed.json.slots.find((s: any) => s.name === 'legacy');
+    expect(slot.finalized).toBe(true); // the old field still reads fine
+    expect(slot.finalized_by).toBeNull(); // the new one is honestly "unknown"
+
+    const human = call(['list']);
+    expect(human.out).toContain('finalized_by=unknown');
+
+    // A resumed run also does not die reading it back through a plain create
+    // (idempotent reuse) or a destroy — the record round-trips.
+    expect(callJson(['destroy', '--name', 'legacy', '--outcome', 'completed']).code).toBe(0);
+  });
+}, 60000);

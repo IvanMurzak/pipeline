@@ -230,6 +230,24 @@ export interface SlotRecord {
   /** Set by `destroy` when the slot was PRESERVED rather than reaped. */
   outcome: 'completed' | 'halted' | null;
   finalized: boolean;
+  /** WHICH PATH finalized this slot (taskflow-v2 a10 — the weakness a5's own
+   *  report flagged): the consumer's `worktree-finalize.*` (`hook`), or the
+   *  CLI's built-in NO-OP (`builtin`).
+   *  Set alongside `finalized` by a SUCCESSFUL `finalize`, from the same
+   *  vocabulary `FinalizeOutput.finalized_by` already uses (a5) — this is that
+   *  same distinction, persisted rather than left in the one-shot output.
+   *
+   *  `null` — never silently defaulted to `'hook'` or `'builtin'` — for a slot
+   *  that has not been finalized yet, AND for a record written before this
+   *  field existed (`finalized` may already be `true` there; provenance is
+   *  simply unknown, and `list` says so rather than guessing). That is
+   *  deliberately the opposite convention from `provisioner`, which defaults an
+   *  older record to `hook`: `provisioner`'s default is safe because it only
+   *  gates a REFUSAL (teardown of the conservative case), while a `finalized_by`
+   *  default here would let a stale record impersonate a real answer to the
+   *  exact question this field exists to answer — whether a built-in no-op
+   *  finalize (which pushes nothing) or a hook (which may have) ran. */
+  finalized_by: 'hook' | 'builtin' | null;
 }
 
 function runtimeDir(projectRoot: string): string {
@@ -286,6 +304,10 @@ export function readSlot(projectRoot: string, name: string): SlotRecord | null {
       updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : '',
       outcome: raw.outcome === 'completed' || raw.outcome === 'halted' ? raw.outcome : null,
       finalized: raw.finalized === true,
+      // Absent or unrecognized reads as null — NOT defaulted to 'hook' the way
+      // `provisioner` is. See the field's doc comment: a wrong guess here would
+      // impersonate the exact answer this field exists to give.
+      finalized_by: raw.finalized_by === 'builtin' || raw.finalized_by === 'hook' ? raw.finalized_by : null,
     };
   } catch {
     // absent, unreadable, or not JSON — the slot is simply unknown to us
@@ -768,6 +790,7 @@ function createSlot(args: WorktreeArgs, git: GitRunner): { output: CreateOutput;
     updated_at: at,
     outcome: null,
     finalized: false,
+    finalized_by: null,
   });
 
   return {
@@ -889,6 +912,9 @@ function finalizeSlot(args: WorktreeArgs): { output: FinalizeOutput; code: numbe
       );
   if (slot && res.ok) {
     slot.finalized = true;
+    // Persisted, not just reported: `list` must be able to tell a builtin
+    // no-op finalize from a hook's without re-running finalize (a10 DoD 3).
+    slot.finalized_by = builtin ? 'builtin' : 'hook';
     slot.updated_at = nowIso();
     writeSlot(projectRoot, slot);
   }
@@ -1121,7 +1147,11 @@ function humanList(o: ListOutput): string {
   const lines = [`provisioned worktree slots (${o.slots.length}) — ${o.project_root}`];
   for (const s of o.slots) {
     const state = !s.exists ? 'missing' : s.outcome === 'halted' ? 'preserved' : s.finalized ? 'finalized' : 'live';
-    lines.push(`  ${state.padEnd(9)} ${s.name}  ${s.worktree_path}  [${s.branch ?? 'no branch reported'}]`);
+    // Only meaningful once finalized — and even then may be `null` (an older
+    // record, from before this field existed): say "unknown" rather than
+    // guessing, exactly as the record itself refuses to guess (DoD 4/5).
+    const finalizedNote = s.finalized ? `  [finalized_by=${s.finalized_by ?? 'unknown'}]` : '';
+    lines.push(`  ${state.padEnd(9)} ${s.name}  ${s.worktree_path}  [${s.branch ?? 'no branch reported'}]${finalizedNote}`);
   }
   lines.push('(leaked worktrees and branches this command never provisioned: `pipeline gc`)');
   return lines.join('\n') + '\n';
