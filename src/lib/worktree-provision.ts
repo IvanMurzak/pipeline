@@ -43,6 +43,14 @@
 //      a directory that resolves into the main checkout is precisely the
 //      accident being guarded against).
 //
+// ── PORTS (a4) ──────────────────────────────────────────────────────────────
+//
+// A worktree isolates files, not TCP ports, so every slot also gets a
+// contiguous block of free ones (lib/port-alloc.ts owns the allocator). They
+// are written into the ENV FILE, which is the channel the frozen contract
+// leaves for them — the create-hook JSON calls `ports`/`port_base`
+// informational and the run path never reads them.
+//
 // ── THE ENV FILE'S GRAMMAR IS NARROWER THAN THE PARSER'S ────────────────────
 //
 // The file is read by TWO consumers: lib/env-file.ts's `parseEnvFile` (tolerant
@@ -60,6 +68,7 @@ import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { branchExists, iterWorktrees, type GitRunner } from './git';
+import { allocatePorts, portEnvEntries, reservationDirFor, resolvePortRange } from './port-alloc';
 
 // ---------------------------------------------------------------------------
 // The git-version floor (R10)
@@ -250,6 +259,26 @@ export function invalidSubmodulePath(rel: string): string | null {
   return null;
 }
 
+/** The directory EVERY project's slot root lives under — `PIPELINE_WT_ROOT`
+ *  when set, else `C:/tmp/pipeline-worktrees` on Windows when `C:/tmp` exists
+ *  (short, space-free), else the system temp dir's.
+ *
+ *  Machine-wide by default, which is what makes it the right home for the port
+ *  reservation registry (lib/port-alloc.ts): the deterministic base is derived
+ *  from the SLOT NAME alone, and slot names are task ids — two different
+ *  projects both provisioning `a4` want the same first candidate block. A
+ *  per-project registry would not see that; this one does. */
+export function slotRootBase(): string {
+  const override = (process.env.PIPELINE_WT_ROOT ?? '').trim();
+  return canonicalExisting(
+    override
+      ? override
+      : process.platform === 'win32' && existsSync('C:/tmp')
+        ? 'C:/tmp/pipeline-worktrees'
+        : `${tmpdir()}/pipeline-worktrees`,
+  );
+}
+
 /** Where slots live: `<base>/<project-slug>/`.
  *
  *  OUTSIDE the repository, always — a worker's `node_modules`, build output and
@@ -262,14 +291,7 @@ export function invalidSubmodulePath(rel: string): string | null {
  *  of its canonical path — is what keeps two DIFFERENT projects that both
  *  provision a slot called `a3` off each other's directory. */
 export function slotRootFor(projectRoot: string): string {
-  const override = (process.env.PIPELINE_WT_ROOT ?? '').trim();
-  const base = canonicalExisting(
-    override
-      ? override
-      : process.platform === 'win32' && existsSync('C:/tmp')
-        ? 'C:/tmp/pipeline-worktrees'
-        : `${tmpdir()}/pipeline-worktrees`,
-  );
+  const base = slotRootBase();
   const canonical = norm(projectRoot);
   const digest = createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 8);
   const label = slugOf(basename(canonical) || 'project').slice(0, 24) || 'project';
@@ -290,6 +312,10 @@ export interface ProvisionRequest {
   submodules: string[];
   /** The consumer project root (the command passes `process.cwd()`). */
   projectRoot: string;
+  /** How many contiguous ports this slot gets (`--ports`, defaulted by the
+   *  command). 0 provisions a slot with no ports at all — the env file then
+   *  carries no `PORT_*` key rather than a zero one. */
+  ports: number;
 }
 
 export interface ProvisionedSubmodule {
@@ -314,6 +340,10 @@ export interface ProvisionOutcome {
   /** The parent slot was already provisioned and was re-reported (idempotence
    *  per name, the same contract a create hook honors). */
   reused: boolean;
+  /** The allocated port block, or null when `ports: 0` was asked for. The
+   *  authoritative copy is in the ENV FILE — this is the same numbers, saved
+   *  the caller a re-read. */
+  ports: { base: number; ports: number[] } | null;
   detail: string | null;
 }
 
@@ -387,6 +417,7 @@ export function provisionSlot(req: ProvisionRequest, git: GitRunner): ProvisionO
     provisioned: null,
     submodule_slots,
     reused: false,
+    ports: null,
     detail,
   });
 
@@ -480,6 +511,26 @@ export function provisionSlot(req: ProvisionRequest, git: GitRunner): ProvisionO
     slots.push(r.slot);
   }
 
+  // ---- ports (a4) ---------------------------------------------------------
+  // AFTER the worktree exists, deliberately: the reservation a block is
+  // claimed with names this slot's path as its liveness proof, and a
+  // reservation pointing at a directory that does not exist yet would read as
+  // stale to every other process the moment it was written.
+  let portBlock: { base: number; ports: number[] } | null = null;
+  if (req.ports > 0) {
+    const range = resolvePortRange();
+    if ('error' in range) return fail(range.error, slots);
+    const alloc = allocatePorts({
+      name: req.name,
+      count: req.ports,
+      reservationDir: reservationDirFor(slotRootBase()),
+      livePath: slotPath,
+      range,
+    });
+    if (!alloc.ok) return fail(alloc.detail, slots);
+    portBlock = { base: alloc.base, ports: alloc.ports };
+  }
+
   // ---- the env file -------------------------------------------------------
   const values: Array<[string, string]> = [
     // There is no run on this path; the slot name stands in, exactly as
@@ -491,6 +542,11 @@ export function provisionSlot(req: ProvisionRequest, git: GitRunner): ProvisionO
     ['PROJECT_ROOT', repoTop],
     ['BASE_BRANCH', req.base_branch],
   ];
+  // The ports go in the FILE — that is the channel. The create-hook JSON calls
+  // `ports`/`port_base` informational and the run path reads three keys that do
+  // not include them (docs/worktree-hook-contract.md), so a slot's ports are
+  // real exactly insofar as they are written here.
+  if (portBlock) values.push(...portEnvEntries(portBlock.base, portBlock.ports.length));
   if (slots.length) {
     values.push(['SUBMODULE_COUNT', String(slots.length)]);
     slots.forEach((s, i) => {
@@ -521,6 +577,7 @@ export function provisionSlot(req: ProvisionRequest, git: GitRunner): ProvisionO
     provisioned: { worktree_path: slotPath, branch, env_file: envFile },
     submodule_slots: slots,
     reused,
+    ports: portBlock,
     detail: null,
   };
 }

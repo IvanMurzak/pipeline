@@ -141,6 +141,15 @@ export interface TeardownInfo {
   detail: string | null;
 }
 
+/** The create hook's INFORMATIONAL port fields, exactly as the frozen contract
+ *  documents them: `{"port_base": 0, "ports": {"BACKEND_PORT": 5103}}`. */
+export interface HookPorts {
+  /** A positive base, or null for the `0`/absent the contract uses for "none". */
+  port_base: number | null;
+  /** Only well-formed entries survive: a port is an integer in 1..65535. */
+  ports: Record<string, number>;
+}
+
 /** What a create attempt yields. PROVISIONING DATA, deliberately not a
  *  state-machine record: `provisioned` is non-null exactly when the hook
  *  honored the contract; `detail` carries the halt reason otherwise;
@@ -151,6 +160,14 @@ export interface CreateOutcome {
   provisioned: ProvisionedInfo | null;
   detail: string | null;
   failedWorktreePath: string | null;
+  /** D14's input, and NOTHING else's. The standalone command needs to know
+   *  whether the hook returned ports at all, because per-field precedence says
+   *  an EMPTY answer does not suppress the CLI's own allocation (02 §4.2).
+   *  This does not widen what the RUN path consumes: `commands/next.ts` reads
+   *  `worktree_path`/`branch`/`env_file` and this is not one of them — the
+   *  contract's own line is that ports are informational and live in the env
+   *  file. Null when the create failed. */
+  hook_ports: HookPorts | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +190,7 @@ export function runCreateHook(
       ['ok', false],
       ['detail', detail],
     ]);
-    return { ok: false, provisioned: null, detail, failedWorktreePath };
+    return { ok: false, provisioned: null, detail, failedWorktreePath, hook_ports: null };
   };
 
   const script = resolveHookScript(hookDirAbs, 'worktree-create');
@@ -231,7 +248,27 @@ export function runCreateHook(
     provisioned: { worktree_path: wtPath, branch, env_file: envFile },
     detail: null,
     failedWorktreePath: null,
+    hook_ports: readHookPorts(parsed!),
   };
+}
+
+/** The hook's `port_base`/`ports`, defensively. A hook is consumer code: a
+ *  string port, a null, an array, a `ports: 0` are all things it may print, and
+ *  none of them may become a port a worker is told to use. `port_base: 0` — what
+ *  this repository's own reference hook returns — reads as "none", which is the
+ *  case D14 exists for. */
+function readHookPorts(parsed: Record<string, unknown>): HookPorts {
+  const rawBase = parsed.port_base;
+  const port_base =
+    typeof rawBase === 'number' && Number.isInteger(rawBase) && rawBase > 0 && rawBase <= 65535 ? rawBase : null;
+  const ports: Record<string, number> = {};
+  const rawPorts = parsed.ports;
+  if (rawPorts !== null && typeof rawPorts === 'object' && !Array.isArray(rawPorts)) {
+    for (const [k, v] of Object.entries(rawPorts as Record<string, unknown>)) {
+      if (typeof v === 'number' && Number.isInteger(v) && v > 0 && v <= 65535) ports[k] = v;
+    }
+  }
+  return { port_base, ports };
 }
 
 /** A3: best-effort cleanup after a FAILED create. The create hook may have done
