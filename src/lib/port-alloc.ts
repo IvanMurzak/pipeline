@@ -291,18 +291,23 @@ function isOwnedBy(rec: Reservation, name: string, livePath: string): boolean {
   return rec.name === name && rec.path === livePath;
 }
 
-/** Drop every reservation held by THIS slot. Called before a re-allocation so a
- *  slot never holds two blocks (the deterministic base can move when the ports
- *  it wanted became busy, and the abandoned claim must not survive) and on
- *  teardown, so a reaped slot's ports return to the pool at once instead of
- *  waiting to be noticed as stale. */
-export function releaseReservations(dir: string, name: string, livePath: string): void {
+/** Drop every reservation held by THIS slot, returning how many were actually
+ *  handed back. Called before a re-allocation so a slot never holds two blocks
+ *  (the deterministic base can move when the ports it wanted became busy, and
+ *  the abandoned claim must not survive) and on teardown, so a reaped slot's
+ *  ports return to the pool at once instead of waiting to be noticed as stale.
+ *
+ *  The COUNT exists for `pipeline gc` (a8): "the reap released its ports" is a
+ *  claim a report should be able to substantiate with a number rather than
+ *  assert on faith. Best-effort as ever — every caller may ignore it. */
+export function releaseReservations(dir: string, name: string, livePath: string): number {
   let entries: string[];
   try {
     entries = readdirSync(dir);
   } catch {
-    return;
+    return 0;
   }
+  let released = 0;
   for (const entry of entries) {
     if (!RESERVATION_RE.test(entry)) continue;
     const file = `${dir}/${entry}`;
@@ -310,10 +315,12 @@ export function releaseReservations(dir: string, name: string, livePath: string)
     if (rec === null || !isOwnedBy(rec, name, livePath)) continue;
     try {
       unlinkSync(file);
+      released++;
     } catch {
       // best-effort
     }
   }
+  return released;
 }
 
 type ClaimResult = 'claimed' | 'taken';

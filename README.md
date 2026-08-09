@@ -366,9 +366,10 @@ no-op that reports `ok`). **That fallback is reachable from this command only**
 halts / reports a failed teardown, exactly as it always has (D9). A hook,
 where one exists, always wins, including over a slot the built-in provisioner
 made. Full reference, JSON shapes, the port-precedence rule for hook authors
-(D14), and two documented limitations (`pipeline gc` does not reap
-built-in-provisioned slots; a project path with a space or shell metacharacter
-is refused): **[`docs/cli.md`](docs/cli.md#pipeline-worktree--the-worktree-hook-lifecycle-without-a-run)**.
+(D14), which command reaps a built-in slot (`worktree destroy` while you can
+still name it, `pipeline gc` once nothing can), and one documented limitation
+(a project path with a space or shell metacharacter is refused):
+**[`docs/cli.md`](docs/cli.md#pipeline-worktree--the-worktree-hook-lifecycle-without-a-run)**.
 
 **Standalone context** (stated because the contract is frozen):
 
@@ -398,9 +399,11 @@ is refused): **[`docs/cli.md`](docs/cli.md#pipeline-worktree--the-worktree-hook-
   post-mortem.
 - `list` reports the slots this command provisioned (recorded under
   `.pipeline/.runtime/worktrees/`) and whether each is still on disk. Finding and
-  reaping *leaked* worktrees and branches is `pipeline gc`'s job for the
-  hook-provisioned convention (`.claude/worktrees/`) — it does **not** reach
-  built-in-provisioned slots; see `docs/cli.md` for why.
+  reaping *leaked* worktrees and branches is `pipeline gc`'s job — both the
+  hook-provisioned convention (`.claude/worktrees/`) and the built-in slot root
+  outside the repository, where it reaps a slot **no record names** (a run that
+  died before `destroy`) and leaves everything a command can still reach; see
+  `docs/cli.md` for the full table of what it reaps, keeps and refuses.
 - `--ports <n>` sizes a contiguous block of free ports (default `4`; `0` for
   none), allocated and published into the slot's env file. A `worktree-create.*`
   hook that reports no ports of its own still gets the block appended to the

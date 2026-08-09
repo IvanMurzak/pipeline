@@ -456,9 +456,9 @@ case it is. See ["The symmetry rule"](#the-symmetry-rule).
 `list` reports only the slots **this command's own registry** knows about —
 one JSON file per slot under `<project>/.pipeline/.runtime/worktrees/<name>.json`,
 written by `create`. It is not a filesystem scan of where slots live. Finding
-worktrees/branches this command never provisioned is `pipeline gc`'s job —
-with a real caveat for built-in-provisioned slots specifically; see
-["Two known limitations"](#two-known-limitations).
+worktrees, branches and slots this command's registry can no longer name is
+`pipeline gc`'s job — including the built-in slot root outside the repository;
+see ["Who reaps a built-in slot"](#who-reaps-a-built-in-slot).
 
 ### Exit codes (all four subcommands)
 
@@ -732,20 +732,48 @@ grammar.
 
 ---
 
-### Two known limitations
+### Who reaps a built-in slot
 
-**`pipeline gc` does not reap built-in-provisioned slots.** `pipeline gc`
-scans `<project>/.claude/worktrees/` — the convention the pipeline **run** path
-(and hand-authored hooks that follow it) uses. The built-in provisioner
-deliberately puts its slots **outside the repository entirely**, under
-`PIPELINE_WT_ROOT` (default: `C:/tmp/pipeline-worktrees` on Windows when
-`C:/tmp` exists, else the system temp directory's `pipeline-worktrees`) — `gc`
-never looks there, by design (the same "a worker's build output must never
-land inside the project" rule the provisioner itself follows). **So
-`pipeline worktree destroy` is the only reaper for a built-in-provisioned
-slot — it is not a mere convenience alongside `pipeline gc`.** A leaked
-built-in slot (a killed process, a crashed orchestrator) has to be found by
-name and torn down with `worktree destroy`; `pipeline gc` will not find it.
+Two commands, and they own different halves — deliberately.
+
+**`pipeline worktree destroy --name <slot>` reaps a slot you can still name.**
+It is the ordinary path: the slot record under
+`.pipeline/.runtime/worktrees/<name>.json` says where the slot is, what branch
+it carries and which submodule slots it cut, and the built-in teardown undoes
+exactly that.
+
+**`pipeline gc` is the janitor for a slot nobody can name any more.** It scans
+`<project>/.claude/worktrees/` **and** the built-in slot root — `PIPELINE_WT_ROOT`
+(default: `C:/tmp/pipeline-worktrees` on Windows when `C:/tmp` exists, else the
+system temp directory's `pipeline-worktrees`) plus this project's
+`<basename>-<hash>` segment, which is where the built-in provisioner puts its
+slots so a worker's build output never lands inside the project. What it reaps
+there is narrow and stated in the report, one reason per entry:
+
+| under the slot root | `gc` | why |
+| --- | --- | --- |
+| a directory **no slot record names** | **reaps** under `--clean` | nothing can reach it by name, so no `destroy` can |
+| a record whose **worktree is already gone** | **reaps** under `--clean` | its branch, env file and port reservation are stranded |
+| a record whose worktree **is on disk** | reports, keeps | `pipeline worktree destroy --name <n>` owns it |
+| a record saying `provisioner: "hook"` | reports, keeps | the symmetry rule — a hook's bookkeeping is not this CLI's to guess at |
+| a slot preserved by `destroy --outcome halted` | reports, keeps | halting exists to keep the slot |
+| a path inside the repository, at/inside the cwd, fewer than two segments below a filesystem root, or outside this project's slot root | **refuses**, with the reason | a command that deletes outside the repository states where it declines |
+
+A reap goes through the same built-in teardown `destroy` uses (parent worktree,
+every submodule worktree, the env file), then drops the stale slot record and
+hands the slot's port reservations back. It does **not** delete the slot's
+branch: plain `--clean` never force-deletes a branch, so removing the worktree
+detaches `worktree-<name>` and `gc`'s ordinary branch policy takes it from there
+— safe-deleted when merged, kept with a reason when not (a squash-merged run
+branch reads as unmerged forever; `--force-worktree-branches` is the opt-in).
+
+⚠ **`gc --clean` over the slot root is a quiescent-point operation.** A slot
+being provisioned right now has a directory for the few seconds before its
+record is written, and would read as record-less. Run `--clean` between dispatch
+rounds (or after the last one), not during. Plain `gc` reports and changes
+nothing, always.
+
+### One known limitation
 
 **A project path containing a space or a shell metacharacter is refused by the
 built-in provisioner** (see [Env-file value constraints](#env-file-value-constraints)

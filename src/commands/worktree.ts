@@ -303,12 +303,21 @@ function writeSlot(projectRoot: string, rec: SlotRecord): void {
   renameSync(tmp, target);
 }
 
-function deleteSlot(projectRoot: string, name: string): void {
+/** Drop a slot's record, reporting whether it is gone afterwards.
+ *
+ *  Idempotent: an already-absent record reports `true`. EXPORTED for
+ *  `pipeline gc` (a8) — a slot record whose worktree has already vanished is
+ *  part of the leak, not a survivor of it, so the janitor that reaps the slot
+ *  drops the record through the same function `destroy` uses rather than
+ *  re-deriving the registry's path. */
+export function deleteSlot(projectRoot: string, name: string): boolean {
+  const file = slotFile(projectRoot, name);
   try {
-    unlinkSync(slotFile(projectRoot, name));
+    unlinkSync(file);
   } catch {
     // already gone — nothing to reap
   }
+  return !existsSync(file);
 }
 
 export function listSlots(projectRoot: string): SlotRecord[] {
@@ -1180,7 +1189,10 @@ const USAGE = [
   '    at it would orphan it — so `destroy` exits 1 with the reason instead.',
   '  Reachable from this command only (D9): a pipeline RUN with no',
   '  worktree-destroy.* still reports a failed teardown, exactly as before.',
-  '  `pipeline gc` remains the janitor for what NO command provisioned.',
+  '  `pipeline gc` is the janitor for a slot NOTHING can still name: it scans the',
+  '  built-in slot root too, and reaps a slot there with no slot record — a run',
+  '  that died before destroy — through this same teardown. A slot a record still',
+  '  names is destroy\'s, and a hook-provisioned one is never reaped from either.',
   '',
   'PORTS. Every slot gets its own contiguous block of FREE ports — --ports N,',
   '  default 4, `--ports 0` for none — published in the env file as PORT_BASE,',

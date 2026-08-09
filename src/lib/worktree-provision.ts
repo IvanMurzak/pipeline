@@ -754,8 +754,12 @@ function samePath(a: string, b: string): boolean {
  *  below the root. The slot record is a plain JSON file on disk that a crash, a
  *  bad merge or a text editor can shorten, and `rmSync(recursive)` over `C:/`
  *  or `/home` on the strength of one is not a risk worth carrying when the
- *  check costs three lines. */
-function tooShallowToDelete(p: string): boolean {
+ *  check costs three lines.
+ *
+ *  EXPORTED for `pipeline gc` (a8), which reaps slots outside the repository
+ *  too and must refuse on exactly this rule rather than on a second copy of
+ *  it — a guard that exists twice is a guard that can disagree with itself. */
+export function tooShallowToDelete(p: string): boolean {
   const body = toPosixPath(p)
     .replace(/^[A-Za-z]:\//, '')
     .replace(/^\/+/, '');
