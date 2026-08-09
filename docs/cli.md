@@ -447,6 +447,7 @@ case it is. See ["The symmetry rule"](#the-symmetry-rule).
       "created_at": "2026-08-09T02:06:03.695Z",
       "updated_at": "2026-08-09T02:06:11.560Z",
       "outcome": null, "finalized": false,
+      "finalized_by": null,           // "hook" | "builtin" | null — see below
       "exists": true                  // is the recorded worktree_path still on disk
     }
   ]
@@ -572,6 +573,17 @@ loudly** — `finalize` returns `ok: false` with
 built-in finalize existed. `finalized_by` in the JSON is exactly how a caller
 tells the two cases apart; never read a `finalize`'s `ok: true` as "my branch
 is pushed" without checking it.
+
+**`finalized_by` is PERSISTED into the slot record on a successful finalize**,
+not just returned in that one `finalize` call's own JSON — so `pipeline
+worktree list` (`--json` and human output alike) can tell a builtin no-op
+finalize apart from a hook's, for a slot resumed later or inspected by a
+different process, without re-running `finalize` (which is strict
+must-succeed and not idempotent-safe to re-invoke just to check). A slot not
+yet finalized reports `finalized_by: null` — never guessed as one of the two —
+and so does a slot record written before this field existed, even though its
+`finalized: true` still reads back fine: provenance genuinely unknown is
+reported as unknown, not as a coin flip.
 
 ### Ports
 
