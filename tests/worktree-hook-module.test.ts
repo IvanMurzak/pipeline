@@ -512,16 +512,28 @@ test('D9: a run whose repository has no worktree-destroy.* still reports a FAILE
   });
 }, 60000);
 
-test('D9, structurally: the run path does not IMPORT the provisioner OR the teardown — the standalone command is their only caller', () => {
+test('D9, structurally: the run path does not IMPORT the provisioner OR the teardown — the standalone command and `pipeline gc` are their only callers', () => {
   const src = (rel: string): string => readFileSync(join(import.meta.dir, '..', 'src', rel), 'utf8');
   // A runtime halt proves this run did not provision; the import graph proves
   // no run ever can. A future edit that wires either half into the engine fails
   // HERE, before anyone has to notice a silent provision — or a silent reap —
   // in production.
+  //
+  // `commands/gc.ts` joined the callers in a8 (it reaps orphaned built-in slots
+  // through the same teardown), which is why it is checked BELOW as a second
+  // route: an import the run path cannot follow directly must not become one it
+  // can follow through the janitor.
   for (const rel of ['commands/next.ts', 'lib/worktree-hooks.ts', 'lib/next.ts']) {
     expect(`${rel}: ${/from '.*worktree-provision'/.test(src(rel)) ? 'IMPORTS' : 'clean'}`).toBe(`${rel}: clean`);
     for (const fn of ['provisionSlot(', 'teardownSlot(']) {
       expect(`${rel} ${fn}: ${src(rel).includes(fn) ? 'CALLS' : 'clean'}`).toBe(`${rel} ${fn}: clean`);
+    }
+    // The TRANSITIVE route, closed explicitly: `commands/gc.ts` and
+    // `commands/worktree.ts` both reach the provisioner module, so a run path
+    // that imported either of them would reach it too. Neither may be on it.
+    for (const via of ['commands/gc', 'commands/worktree']) {
+      const reaches = new RegExp(`from '[^']*${via.replace('/', '\\/')}'`).test(src(rel));
+      expect(`${rel} → ${via}: ${reaches ? 'IMPORTS' : 'clean'}`).toBe(`${rel} → ${via}: clean`);
     }
   }
   // Not vacuous, in BOTH directions: the standalone command really does import
@@ -532,6 +544,19 @@ test('D9, structurally: the run path does not IMPORT the provisioner OR the tear
   expect(/from '..\/lib\/worktree-provision'/.test(cmd)).toBe(true);
   expect(cmd.includes('provisionSlot(')).toBe(true);
   expect(cmd.includes('teardownSlot(')).toBe(true);
+  // Same, for the janitor (a8). `pipeline gc` reaps an orphaned built-in slot
+  // through a5's teardown rather than a second removal implementation, and it
+  // takes the slot root from the provisioner's own `slotRootFor` rather than
+  // re-deriving it — so BOTH of those are asserted here. If either stops being
+  // true the transitive-import check above stops meaning anything.
+  const gc = src('commands/gc.ts');
+  expect(/from '..\/lib\/worktree-provision'/.test(gc)).toBe(true);
+  expect(gc.includes('teardownSlot(')).toBe(true);
+  expect(gc.includes('slotRootFor(')).toBe(true);
+  // …and gc must NOT provision: the janitor reaps, it never creates.
+  expect(`commands/gc.ts provisionSlot(: ${gc.includes('provisionSlot(') ? 'CALLS' : 'clean'}`).toBe(
+    'commands/gc.ts provisionSlot(: clean',
+  );
   // The teardown lives in the module the import check names — otherwise
   // "commands/next.ts does not import worktree-provision" would stop meaning
   // "commands/next.ts cannot reach the teardown".

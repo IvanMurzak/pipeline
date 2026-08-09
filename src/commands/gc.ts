@@ -30,6 +30,74 @@
 //     SUPERPROJECT's `.claude/worktrees/` (leaked registrations), and its
 //     prunable records. Uninitialized submodules are skipped silently and
 //     counted. `--no-submodules` disables the whole submodule pass.
+//   - the BUILT-IN SLOT ROOT — see the section below.
+//
+// ── THE BUILT-IN SLOT ROOT (taskflow-v2 a8 / finding F-10) ──────────────────
+//
+// Everything above looks INSIDE the project. a3's built-in provisioner puts its
+// slots OUTSIDE it, under `slotRootFor(<project>)` — `PIPELINE_WT_ROOT` (or
+// `C:/tmp`, or the system temp dir) plus a per-project `<basename>-<8 hex of
+// the project path>` segment — precisely so a worker's `node_modules` and build
+// output never land in the project folder. Their branches are ATTACHED, so the
+// orphan-branch sweep skips them too. Between a3 and a5, therefore, NOTHING
+// reaped a built-in slot: a5 gave `pipeline worktree destroy` a teardown, which
+// closes the happy path, and leaves the leak path — a run that dies before
+// `destroy` — with no janitor at all. This is that janitor.
+//
+// The path is taken from `slotRootFor()` itself, never re-derived: a janitor
+// that computed the slot root a second way would disagree with the provisioner
+// the first time either changed, and would then either miss every slot or reap
+// somebody else's directory.
+//
+// OWNERSHIP — WHO DECIDES A DIRECTORY IS OURS TO DELETE:
+//
+//   * A SLOT RECORD (`.pipeline/.runtime/worktrees/<name>.json`) is the
+//     evidence. `provisioner: 'builtin'` says this CLI made it; `'hook'` says a
+//     consumer's `worktree-create.*` did, and a5's SYMMETRY RULE governs here
+//     exactly as it does in `destroy`: the built-in path never reaps a hook's
+//     slot, because a hook keeps bookkeeping this CLI never wrote. Such a slot
+//     is REPORTED and left alone, with the reason stated.
+//   * A record whose worktree is STILL ON DISK is `pipeline worktree destroy
+//     --name <n>`'s to reap, not gc's — gc reaps what no command can, and a
+//     directory that may hold a live worker is not that. It is reported as
+//     `tracked`, with the command that owns it.
+//   * A record whose worktree is ALREADY GONE is a leak with no live half: its
+//     branch, its env file and its port reservation are stranded, and nothing
+//     will call `destroy` for a run that already died. gc reaps it.
+//   * A DIRECTORY UNDER THE SLOT ROOT THAT NO RECORD NAMES is the case F10 case
+//     4 calls "a slot with no matching row". Nothing can name it — `destroy`
+//     takes a `--name` and looks the record up, so a slot whose record is gone
+//     (a wiped `.pipeline/.runtime/`, a re-cloned project, a crash between
+//     `git worktree add` and the record write) is unreachable by every other
+//     command. gc is the only thing that can reap it, so it does — and the
+//     CAUTION the absence of a record demands is spent on the guards below plus
+//     one more: the path must lie under the project-scoped, hash-suffixed slot
+//     root this CLI computed. Nothing else derives that spelling.
+//   * A slot preserved on purpose (`destroy --outcome halted`) is never reaped.
+//
+// `--no-submodules` does NOT narrow this pass. The provisioner cuts one
+// worktree per declared submodule BESIDE the parent slot (`<name>--<slug>`),
+// and those belong to their parent: without the submodule list one would read
+// as a slot in its own right and be reaped from the superproject, which does
+// not own it. The flag switches off the per-submodule branch/registration
+// sweep, not half of a slot's shape — a slot is reaped whole or not at all.
+//
+// ⚠ `--clean` OVER THE SLOT ROOT IS A QUIESCENT-POINT OPERATION. A slot being
+// provisioned right now has a directory for the few seconds before its record
+// is written, and would read as record-less. That window is not closable from
+// here (the provisioner writes the worktree first by necessity), and it does
+// not need to be: F10 reconciles BEFORE any new dispatch and F11 runs AFTER the
+// last row is verified. Run `--clean` while workers are being dispatched and it
+// may reap a slot that is still being born; the read-only report never does.
+//
+// BRANCHES ARE NOT DELETED BY THE SLOT REAP. a5's teardown can delete the
+// `worktree-<name>` branch, and `destroy --outcome completed` asks it to. gc
+// does not: this command's contract is that plain `--clean` NEVER force-deletes
+// a branch (see `--force-worktree-branches` below), and a run branch is
+// routinely squash-merged, which reads as unmerged forever. So the slot reap
+// runs FIRST and asks for no branch deletion; removing the worktree detaches
+// the branch, and the ordinary branch sweep then applies this command's own
+// policy to it — safe-delete when merged, keep with a reason when not.
 //
 // `--clean` additionally (CONSERVATIVE — never the current branch/worktree,
 // never a force branch delete):
@@ -43,6 +111,10 @@
 //     `worktree-*` or belonged to a worktree just removed;
 //   - applies the same per-submodule (prune → remove merged worktrees under
 //     the superproject's `.claude/worktrees/` → safe-delete merged branches);
+//   - reaps each ORPHANED BUILT-IN SLOT through a5's own `teardownSlot` (the
+//     parent worktree, every submodule worktree, the env file) — never a second
+//     removal implementation — then drops its stale slot record and hands its
+//     a4 PORT RESERVATIONS back, exactly as `destroy --outcome completed` does;
 //   - prints exactly what was kept and why.
 //
 // `--force-worktree-branches` (opt-in, requires --clean): additionally
@@ -68,6 +140,18 @@ import {
   currentBranch,
   type GitRunner,
 } from '../lib/git';
+import { releaseReservations, reservationDirFor } from '../lib/port-alloc';
+import {
+  derivedSubmoduleSlotDir,
+  isUnder as isUnderOrEqual,
+  slotRootBase,
+  slotRootFor,
+  teardownSlot,
+  tooShallowToDelete,
+  toPosixPath,
+  type TeardownSubmodule,
+} from '../lib/worktree-provision';
+import { deleteSlot as deleteSlotRecord, listSlots, type SlotRecord } from './worktree';
 
 export interface GcWorktree {
   path: string;
@@ -91,6 +175,37 @@ export interface GcSubmoduleReport {
   branches: GcBranch[];
   worktrees: GcWorktree[];
   prunable: string[];
+}
+
+/** One entry of the BUILT-IN SLOT ROOT scan (taskflow-v2 a8 / F-10): a slot the
+ *  built-in provisioner put OUTSIDE the repository, classified. */
+export interface GcSlot {
+  /** The slot name — its directory's basename, which is also what
+   *  `pipeline worktree destroy --name` takes. */
+  name: string;
+  /** The slot directory, in the provisioner's own forward-slash spelling. */
+  path: string;
+  /** What the slot record says provisioned it; null when NO record names it. */
+  record: 'builtin' | 'hook' | null;
+  exists: boolean;
+  /** True when gc treats it as a reapable leak — `--clean` acts on exactly
+   *  these and on nothing else under the slot root. */
+  orphaned: boolean;
+  /** Why it is a leak, or why it is left alone. Always stated, both ways. */
+  reason: string;
+}
+
+/** One orphaned built-in slot `--clean` actually reaped. */
+export interface GcReapedSlot {
+  name: string;
+  path: string;
+  /** What a5's teardown removed (parent first, then each submodule slot). */
+  removed_worktrees: string[];
+  removed_env_file: string | null;
+  /** The stale `.pipeline/.runtime/worktrees/<name>.json` was dropped. */
+  removed_record: boolean;
+  /** How many a4 port reservations were handed back to the pool. */
+  released_ports: number;
 }
 
 export interface GcSubmoduleCleaned {
@@ -117,6 +232,11 @@ export interface GcCleaned {
    *  populated under --force-worktree-branches. */
   force_deleted_branches: string[];
   submodules: GcSubmoduleCleaned[];
+  /** Orphaned BUILT-IN slots reaped from the slot root (a8). */
+  reaped_slots: GcReapedSlot[];
+  /** Orphaned built-in slots the teardown could NOT reap, and why (a locked or
+   *  in-use directory — the Windows case — reads exactly like this). */
+  kept_slots: Array<{ path: string; reason: string }>;
 }
 
 export interface GcReport {
@@ -129,6 +249,11 @@ export interface GcReport {
   submodules: GcSubmoduleReport[];
   /** Uninitialized (or unreadable) submodules skipped by the scan. */
   submodules_skipped: number;
+  /** Where the built-in provisioner puts THIS project's slots — reported even
+   *  when it holds nothing, because "gc looked there" is the claim a8 makes. */
+  slot_root: string;
+  /** The built-in slot root scan: every candidate, classified (a8). */
+  builtin_slots: GcSlot[];
   cleaned: GcCleaned | null;
 }
 
@@ -337,6 +462,265 @@ export function gcReport(
 }
 
 // ---------------------------------------------------------------------------
+// The BUILT-IN SLOT ROOT scan (a8 / F-10) — see the module header
+// ---------------------------------------------------------------------------
+
+/** A scanned slot plus the record that proves (or fails to prove) it is ours.
+ *  `GcSlot` is the reportable projection of this. */
+interface SlotCandidate {
+  name: string;
+  path: string;
+  record: SlotRecord | null;
+  exists: boolean;
+  orphaned: boolean;
+  reason: string;
+}
+
+/** Immediate subdirectory NAMES of `dir`, sorted; [] when it is absent. */
+function listDirNames(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  const out: string[] = [];
+  for (const name of readdirSync(dir).sort()) {
+    try {
+      if (statSync(join(dir, name)).isDirectory()) out.push(name);
+    } catch {
+      // unreadable entry — skip
+    }
+  }
+  return out;
+}
+
+/** Is this candidate a leak gc may reap, or is it somebody else's? Both
+ *  answers carry their reason: an operator reading a report that says "kept"
+ *  without saying why cannot tell a rule from a bug. */
+function classifySlot(
+  cand: { name: string; path: string; record: SlotRecord | null; exists: boolean },
+  root: string,
+  slotRoot: string,
+): { orphaned: boolean; reason: string } {
+  const rec = cand.record;
+  const p = toPosixPath(cand.path);
+
+  // 1. THE SYMMETRY RULE (a5). A hook provisioned its slot with bookkeeping
+  //    this CLI never saw — its own registrations, branches, env files — so
+  //    reaping one from the built-in path would silently orphan them. Same
+  //    boundary `pipeline worktree destroy` enforces, same direction.
+  if (rec !== null && rec.provisioner === 'hook') {
+    return {
+      orphaned: false,
+      reason:
+        `slot record '${rec.name}' says a worktree-create.* HOOK provisioned it — the built-in path never reaps a hook's slot ` +
+        `(the symmetry rule: a hook keeps bookkeeping this CLI never wrote). Its worktree-destroy.* owns it.`,
+    };
+  }
+
+  // 2. Preserved ON PURPOSE. `destroy --outcome halted` keeps a slot whole for
+  //    post-mortem and resume; a janitor that reaped it would delete the thing
+  //    halting exists to save.
+  if (rec !== null && rec.outcome === 'halted') {
+    return {
+      orphaned: false,
+      reason: `slot record '${rec.name}' was PRESERVED by \`pipeline worktree destroy --outcome halted\` — re-run that with --outcome completed to reap it`,
+    };
+  }
+
+  // 3. a5's THREE DELETION GUARDS, applied here rather than only inside the
+  //    teardown, so an implausible recorded path is refused where it is
+  //    CLASSIFIED and never becomes a target in the first place.
+  if (isUnderOrEqual(cand.path, root)) {
+    return {
+      orphaned: false,
+      reason: `refused: ${p} is inside the repository ${toPosixPath(root)}, and the built-in provisioner never creates a slot there`,
+    };
+  }
+  if (isUnderOrEqual(process.cwd(), cand.path)) {
+    return { orphaned: false, reason: `refused: ${p} is (or contains) the current working directory` };
+  }
+  if (tooShallowToDelete(cand.path)) {
+    return {
+      orphaned: false,
+      reason: `refused: a slot lives at <root>/<project>/<name> and ${p} is too close to a filesystem root to be one`,
+    };
+  }
+
+  // 4. gc's OWN fourth guard, and the one that does the work a slot record
+  //    cannot when there is no slot record: only ever under the project-scoped,
+  //    hash-suffixed slot root this CLI computed. Nothing else derives that
+  //    spelling, so a path outside it is not something the built-in provisioner
+  //    produced — whatever a record claims.
+  if (!isUnder(cand.path, slotRoot)) {
+    return {
+      orphaned: false,
+      reason:
+        `refused: ${p} is not under this project's built-in slot root ${slotRoot} — ` +
+        `gc reaps only what the built-in provisioner would have created`,
+    };
+  }
+
+  // 5. A record whose worktree is still on disk is `destroy`'s to reap. gc
+  //    reaps what NO command can reach, and a directory that may still hold a
+  //    live worker is emphatically not that.
+  if (cand.exists && rec !== null) {
+    return {
+      orphaned: false,
+      reason: `tracked by slot record '${rec.name}' — \`pipeline worktree destroy --name ${rec.name}\` owns it; gc reaps only what no command can name`,
+    };
+  }
+
+  // 6. The two leaks.
+  if (!cand.exists) {
+    return {
+      orphaned: true,
+      reason: `slot record '${rec?.name ?? cand.name}' names a worktree that is already gone — its branch, env file and port reservation are stranded`,
+    };
+  }
+  return {
+    orphaned: true,
+    reason:
+      'no slot record names it — nothing can reach this slot by name, so no `pipeline worktree destroy` can reap it; ' +
+      'a run that died before destroy is what leaves one',
+  };
+}
+
+/** Scan the built-in slot root. READ-ONLY — this is what a plain `gc` reports.
+ *
+ *  `submodulePaths` are the project's initialized submodules (empty under
+ *  `--no-submodules`): the provisioner cuts one worktree per declared submodule
+ *  BESIDE the parent slot, as `<name>--<submodule slug>`, and those belong to
+ *  their parent rather than standing as slots of their own. */
+function scanSlotRoot(root: string, slotRoot: string, submodulePaths: string[]): SlotCandidate[] {
+  // A record that cannot be read is not a record: listSlots already drops
+  // unparseable files, which is the conservative direction (an unreadable
+  // record makes its slot look record-LESS, and the guards still gate it).
+  let records: SlotRecord[] = [];
+  try {
+    records = listSlots(root);
+  } catch {
+    records = [];
+  }
+  const byPath = new Map<string, SlotRecord>();
+  for (const r of records) byPath.set(normPath(r.worktree_path), r);
+
+  const dirNames = listDirNames(slotRoot);
+
+  // Directories that BELONG to another slot: a submodule slot is reaped WITH
+  // its parent, from that submodule's own repository, and must never be
+  // mistaken for an orphan in its own right.
+  const owned = new Set<string>();
+  for (const r of records) for (const s of r.submodule_slots) owned.add(normPath(s.dir));
+  for (const n of dirNames) {
+    for (const rel of submodulePaths) owned.add(normPath(derivedSubmoduleSlotDir(`${slotRoot}/${n}`, n, rel)));
+  }
+
+  const out: SlotCandidate[] = [];
+  const seen = new Set<string>();
+  const add = (name: string, path: string): void => {
+    const key = normPath(path);
+    if (seen.has(key)) return;
+    seen.add(key);
+    const record = byPath.get(key) ?? null;
+    const exists = existsSync(path);
+    const base = { name, path: toPosixPath(path), record, exists };
+    out.push({ ...base, ...classifySlot(base, root, slotRoot) });
+  };
+
+  for (const n of dirNames) {
+    const p = `${slotRoot}/${n}`;
+    if (owned.has(normPath(p))) continue;
+    add(n, p);
+  }
+  // Records whose directory is already GONE never appear in the listing above
+  // — and a record naming a path OUTSIDE the slot root has to be seen to be
+  // refused rather than silently skipped.
+  for (const r of records) {
+    if (r.provisioner !== 'builtin') continue;
+    add(r.name, r.worktree_path);
+  }
+  return out;
+}
+
+/** The reportable projection. */
+function toGcSlot(c: SlotCandidate): GcSlot {
+  return {
+    name: c.name,
+    path: c.path,
+    record: c.record?.provisioner ?? null,
+    exists: c.exists,
+    orphaned: c.orphaned,
+    reason: c.reason,
+  };
+}
+
+/** Reap the orphans `scanSlotRoot` found, through a5's `teardownSlot`.
+ *
+ *  `deleteBranches: false` on purpose — see the module header: this command
+ *  never force-deletes a branch under plain `--clean`, and detaching the branch
+ *  by removing its worktree hands it to gc's ordinary, documented branch
+ *  policy. A teardown that fails leaves the slot AND its record in place, which
+ *  is a5's contract and is exactly what a Windows file lock produces. */
+function reapSlots(
+  git: GitRunner,
+  root: string,
+  slotRoot: string,
+  cands: SlotCandidate[],
+  submodulePaths: string[],
+): { reaped: GcReapedSlot[]; kept: Array<{ path: string; reason: string }> } {
+  const reaped: GcReapedSlot[] = [];
+  const kept: Array<{ path: string; reason: string }> = [];
+  const reservationDir = reservationDirFor(slotRootBase());
+
+  for (const c of cands) {
+    if (!c.orphaned) continue;
+    const rec = c.record;
+    // What create RECORDED, where there is a record; otherwise the same
+    // derivation the provisioner used, over every declared submodule. A derived
+    // directory that was never cut simply is not there, and the teardown
+    // reports no removal for it.
+    const declared = rec !== null && rec.submodules.length ? rec.submodules : submodulePaths;
+    const submodules: TeardownSubmodule[] =
+      rec !== null && rec.submodule_slots.length
+        ? rec.submodule_slots.map((s) => ({ path: s.path, dir: s.dir }))
+        : declared.map((rel) => ({ path: rel, dir: derivedSubmoduleSlotDir(c.path, c.name, rel) }));
+    // The provisioner writes the env file BESIDE the slot as `<name>.env`; a
+    // record, where there is one, is more authoritative than that convention.
+    const beside = `${slotRoot}/${c.name}.env`;
+    const envFile = rec?.env_file ?? (existsSync(beside) ? beside : null);
+
+    const res = teardownSlot(
+      {
+        name: c.name,
+        worktreePath: c.path,
+        branch: rec?.branch ?? null,
+        envFile,
+        submodules,
+        projectRoot: root,
+        deleteBranches: false,
+      },
+      git,
+    );
+    if (!res.ok) {
+      kept.push({ path: c.path, reason: res.detail ?? 'the built-in teardown could not reap it' });
+      continue;
+    }
+    // The slot is gone, so everything that DESCRIBED it goes with it: the stale
+    // record (which would otherwise keep naming a worktree that is not there)
+    // and the port block, handed straight back rather than left to be noticed
+    // as stale by some later allocation.
+    const removed_record = rec !== null ? deleteSlotRecord(root, rec.name) : false;
+    const released_ports = releaseReservations(reservationDir, c.name, c.path);
+    reaped.push({
+      name: c.name,
+      path: c.path,
+      removed_worktrees: res.removed_worktrees,
+      removed_env_file: res.removed_env_file,
+      removed_record,
+      released_ports,
+    });
+  }
+  return { reaped, kept };
+}
+
+// ---------------------------------------------------------------------------
 // Clean
 // ---------------------------------------------------------------------------
 
@@ -497,12 +881,17 @@ function cleanRepo(
   return cleaned;
 }
 
+/** The superproject's in-repository clean. The return type omits three fields
+ *  of `GcCleaned` rather than one: `submodules` is the per-submodule pass, and
+ *  `reaped_slots`/`kept_slots` are the slot-root pass (a8) — a separate sweep
+ *  over paths OUTSIDE the repository that `runGc` runs BEFORE this one, so the
+ *  freed `worktree-*` branches reach the branch policy below. */
 export function gcClean(
   git: GitRunner,
   root: string,
   def: { name: string; ref: string } | null,
   opts?: { force?: boolean; protectedPaths?: string[] },
-): Omit<GcCleaned, 'submodules'> {
+): Omit<GcCleaned, 'submodules' | 'reaped_slots' | 'kept_slots'> {
   return cleanRepo(git, root, def, {
     wtDir: join(root, '.claude', 'worktrees'),
     force: opts?.force ?? false,
@@ -556,6 +945,20 @@ function humanReport(
     for (const b of report.branches) out.push(`  ${mergedTag(b.merged).padEnd(8)}  ${b.branch}`);
   }
 
+  // The built-in slot root (a8). Printed only when it holds something —
+  // otherwise every report in every repository would grow a line about a
+  // directory that does not exist.
+  if (report.builtin_slots.length) {
+    const orphans = report.builtin_slots.filter((s) => s.orphaned).length;
+    out.push(
+      `built-in worktree slots under ${report.slot_root} (${report.builtin_slots.length}, ${orphans} orphaned):`,
+    );
+    for (const s of report.builtin_slots) {
+      out.push(`  ${(s.orphaned ? 'orphaned' : 'kept').padEnd(8)}  ${s.path}`);
+      out.push(`            ${s.reason}`);
+    }
+  }
+
   // Per-submodule sections — only submodules WITH findings get a section; the
   // one-line total appears whenever the project actually has submodules.
   if (opts.submodulesScanned) {
@@ -593,7 +996,8 @@ function humanReport(
     !report.stale_dirs.length &&
     !report.prunable.length &&
     !report.branches.length &&
-    !report.submodules.some(subHasFindings)
+    !report.submodules.some(subHasFindings) &&
+    !report.builtin_slots.some((s) => s.orphaned)
   ) {
     out.push('no leaks detected');
   }
@@ -606,6 +1010,12 @@ function humanReport(
     for (const p of c.removed_worktrees) out.push(`    ${p}`);
     out.push(`  removed stale dirs: ${c.removed_dirs.length}`);
     for (const p of c.removed_dirs) out.push(`    ${p}`);
+    out.push(`  reaped built-in slots: ${c.reaped_slots.length}`);
+    for (const s of c.reaped_slots) {
+      out.push(
+        `    ${s.path} (${plural(s.removed_worktrees.length, 'worktree')}, ${plural(s.released_ports, 'port')} released${s.removed_record ? ', slot record dropped' : ''})`,
+      );
+    }
     out.push(`  deleted branches (git branch -d): ${c.deleted_branches.length}`);
     for (const b of c.deleted_branches) out.push(`    ${b}`);
     if (opts.force || c.force_deleted_branches.length) {
@@ -621,6 +1031,10 @@ function humanReport(
     if (c.kept_branches.length) {
       out.push(`  kept branches (${c.kept_branches.length}):`);
       for (const k of c.kept_branches) out.push(`    ${k.branch} — ${k.reason}`);
+    }
+    if (c.kept_slots.length) {
+      out.push(`  kept built-in slots (${c.kept_slots.length}):`);
+      for (const k of c.kept_slots) out.push(`    ${k.path} — ${k.reason}`);
     }
     for (const s of c.submodules) {
       const active =
@@ -655,6 +1069,7 @@ function humanReport(
     if (
       !c.kept_worktrees.length &&
       !c.kept_branches.length &&
+      !c.kept_slots.length &&
       !c.submodules.some((s) => s.kept_worktrees.length || s.kept_branches.length)
     )
       out.push('  nothing kept back');
@@ -720,15 +1135,39 @@ export function runGc(args: string[], git: GitRunner = realGit): number {
   });
   const protectedPaths = submodules.flatMap((s) => s.worktrees.map((w) => w.path));
 
+  // The built-in slot root (a8) — read-only, and outside the repository, which
+  // is exactly why nothing else looks there. Taken from slotRootFor(), never
+  // re-derived, so the janitor and the provisioner cannot disagree.
+  //
+  // The declared submodules are resolved for this pass EVEN UNDER
+  // `--no-submodules`, and that is deliberate: the provisioner cuts one
+  // worktree per submodule BESIDE the parent slot, so without the list a
+  // `<name>--<submodule>` directory would read as a slot of its own and be
+  // reaped from the superproject, which does not own it. `--no-submodules`
+  // switches off the per-submodule BRANCH/registration sweep; it cannot switch
+  // off half of a slot's shape, because a slot is reaped whole or not at all.
+  const slotRoot = slotRootFor(root);
+  const slotSubs = parsed.submodules ? subs.initialized : listSubmodules(git, root).initialized;
+  const slotCandidates = scanSlotRoot(root, slotRoot, slotSubs);
+
   // Snapshot the report FIRST so --clean output shows what was found, then act.
   const report: GcReport = {
     ...gcReport(git, root, def, protectedPaths),
     submodules,
     submodules_skipped: subs.skipped,
+    slot_root: slotRoot,
+    builtin_slots: slotCandidates.map(toGcSlot),
     cleaned: null,
   };
 
   if (parsed.clean) {
+    // Reap orphaned built-in slots FIRST, before either branch sweep: removing
+    // a slot's worktree DETACHES its `worktree-<name>` branch, and the sweeps
+    // below are what then apply this command's own branch policy to it (safe
+    // delete when merged, kept with a reason when not). Reaping afterwards
+    // would leave every freed branch for the next invocation.
+    const slotClean = reapSlots(git, root, slotRoot, slotCandidates, slotSubs);
+
     // Clean submodules BEFORE the superproject: a merged leaked submodule
     // worktree is removed via `git worktree remove` (dir + record together),
     // and only worktrees still registered AFTER that pass are protected from
@@ -762,6 +1201,8 @@ export function runGc(args: string[], git: GitRunner = realGit): number {
         protectedPaths: stillProtected,
       }),
       submodules: subCleans,
+      reaped_slots: slotClean.reaped,
+      kept_slots: slotClean.kept,
     };
   }
 
