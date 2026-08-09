@@ -509,14 +509,14 @@ test('guards 3 and 4 — a slot record naming an implausible path is a REFUSAL, 
 test('an orphaned slot with submodule slots: the `<name>--<submodule>` directory is reaped WITH the parent from the submodule\'s own repository, not reported as a slot of its own', () => {
   const base = mkTmp('gcslotsub-');
   const origin = join(base, 'alpha-origin');
-  sh(['init', '-q', '-b', 'main', origin]);
+  sh(['init', '-q', '-b', 'main', origin], base);
   ident(origin);
   writeFileSync(join(origin, 'a.txt'), 'main\n');
   sh(['add', '.'], origin);
   sh(['commit', '-q', '-m', 'alpha main'], origin);
 
   const parent = join(base, 'super');
-  sh(['init', '-q', '-b', 'main', parent]);
+  sh(['init', '-q', '-b', 'main', parent], base);
   ident(parent);
   writeFileSync(join(parent, 'README.md'), 'super\n');
   sh(['add', '.'], parent);

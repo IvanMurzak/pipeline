@@ -588,7 +588,7 @@ function classifySlot(
  *  `--no-submodules`): the provisioner cuts one worktree per declared submodule
  *  BESIDE the parent slot, as `<name>--<submodule slug>`, and those belong to
  *  their parent rather than standing as slots of their own. */
-export function scanSlotRoot(root: string, slotRoot: string, submodulePaths: string[]): SlotCandidate[] {
+function scanSlotRoot(root: string, slotRoot: string, submodulePaths: string[]): SlotCandidate[] {
   // A record that cannot be read is not a record: listSlots already drops
   // unparseable files, which is the conservative direction (an unreadable
   // record makes its slot look record-LESS, and the guards still gate it).
@@ -881,12 +881,17 @@ function cleanRepo(
   return cleaned;
 }
 
+/** The superproject's in-repository clean. The return type omits three fields
+ *  of `GcCleaned` rather than one: `submodules` is the per-submodule pass, and
+ *  `reaped_slots`/`kept_slots` are the slot-root pass (a8) — a separate sweep
+ *  over paths OUTSIDE the repository that `runGc` runs BEFORE this one, so the
+ *  freed `worktree-*` branches reach the branch policy below. */
 export function gcClean(
   git: GitRunner,
   root: string,
   def: { name: string; ref: string } | null,
   opts?: { force?: boolean; protectedPaths?: string[] },
-): Omit<GcCleaned, 'submodules'> {
+): Omit<GcCleaned, 'submodules' | 'reaped_slots' | 'kept_slots'> {
   return cleanRepo(git, root, def, {
     wtDir: join(root, '.claude', 'worktrees'),
     force: opts?.force ?? false,
