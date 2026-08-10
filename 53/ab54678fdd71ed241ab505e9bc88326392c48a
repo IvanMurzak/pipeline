@@ -1,0 +1,31 @@
+apps/pipeline-cli/src/cli.ts
+  s_d0f7e7b6eff56e::t_2a093e3a091da8 101-115
+  s_d0f7e7b6eff56e::t_137ca1df6ff9ac 424-432
+  s_d0f7e7b6eff56e::t_e89db417ab0eac 4-5,10-12
+CLAUDE.md
+  s_d0f7e7b6eff56e::t_bae81e19a57415 25-26
+docs/cli.md
+  s_d0f7e7b6eff56e::t_77fb5427f19f52 9-10
+apps/pipeline-cli/tests/fix.test.ts
+  s_d0f7e7b6eff56e::t_cb3ae2c824ae04 1-488,492,494,497,499-659
+  s_d0f7e7b6eff56e::t_a1d26edb7d53f4 489-491,493,495-496,498
+apps/pipeline-cli/src/commands/fix.ts
+  s_d0f7e7b6eff56e::t_e39c75af6b6f65 1-62,64-730
+  s_d0f7e7b6eff56e::t_4d7b3d2a5511d1 63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "53ab54678fdd71ed241ab505e9bc88326392c48a",
+  "prompts": {},
+  "sessions": {
+    "s_d0f7e7b6eff56e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d2cb2e21-f860-44f1-adcc-fe66015824da",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

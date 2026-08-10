@@ -1,0 +1,31 @@
+README.md
+  s_36bd5ecdffd1eb::t_743a102edf0185 267-268,292-297,322,326-330
+docs/cli.md
+  s_36bd5ecdffd1eb::t_cf1b9c8dd1ecd4 1,4,14-17,777-870
+src/cli.ts
+  s_36bd5ecdffd1eb::t_92f07d341d89c5 266,271-277
+src/commands/submodule.ts
+  s_36bd5ecdffd1eb::t_be0e53c9b64931 12,16-17,20-28,45,55-58,75-81,89,105,156,175-177,191,208-263,266-269,272,312-315,317,320
+src/lib/land.ts
+  s_36bd5ecdffd1eb::t_0f5fdf8bedad19 22-24,93-111,121,138-143,275,428-432,436-440,446,452-454
+tests/_submodule-world.ts
+  s_36bd5ecdffd1eb::t_edf369d39818cf 124-135,138,144-146
+tests/submodule-no-admin.test.ts
+  s_36bd5ecdffd1eb::t_435a19d9446074 1-258
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "ce315e7e7a0fd3af2c686bc32e60114dd267a15a",
+  "prompts": {},
+  "sessions": {
+    "s_36bd5ecdffd1eb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_36bd5ecdffd1eb",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

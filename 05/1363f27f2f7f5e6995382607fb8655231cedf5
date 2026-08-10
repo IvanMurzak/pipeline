@@ -1,0 +1,55 @@
+apps/pipeline-cli/templates/support-answer/steps/02-select.md
+  s_a0187f20d63fae::t_5ae2a5d087c189 1-45
+apps/pipeline-cli/templates/support-answer/sample-docs/troubleshooting.md
+  s_a0187f20d63fae::t_db9962da916fff 1-22
+apps/pipeline-cli/templates/support-answer/scripts/tests/bm25_retrieve.test.ts
+  s_a0187f20d63fae::t_bc16d117391743 1-89
+apps/pipeline-cli/templates/support-answer/sample-docs/installation.md
+  s_a0187f20d63fae::t_8c8d1b98e49b1c 1-20
+apps/pipeline-cli/templates/support-answer/sample-docs/faq.md
+  s_a0187f20d63fae::t_bf1322a3ed79db 1-25
+apps/pipeline-cli/templates/support-answer/steps/03-answer.md
+  s_a0187f20d63fae::t_769ae35f9fdc78 1-44
+apps/pipeline-cli/tests/packed-artifact.test.ts
+  s_a0187f20d63fae::t_f7cd87587c608b 135-149
+apps/pipeline-cli/templates/support-answer/sample-docs/billing.md
+  s_a0187f20d63fae::t_4ce82a3ec908ce 1-23
+apps/pipeline-cli/templates/support-answer/scripts/bm25_retrieve.ts
+  s_a0187f20d63fae::t_dc41a891e65b90 1-279
+apps/pipeline-cli/templates/support-answer/sample-docs/getting-started.md
+  s_a0187f20d63fae::t_8be644427c5e78 1-16
+apps/pipeline-cli/templates/support-answer/PIPELINE.md
+  s_a0187f20d63fae::t_c455552296f305 5-6,16,21-24,28-29,35
+  s_a0187f20d63fae::t_226fd67d98a33e 7-15,20,25-27,30-34,36-37
+  s_a0187f20d63fae::t_ef8a63ab152dde 2-4
+  s_a0187f20d63fae::t_2c31ab1b77aab5 17-19
+  s_e31491fde099ba::t_9f542f5bf61def 1
+apps/pipeline-cli/templates/support-answer/steps/01-retrieve.md
+  s_a0187f20d63fae::t_7e86125129ac71 1-45
+apps/pipeline-cli/src/lib/templates.ts
+  s_a0187f20d63fae::t_70b39822e5c73c 45-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "051363f27f2f7f5e6995382607fb8655231cedf5",
+  "prompts": {},
+  "sessions": {
+    "s_a0187f20d63fae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "92a83b9b-471a-4dfb-a4d5-cc213d191839",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_e31491fde099ba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a0641dde7ef0233df",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

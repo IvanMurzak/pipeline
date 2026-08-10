@@ -1,0 +1,19 @@
+apps/pipeline-cli/src/commands/department.ts
+  s_6a1fbe2adaf04f::t_21db483a740280 1132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "d0923922ef68c119755ee62232dad74664e280b5",
+  "prompts": {},
+  "sessions": {
+    "s_6a1fbe2adaf04f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_6a1fbe2adaf04f",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

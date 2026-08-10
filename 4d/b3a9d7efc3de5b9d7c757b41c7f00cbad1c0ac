@@ -1,0 +1,27 @@
+.claude-plugin/plugin.json
+  s_de1428da207c06::t_a2e08d98d92b21 3
+CLAUDE.md
+  s_de1428da207c06::t_9fa500b30d03ba 55
+README.md
+  s_de1428da207c06::t_743903b5619638 716
+apps/pipeline-cli/src/commands/cloud.ts
+  s_de1428da207c06::t_f994afa4c227ef 74-120,135-144,319-386,402,406-409,423-427,464-470,509-523,692-759,965-1080,1082-1090,1143,1150-1159,1181-1192,1194
+apps/pipeline-cli/tests/cloud.test.ts
+  s_de1428da207c06::t_e4a5bd805b3402 14-17,847-1212
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "4db3a9d7efc3de5b9d7c757b41c7f00cbad1c0ac",
+  "prompts": {},
+  "sessions": {
+    "s_de1428da207c06": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-afec3d38c025e9373",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

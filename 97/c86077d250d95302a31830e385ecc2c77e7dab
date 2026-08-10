@@ -1,0 +1,47 @@
+apps/pipeline-cli/src/commands/cloud.ts
+  s_b430d43adfbb4b::t_3e9ae3b8271e79 1775-1785
+  s_b430d43adfbb4b::t_6b8f9bc337ed34 1722-1725,1727
+  s_b430d43adfbb4b::t_551f3274f3dd7b 1306-1309,1311
+  s_b430d43adfbb4b::t_b3f54080da60f3 1259-1266,1269,1271-1272
+  s_b430d43adfbb4b::t_94f7d671c96bad 185
+  s_b430d43adfbb4b::t_3b428db3048579 1740
+  s_b430d43adfbb4b::t_9667efb92a7039 1828
+apps/pipeline-cli/src/lib/cloud-config.ts
+  s_b430d43adfbb4b::t_d5ce2c27c9796a 106-122
+apps/pipeline-cli/src/lib/credential-keychain.ts
+  s_b430d43adfbb4b::t_e5e2cfd66c3cfb 1-39,41-97,100-192
+  s_b430d43adfbb4b::t_f42723b13b6428 40
+  s_b430d43adfbb4b::t_6456c3aebf1521 98-99
+apps/pipeline-cli/tests/credential-keychain.test.ts
+  s_b430d43adfbb4b::t_fb9d6f1e949169 1-299
+apps/pipeline-cli/tests/credential-refresh.test.ts
+  s_b430d43adfbb4b::t_6fc69c450beb96 271-285,291-292,314-510
+  s_b430d43adfbb4b::t_49976e156f95f1 54-61
+  s_b430d43adfbb4b::t_cee329fa473571 16-17,19,28,33
+  s_b430d43adfbb4b::t_e62c2793628062 286-290,293-313
+apps/pipeline-cli/src/lib/credential-refresh.ts
+  s_b430d43adfbb4b::t_cd20b7f09bf6ec 318-330,332-338,340-345,351,356,358-359,362-367
+  s_b430d43adfbb4b::t_8b677852d6d638 106-138
+  s_b430d43adfbb4b::t_d13183c8a29abb 169-174
+  s_b430d43adfbb4b::t_eca247f0dab5dc 58,64
+  s_b430d43adfbb4b::t_988fa8097d337b 262
+  s_b430d43adfbb4b::t_ced03bf0e4e541 339
+  s_b430d43adfbb4b::t_8f548e90573aea 226-261,263-271
+  s_b430d43adfbb4b::t_c995b32fa6d9df 331
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "97c86077d250d95302a31830e385ecc2c77e7dab",
+  "prompts": {},
+  "sessions": {
+    "s_b430d43adfbb4b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "714866ae-09f9-41b6-8ba8-5b3d31dd52bd",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

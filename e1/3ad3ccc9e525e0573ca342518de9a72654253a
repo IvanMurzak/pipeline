@@ -1,0 +1,83 @@
+apps/pipeline-cli/tests/department-serve.test.ts
+  s_28b17c5df8630a::t_6e72fbc8b09370 47-52,471,933,1791-1796,1800-1804,2070-2174
+apps/pipeline-cli/src/commands/department.ts
+  s_6c21d1d5eb6477::t_c64e55beaf295d 191,719-738,742-772
+apps/pipeline-cli/tests/cloud.test.ts
+  s_28b17c5df8630a::t_5d3a44d106ab79 384,661-680,683-684,687-693,696-703
+  s_28b17c5df8630a::t_6bae81ee296d79 343-368,379-383
+  s_28b17c5df8630a::t_ec97479b18259e 170-180
+  s_28b17c5df8630a::t_4b51b87fc748df 118-119
+  s_28b17c5df8630a::t_de063b865856b5 685-686
+  s_28b17c5df8630a::t_d3fee6b66ee1e6 13
+apps/pipeline-cli/tests/init.test.ts
+  s_28b17c5df8630a::t_002d7338df9781 147-150,170
+  s_28b17c5df8630a::t_a6e4c73aef11e6 179,190-192
+  s_28b17c5df8630a::t_cd987742648559 203-206,217-249
+  s_28b17c5df8630a::t_cba5bfcd0eee38 25-26
+  s_28b17c5df8630a::t_85a3b6b255c6fc 115
+  s_28b17c5df8630a::t_9078df66bc26d8 361-363,372
+  s_28b17c5df8630a::t_329950c1ff068a 60-61,74-77
+  s_28b17c5df8630a::t_471b86a4039acb 383,391
+  s_28b17c5df8630a::t_21875653c84b8b 595-736
+docs/cli.md
+  s_28b17c5df8630a::t_39fc113e5807bc 5
+apps/pipeline-cli/src/commands/cloud.ts
+  s_28b17c5df8630a::t_e9a8c417778c0e 1180-1184,1186-1189
+  s_28b17c5df8630a::t_826bb1e7d25793 1059-1172
+  s_28b17c5df8630a::t_5c857dce13cc77 1611-1612,1614
+apps/pipeline-cli/src/lib/department-manifest.ts
+  s_6c21d1d5eb6477::t_3bea9c535601f6 222-244,298-301,339,361,378,387-392,502-505,507-512,702,1132-1152,1504-1507
+  s_6c21d1d5eb6477::t_99c9c765776434 506
+apps/pipeline-cli/src/commands/init.ts
+  s_28b17c5df8630a::t_8f3e5555362872 59-66
+  s_28b17c5df8630a::t_802f8e973cd4cf 370-372,380,384
+  s_28b17c5df8630a::t_41a9ad9326905e 147-152,154-171
+  s_28b17c5df8630a::t_4731494c175d26 72-74,86-87,93-100,108-122,135-140
+  s_28b17c5df8630a::t_1898318df5c216 40
+  s_28b17c5df8630a::t_c0b376c74a1215 201-207,218-223
+  s_28b17c5df8630a::t_70e00467ba9476 411-414,424-467
+  s_28b17c5df8630a::t_963a49ee0b15b9 575-577
+  s_28b17c5df8630a::t_7c075da5974416 622-623,625-657
+  s_28b17c5df8630a::t_446ee610939165 373-379,381-383
+  s_28b17c5df8630a::t_7959ec30ddc977 415-423
+  s_28b17c5df8630a::t_5783bbfa485803 784-789
+  s_28b17c5df8630a::t_d74fb1bce82fa9 796
+.claude-plugin/plugin.json
+  s_28b17c5df8630a::t_11928859ef37f2 3
+apps/pipeline-cli/package.json
+  s_28b17c5df8630a::t_11928859ef37f2 3
+CLAUDE.md
+  s_28b17c5df8630a::t_6386d855ba38ef 56
+  s_28b17c5df8630a::t_9a05dde2e1932a 26
+README.md
+  s_28b17c5df8630a::t_81d5d58fb1784c 765-766
+  s_28b17c5df8630a::t_04dfddf810ad5c 16-23
+  s_28b17c5df8630a::t_1e404bd7adce24 30
+apps/pipeline-cli/src/lib/department-serve.ts
+  s_6c21d1d5eb6477::t_99c9c765776434 603-623
+  s_28b17c5df8630a::t_df361b9a6453b7 113-131
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.19",
+  "base_commit_sha": "e13ad3ccc9e525e0573ca342518de9a72654253a",
+  "prompts": {},
+  "sessions": {
+    "s_28b17c5df8630a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f040af7-0aa5-4bf6-ae01-201ebcc16edd",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_6c21d1d5eb6477": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "97577787-01a5-46da-bb2d-aed589e9407e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

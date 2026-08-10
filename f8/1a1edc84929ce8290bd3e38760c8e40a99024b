@@ -1,0 +1,22 @@
+agents/pipeline-designer.md
+  s_0437b8a8fbb7aa::t_424a378a1bf3d1 469
+  s_0437b8a8fbb7aa::t_a8a22a414effa7 470
+.claude-plugin/plugin.json
+  s_0437b8a8fbb7aa::t_2ed5c6e179f009 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "f81a1edc84929ce8290bd3e38760c8e40a99024b",
+  "prompts": {},
+  "sessions": {
+    "s_0437b8a8fbb7aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "aca23227-fb01-4357-947a-d2d68329d5df",
+        "model": "claude-fable-5"
+      },
+      "human_author": null
+    }
+  }
+}

@@ -1,0 +1,31 @@
+src/lib/telemetry-outbox.ts
+  s_d103e9ed4feb47::t_5acc6ff5ee3e97 1130-1132,1135-1136,1138-1150,1153,1156,1158
+src/lib/telemetry-upload.ts
+  s_d103e9ed4feb47::t_4d5d92f7bf5963 379,381-390,392-401,409-410
+src/lib/vendor/privacy.ts
+  s_d103e9ed4feb47::t_4ed0855c8d5c5b 86-132,194-473,683-698,744-754,771-775,802-811,821,828-831,838-842
+tests/path-privacy.test.ts
+  s_d103e9ed4feb47::t_29d73845943f75 2,6-7,12-18,20,22-38,40,50-51,54,88-101,137-139,145,156-195,200-201,204-206,210-212,233-238,244-249,265-276,280-293,295,299-314,327-330,348-356,359-417
+tests/sg4-production-repro.test.ts
+  s_d103e9ed4feb47::t_eb4c642474017a 27-42,60,390,393-425,427,430-434,436
+tests/telemetry-outbox.test.ts
+  s_d103e9ed4feb47::t_b0a681de642df5 36-41
+tests/vendor-privacy.test.ts
+  s_d103e9ed4feb47::t_d23b4757d634e3 16-37,40,42-46,101-106,125-126,128,130,154-157,174-186,198-205,214-217,367-688
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "1412ea0f3ff6e27c51b330fb38b1a683e85b08d7",
+  "prompts": {},
+  "sessions": {
+    "s_d103e9ed4feb47": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_d103e9ed4feb47",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

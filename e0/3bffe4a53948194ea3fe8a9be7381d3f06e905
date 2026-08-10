@@ -1,0 +1,23 @@
+apps/pipeline-cli/src/lib/match.ts
+  s_32903ccd09ed24::t_a96b4d6dfaee70 68-100,151-158,164
+apps/pipeline-cli/tests/department.test.ts
+  s_32903ccd09ed24::t_2bbb7f4c95f305 80-82,288,296-323
+apps/pipeline-cli/tests/match.test.ts
+  s_32903ccd09ed24::t_bc527f1cbac197 9,13,313-407
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "e03bffe4a53948194ea3fe8a9be7381d3f06e905",
+  "prompts": {},
+  "sessions": {
+    "s_32903ccd09ed24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_32903ccd09ed24",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

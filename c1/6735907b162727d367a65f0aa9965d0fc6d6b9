@@ -1,0 +1,18 @@
+docs/cli.md
+  h_8325a340bf5897 450,577-587
+src/commands/worktree.ts
+  h_8325a340bf5897 233-250,307-310,793,915-917,1150-1154
+tests/worktree-teardown.test.ts
+  h_8325a340bf5897 253,705-709,712-807
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "c16735907b162727d367a65f0aa9965d0fc6d6b9",
+  "prompts": {},
+  "humans": {
+    "h_8325a340bf5897": {
+      "author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

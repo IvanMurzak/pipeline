@@ -1,0 +1,21 @@
+.claude-plugin/plugin.json
+  s_01cb789f5986d2::t_95b5f514f34d53 3
+apps/pipeline-cli/package.json
+  s_01cb789f5986d2::t_fefa4fcfa832a0 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "cba212cc6b607d9eca358cd6e0af4e81d52ac272",
+  "prompts": {},
+  "sessions": {
+    "s_01cb789f5986d2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_01cb789f5986d2",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

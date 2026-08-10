@@ -1,0 +1,19 @@
+tests/worktree-submodule-slots.test.ts
+  s_6f09104ff8d9e7::t_43b7346e8e0168 47,79-104,359-362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "d5f358df56293ae906e3539bc51682b4c71de0f5",
+  "prompts": {},
+  "sessions": {
+    "s_6f09104ff8d9e7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_6f09104ff8d9e7",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

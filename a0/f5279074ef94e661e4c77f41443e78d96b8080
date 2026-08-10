@@ -1,0 +1,47 @@
+.claude-plugin/plugin.json
+  s_fba67ed1acab56::t_6eace8c6d0cb0e 3
+apps/pipeline-cli/src/commands/cloud.ts
+  s_fba67ed1acab56::t_55cf3a4a063db8 170,185-186,968-1018,1115,1128,1154-1155,1166-1194,1196,1209
+apps/pipeline-cli/src/lib/cloud-config.ts
+  s_fba67ed1acab56::t_7870ce93a8742a 24-25,28,61-69,80-81,98-102,184-192,226-267,276
+apps/pipeline-cli/src/lib/credential-lock.ts
+  s_fba67ed1acab56::t_31f2b4ead2de89 1-203
+apps/pipeline-cli/src/lib/credential-protect.ts
+  s_fba67ed1acab56::t_32923a65c71170 1-111
+apps/pipeline-cli/src/lib/credential-refresh.ts
+  s_fba67ed1acab56::t_bf11f7de887305 1-252
+apps/pipeline-cli/src/lib/mesh-notify.ts
+  s_fba67ed1acab56::t_b576788e8d4f70 61,63,337-346,361-373
+apps/pipeline-cli/tests/cloud.test.ts
+  s_fba67ed1acab56::t_f4f20e17f7035d 29,31,55,58-60,62,75-79,352,360-380,382-386,640-750
+apps/pipeline-cli/tests/credential-atomicity-cross-process.test.ts
+  s_fba67ed1acab56::t_e18c60c23e87b1 1-143
+apps/pipeline-cli/tests/credential-lock.test.ts
+  s_fba67ed1acab56::t_330ff3473a9276 1-184
+apps/pipeline-cli/tests/credential-protect.test.ts
+  s_fba67ed1acab56::t_c65ae9c653d3a9 1-191
+apps/pipeline-cli/tests/credential-refresh-cross-process.test.ts
+  s_fba67ed1acab56::t_425095d5b5bfe3 1-243
+apps/pipeline-cli/tests/credential-refresh.test.ts
+  s_fba67ed1acab56::t_a083c11823fbee 1-258
+apps/pipeline-cli/tests/fixtures/atomic-write-worker.ts
+  s_fba67ed1acab56::t_658e7387463b1d 1-69
+apps/pipeline-cli/tests/fixtures/cred-refresh-worker.ts
+  s_fba67ed1acab56::t_35380f63b77d99 1-63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "a0f5279074ef94e661e4c77f41443e78d96b8080",
+  "prompts": {},
+  "sessions": {
+    "s_fba67ed1acab56": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_fba67ed1acab56",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

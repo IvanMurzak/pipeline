@@ -1,0 +1,21 @@
+apps/pipeline-cli/src/lib/loopback-oauth.ts
+  s_b17e2ad1275747::t_516cb6bc36770a 363-388
+apps/pipeline-cli/tests/loopback-oauth.test.ts
+  s_b17e2ad1275747::t_934e2bd1584a2c 128,131,134-139,145-157
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "86bb878644620eca718c6c2697a8a5f0934fd8ec",
+  "prompts": {},
+  "sessions": {
+    "s_b17e2ad1275747": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a78cc8687bb065534",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}

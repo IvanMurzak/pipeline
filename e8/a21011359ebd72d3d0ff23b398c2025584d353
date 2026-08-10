@@ -1,0 +1,173 @@
+docs/journal-and-hooks.md
+  s_d0f7e7b6eff56e::t_e60decb3649330 43
+  s_db0323f35fd469::t_ffcafb7408940e 44,47-48
+docs/cli.md
+  s_d0f7e7b6eff56e::t_f091c0cb809727 26
+  s_d0f7e7b6eff56e::t_37605dc0b4db95 36
+  s_86e338e6477290::t_971a5d8fa6562e 17
+README.md
+  s_d0f7e7b6eff56e::t_dcdbdebbfd332e 730
+  s_d0f7e7b6eff56e::t_0d5d8f897c2de4 676
+  s_d0f7e7b6eff56e::t_6c901f4b20be50 713
+  s_24c6e2bcb695fe::t_8e3a2f31aa2bab 667,669,673,687,689,693,707,731-733,743,747,820
+apps/pipeline-cli/package.json
+  s_d0f7e7b6eff56e::t_0a1bd31b7afa85 3
+CHANGELOG.md
+  s_d0f7e7b6eff56e::t_1469b90709979c 7-37
+apps/pipeline-cli/tests/journal-end-to-end.test.ts
+  s_d0f7e7b6eff56e::t_4a5350868c0e1e 95-98,101
+  s_d0f7e7b6eff56e::t_326020542acc3b 236-289
+  s_86e338e6477290::t_9fb388bcfcf6c7 88
+docs/events.md
+  s_d0f7e7b6eff56e::t_684173211c9c05 291-297
+  s_d0f7e7b6eff56e::t_f932f736e22c9d 497-499
+  s_db0323f35fd469::t_03a55565984d02 84,95,333,454,494-495,529
+CLAUDE.md
+  s_d0f7e7b6eff56e::t_6eb0e6b14057d1 37
+  s_d0f7e7b6eff56e::t_cdc0dde294ee54 34
+  s_7506d7a6a88c38::t_3b1e3c9b2c3ae0 70-72
+apps/pipeline-cli/src/lib/event.ts
+  s_d0f7e7b6eff56e::t_bd190b5cee2cde 55
+  s_d0f7e7b6eff56e::t_3654e4add534aa 69
+  s_86e338e6477290::t_5387e00b6027be 19,52,58,63-65,84-85,478,480,514,531-532,542,544,623,632,635,719,801,828
+.claude-plugin/plugin.json
+  s_d0f7e7b6eff56e::t_811ea1b3c4a4c2 3
+apps/pipeline-cli/src/commands/logs.ts
+  s_d0f7e7b6eff56e::t_f44bcdaefbc340 8-10
+hooks/analytics_relay.ts
+  s_d0f7e7b6eff56e::t_8bab9942f47aba 129-130
+  s_d0f7e7b6eff56e::t_db1dad7ddacf4c 139-142
+  s_d0f7e7b6eff56e::t_8305c59307d27b 114
+  s_24c6e2bcb695fe::t_ea7fc66078a46d 54,111,115,121-122,127,136,145-146,148-149,265,267,296,300,401,623,629,654,664,672,955,960,1273,1792,1816,1818,1950-1951,2028,2207,2210,2221-2222,2295-2296
+hooks/stats_relay.ts
+  s_d0f7e7b6eff56e::t_239485e2462a5c 42
+  s_24c6e2bcb695fe::t_4a60608c799e44 41
+apps/pipeline-cli/src/cli.ts
+  s_d0f7e7b6eff56e::t_3e9f8af6526073 193
+apps/pipeline-cli/src/commands/drive.ts
+  s_d0f7e7b6eff56e::t_afff8adb51fe48 1369
+apps/pipeline-cli/src/index.ts
+  s_d0f7e7b6eff56e::t_35c1f0b412a5e5 40
+apps/pipeline-cli/src/lib/telemetry-outbox.ts
+  s_d0f7e7b6eff56e::t_1030628d921df1 169,400
+apps/pipeline-cli/tests/awaiting-input-contract.test.ts
+  s_d0f7e7b6eff56e::t_d5ab546fc5be23 134-135
+apps/pipeline-cli/tests/compose-exec.test.ts
+  s_d0f7e7b6eff56e::t_06e764f5d6ee37 86,91-92,94
+apps/pipeline-cli/tests/drive-claude-smoke.test.ts
+  s_d0f7e7b6eff56e::t_3768b19f46b9ca 78-79
+apps/pipeline-cli/tests/drive-script-steps.test.ts
+  s_d0f7e7b6eff56e::t_e5d19d238eb992 128,133-134
+apps/pipeline-cli/tests/drive-self-improve.test.ts
+  s_d0f7e7b6eff56e::t_141fdbbe795149 192-193
+apps/pipeline-cli/tests/drive-session-binding.test.ts
+  s_d0f7e7b6eff56e::t_5a71b30a8a31dd 5,112-113,117,227,230
+apps/pipeline-cli/tests/drive-stream-json.test.ts
+  s_d0f7e7b6eff56e::t_4c6648acd31d7b 109-110
+apps/pipeline-cli/tests/drive.test.ts
+  s_d0f7e7b6eff56e::t_f266d5663a7d29 161-162
+apps/pipeline-cli/tests/event.test.ts
+  s_d0f7e7b6eff56e::t_362b194aeb02ca 22,84-85,87,100,106-107,109,344,349,353,363,365-368,370-371,374-375,391,399,411
+apps/pipeline-cli/tests/gate.test.ts
+  s_d0f7e7b6eff56e::t_2879fd01aa814b 102,107-108
+apps/pipeline-cli/tests/hook-awaiting-input.test.ts
+  s_d0f7e7b6eff56e::t_2351784de1c94f 38,69,118,161,175,183,190,205,223,225,233,242,246
+apps/pipeline-cli/tests/hook-bypass-detection.test.ts
+  s_d0f7e7b6eff56e::t_5ce4c28354d959 71-72,77-78,460
+apps/pipeline-cli/tests/hook-prompt-match.test.ts
+  s_d0f7e7b6eff56e::t_c881370817762d 7
+apps/pipeline-cli/tests/hook-runid-session-fallback.test.ts
+  s_d0f7e7b6eff56e::t_327f1931e48a96 9,86-87,94-95,188,206,246,416,419
+apps/pipeline-cli/tests/hook-runid-shape-ownership.test.ts
+  s_d0f7e7b6eff56e::t_52bbfaf3c2d2ad 97-98,107-108
+apps/pipeline-cli/tests/hook-step-binding.test.ts
+  s_d0f7e7b6eff56e::t_32c838bc71d8e9 9,78-79,81,87-88,90,206,208,215,224,231,234,381-382
+apps/pipeline-cli/tests/hook-subagent-stop.test.ts
+  s_d0f7e7b6eff56e::t_361b455892ad70 72,79,152,207
+apps/pipeline-cli/tests/hook-telemetry-daemon-lock.test.ts
+  s_d0f7e7b6eff56e::t_94df0fdc823154 120
+apps/pipeline-cli/tests/hooks.test.ts
+  s_d0f7e7b6eff56e::t_b8512053859c28 182,187-188,190
+apps/pipeline-cli/tests/mirror-binding.test.ts
+  s_d0f7e7b6eff56e::t_6cbf4fa6fcd591 79-80
+apps/pipeline-cli/tests/next-render.test.ts
+  s_d0f7e7b6eff56e::t_b4262156c06140 80,92-93,95
+apps/pipeline-cli/tests/next-stats-run-init-kick.test.ts
+  s_d0f7e7b6eff56e::t_38ff5aa3974211 102-103
+apps/pipeline-cli/tests/next-step-name.test.ts
+  s_d0f7e7b6eff56e::t_a472072b13e184 94,99-100
+apps/pipeline-cli/tests/next-step-uuid.test.ts
+  s_d0f7e7b6eff56e::t_5638824256e755 364,369-370
+apps/pipeline-cli/tests/next.test.ts
+  s_d0f7e7b6eff56e::t_4874b074ce5157 1108-1109
+apps/pipeline-cli/tests/record-file.test.ts
+  s_d0f7e7b6eff56e::t_e08614092d5976 39-40
+apps/pipeline-cli/tests/script-exec-integration.test.ts
+  s_d0f7e7b6eff56e::t_a2ea4786ccb374 78,83-84,86
+apps/pipeline-cli/tests/step-run.test.ts
+  s_d0f7e7b6eff56e::t_16c4c5c838444a 110-111
+apps/pipeline-cli/tests/template-support-answer.test.ts
+  s_d0f7e7b6eff56e::t_0a9a28f64ad7ed 276,281-282
+apps/pipeline-cli/tests/transcript-opt-out.test.ts
+  s_d0f7e7b6eff56e::t_2ece6de8bd3274 2,10,15,19,52-53,55,66,69,72-73,83,87,91,93,98,104-105,107-110,112-113,130,152-153,159,173-174,224,238-239,261,265,301-302
+apps/pipeline-cli/tests/worktree-scoped.test.ts
+  s_d0f7e7b6eff56e::t_5a4e089d9f27b8 137-138,140,149-150,152
+docs/departments-mcp.md
+  s_d0f7e7b6eff56e::t_c906e3b35c3554 170
+hooks/department_notifier_relay.ts
+  s_d0f7e7b6eff56e::t_acfaaabf73001e 52,83,93,97
+hooks/hooks.json
+  s_d0f7e7b6eff56e::t_5a455a7a76cbc9 2
+hooks/prompt_match_relay.ts
+  s_d0f7e7b6eff56e::t_a5974ba7a48a55 20,50,56
+hooks/session_relay.ts
+  s_d0f7e7b6eff56e::t_bf81e8910ce579 33,39,44,49-50,171-172,202
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "e8a21011359ebd72d3d0ff23b398c2025584d353",
+  "prompts": {},
+  "sessions": {
+    "s_24c6e2bcb695fe": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7833d2eb-90ca-4f14-bebc-76da687fa195",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_7506d7a6a88c38": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7939e93a-3a61-4e18-9a5f-264756865c99",
+        "model": "claude-haiku-4-5-20251001"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_86e338e6477290": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a37af5c769c0cea47",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_d0f7e7b6eff56e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d2cb2e21-f860-44f1-adcc-fe66015824da",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_db0323f35fd469": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cab1ca42-e747-417c-b961-e8aa4a3e2a58",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
