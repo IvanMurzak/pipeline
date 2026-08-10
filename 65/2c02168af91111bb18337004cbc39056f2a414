@@ -1,0 +1,53 @@
+src/commands/ci-wait.ts
+  s_d600d4bd865d73::t_c8247ecd0e7879 416-419
+src/commands/cloud.ts
+  s_d600d4bd865d73::t_20eadfef31cec4 2264-2270
+src/commands/department.ts
+  s_d600d4bd865d73::t_8268e541115c4b 3198-3208
+src/commands/drive.ts
+  s_d600d4bd865d73::t_f7a405c877b77c 1170-1178,1182-1186
+src/commands/event.ts
+  s_d600d4bd865d73::t_446483b4a5c218 15-18,21,26-33
+src/commands/gc.ts
+  s_d600d4bd865d73::t_03834ca6499885 1324-1327
+src/commands/hash.ts
+  s_d600d4bd865d73::t_6ad8045ca1ff0a 59-61,63-67
+src/commands/id.ts
+  s_d600d4bd865d73::t_6810351a819a48 20-21,23-27
+src/commands/logs.ts
+  s_d600d4bd865d73::t_2692be6e2812d8 623-627,629-632
+src/commands/match.ts
+  s_d600d4bd865d73::t_1abc916a901892 114-117,119-123
+src/commands/migrate.ts
+  s_d600d4bd865d73::t_ffc5f2488dc793 234-238
+src/commands/next.ts
+  s_d600d4bd865d73::t_667cdcca5481de 2816-2823,2825-2829
+src/commands/plan.ts
+  s_d600d4bd865d73::t_7ba4815b4fd948 10-13,15-19
+src/commands/release.ts
+  s_d600d4bd865d73::t_cfb5516d5b939a 179-180,183-186,189
+src/commands/route.ts
+  s_d600d4bd865d73::t_35c9a20c4c690f 89-92,94-98
+src/commands/stats.ts
+  s_d600d4bd865d73::t_742d807e3e36d4 334-342
+src/commands/worktree.ts
+  s_d600d4bd865d73::t_e732bc81543ba0 1524-1535
+tests/cli-help.test.ts
+  s_d600d4bd865d73::t_3b572d05f69886 1-127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "652c02168af91111bb18337004cbc39056f2a414",
+  "prompts": {},
+  "sessions": {
+    "s_d600d4bd865d73": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-abc346f334d5c062b",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
