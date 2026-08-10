@@ -1521,6 +1521,18 @@ export function runWorktree(args: string[], git: GitRunner = realGit): number {
     return 2;
   }
 
+  // `--help`/`-h` at the VERB level (`pipeline worktree create --help`) used to
+  // fall through parseArgs as an unknown argument and exit 2 — the neighbouring
+  // case a11 had to work around by asserting its DoD through both spellings
+  // (taskflow-v2 a14). None of `create`/`finalize`/`destroy`/`list`'s ALLOWED
+  // flags overlap with it, so recognizing it here — before parseArgs — is safe
+  // for all four; it prints the SAME group usage `--help` at the top level
+  // already prints, since no verb-specific help text exists to reuse.
+  if (rest.includes('--help') || rest.includes('-h')) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+
   const parsed = parseArgs(verb, rest);
   if ('error' in parsed) {
     process.stderr.write(`pipeline worktree ${verb}: ${parsed.error}\n\n${USAGE}`);

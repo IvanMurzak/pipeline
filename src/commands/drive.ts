@@ -1167,10 +1167,23 @@ export function deniedRecordWrite(envelope: ClaudeEnvelope | null, ...paths: str
 // Command entry point
 // ---------------------------------------------------------------------------
 
+const USAGE =
+  'Usage: pipeline drive --root <pipeline_root> --run-id <id> --start <step-name>\n' +
+  '                      [--default-model <m>] [--model <step_id>=<m> ...]\n' +
+  '                      [--default-effort <level>] [--effort <step_id>=<level> ...] [--resume]\n' +
+  '                      [--var NAME=value ...] [--vars-file <path>]\n' +
+  '                      [--answer <text> | --answer-file <path>]\n' +
+  '                      [--task <text> | --task-file <path>]\n' +
+  '                      [--executor-cmd <template>] [--json]\n';
+
 export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<number> {
-  const a = parseArgs(args);
   const out = deps.out ?? ((s: string) => process.stdout.write(s));
   const err = deps.err ?? ((s: string) => process.stderr.write(s));
+  if (args.includes('--help') || args.includes('-h')) {
+    out(USAGE);
+    return 0;
+  }
+  const a = parseArgs(args);
   if (!a.root || !a.runId) {
     err('pipeline drive: --root and --run-id are required\n');
     return 2;

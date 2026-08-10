@@ -7,7 +7,16 @@
 
 import { computePlan } from '../lib/plan';
 
+const USAGE =
+  'Usage: pipeline plan --root <pipeline_root> [--default-model <m>] [--model <step_id>=<m> ...]\n' +
+  '                     [--default-effort <level>] [--effort <step_id>=<level> ...]\n';
+
 export function runPlan(args: string[]): number {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+
   let root: string | undefined;
   let defaultModel: string | null | undefined;
   let modelOverrides: Record<string, string> | undefined;

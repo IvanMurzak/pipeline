@@ -111,7 +111,16 @@ function fetchIssue(issueRef: string): string {
   return `${title}\n\n${body}`.trim();
 }
 
+const USAGE =
+  'Usage: pipeline match --pipelines-dir <dir> (--task <t> | --issue <ref>)\n' +
+  '                      [--top <n>] [--neg-threshold <n>]\n';
+
 export function runMatch(args: string[]): number {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+
   let pipelinesDir: string | undefined;
   let task: string | undefined;
   let issue: string | undefined;

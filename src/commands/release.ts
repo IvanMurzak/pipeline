@@ -176,14 +176,17 @@ const CHECKLIST = [
   '',
 ].join('\n');
 
+const USAGE = 'Usage: pipeline release <patch|minor|major> [--plugin-root <path>] [--dry-run] [--json]\n';
+
 /** CLI shell: parse → resolve root → bump → print. */
 export function runRelease(args: string[]): number {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
   const parsed = parseReleaseArgs(args);
   if ('error' in parsed) {
-    process.stderr.write(
-      `pipeline release: ${parsed.error}\n` +
-        'Usage: pipeline release <patch|minor|major> [--plugin-root <path>] [--dry-run] [--json]\n',
-    );
+    process.stderr.write(`pipeline release: ${parsed.error}\n${USAGE}`);
     return 2;
   }
 

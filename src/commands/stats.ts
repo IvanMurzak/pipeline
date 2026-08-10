@@ -331,6 +331,15 @@ export async function runStatsTelemetry(
 }
 
 export async function runStats(args: string[]): Promise<number> {
+  // Checked on the RAW args (before the backfill/telemetry dispatch below) so
+  // `pipeline stats --help`, `pipeline stats backfill --help` and
+  // `pipeline stats telemetry --help` are ALL recognized here — the three verbs
+  // share one usage synopsis (USAGE, above), so there is no separate text to
+  // dispatch each spelling to.
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
   if (args[0] === 'backfill') return runBackfill(args.slice(1));
   if (args[0] === 'telemetry') return runStatsTelemetry(args.slice(1));
 

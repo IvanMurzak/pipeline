@@ -2813,7 +2813,20 @@ function startChild(
 // Command entry point
 // ---------------------------------------------------------------------------
 
+const USAGE =
+  'Usage: pipeline next --root <pipeline_root> --run-id <id> [--start <step-name>]\n' +
+  '                     [--default-model <m>] [--model <step_id>=<m> ...]\n' +
+  '                     [--default-effort <level>] [--effort <step_id>=<level> ...]\n' +
+  '                     [--var NAME=value ...] [--vars-file <path>]\n' +
+  "                     [--record '<json>' | --record-file <path>] [--resume]\n" +
+  '                     [--manual-hooks] [--manual-scripts]\n';
+
 export function runNext(args: string[]): number {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+
   const a = parseArgs(args);
   if (!a.root || !a.runId) {
     process.stderr.write('pipeline next: --root and --run-id are required\n');

@@ -56,7 +56,15 @@ export const realHashDeps: HashCommandDeps = {
   homedir: homedir(),
 };
 
+const USAGE =
+  'Usage: pipeline hash --root <pipeline_root> [--json] [--project <path> [--label <name>]]\n';
+
 export function runHash(args: string[], deps: HashCommandDeps = realHashDeps): number {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+
   let root: string | undefined;
   let json = false;
   let project: string | undefined;

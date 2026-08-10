@@ -620,7 +620,16 @@ function emitLine(raw: string, args: LogsArgs, color: boolean): void {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const USAGE =
+  'Usage: pipeline logs [--follow|-f] [--tail <n>] [--all] [--json] [--no-color]\n' +
+  '                     [--project <path>]\n' +
+  '       pipeline logs --chat <run-id> [--project <path>] [--json] [--no-color]\n';
+
 export async function runLogs(args: string[]): Promise<number> {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
   const opts = parseLogsArgs(args);
 
   if (opts.chat) {
