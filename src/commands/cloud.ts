@@ -2261,6 +2261,13 @@ export async function runCloud(args: string[], deps: CloudDeps = realDeps): Prom
     deps.err(`pipeline cloud: unknown subcommand '${sub}'\n${CLOUD_TOP_USAGE}`);
     return 2;
   }
+  // `optout --help` is already handled inside runCloudOptout; `connect --help`
+  // used to fall through parseConnectArgs as an unknown argument and exit 2
+  // (taskflow-v2 a14) — checked here, before parsing, same as the group level.
+  if (args.slice(1).includes('--help') || args.slice(1).includes('-h')) {
+    deps.out(USAGE);
+    return 0;
+  }
 
   const parsed = parseConnectArgs(args.slice(1));
   if ('error' in parsed) {

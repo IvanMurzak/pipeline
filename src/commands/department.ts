@@ -3195,6 +3195,17 @@ export async function runDepartment(args: string[]): Promise<number> {
       // src/hooks/department-notifier-relay.ts. Not part of 05's nine-step serve
       // flow; listed here only because it is the `department` verb.
       return await runDepartmentNotify(rest);
+    case '--help':
+    case '-h':
+      // Every individual verb already recognizes --help (new/validate/serve/
+      // status/stop/retire/notify each print their own usage) — this group
+      // level was the gap: `pipeline department --help` used to fall through
+      // to the "unknown verb" default below and exit 2 (taskflow-v2 a14).
+      process.stdout.write(
+        `pipeline department: a verb is required (${VERBS})\n` +
+          `Run 'pipeline department <verb> --help' for details on each.\n`,
+      );
+      return 0;
     case undefined:
       process.stderr.write(`pipeline department: a verb is required (${VERBS})\n`);
       return 2;

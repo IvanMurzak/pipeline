@@ -86,7 +86,16 @@ function saveState(root: string, runId: string, state: RouteState): void {
   writeFileSync(join(dir, 'route.json'), JSON.stringify(state, null, 2) + '\n', 'utf8');
 }
 
+const USAGE =
+  'Usage: pipeline route --root <pipeline_root> --run-id <id> --from <step_id> --flags <json>\n' +
+  '                      [--default-model <m>]\n';
+
 export function runRoute(args: string[]): number {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+
   const a = parseArgs(args);
   if (!a.root || !a.runId || !a.from) {
     process.stderr.write('pipeline route: --root, --run-id, and --from are required\n');

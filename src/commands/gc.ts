@@ -1321,6 +1321,10 @@ function humanReport(
 // ---------------------------------------------------------------------------
 
 export function runGc(args: string[], git: GitRunner = realGit): number {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
   const parsed = parseGcArgs(args);
   if ('error' in parsed) {
     process.stderr.write(`pipeline gc: ${parsed.error}\n${USAGE}`);

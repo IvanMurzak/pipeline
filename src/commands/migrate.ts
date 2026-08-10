@@ -231,6 +231,11 @@ export function runMigrate(args: string[], deps: MigrateDeps = {}): number {
     return 2;
   };
 
+  if (args.includes('--help') || args.includes('-h')) {
+    out(usage() + '\n');
+    return 0;
+  }
+
   const parsed = parseArgs(args);
   if (parsed.error) return emitUsageErr(parsed.error);
   if (parsed.toManifest && parsed.to !== undefined) {

@@ -17,7 +17,14 @@
 
 import { newId } from '../lib/ids';
 
+const USAGE = 'Usage: pipeline id [--json]\n';
+
 export function runId(args: string[]): number {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+
   let json = false;
 
   for (const a of args) {

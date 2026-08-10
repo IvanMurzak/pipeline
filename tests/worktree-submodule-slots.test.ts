@@ -650,13 +650,17 @@ test('DoD 6: `create --help` no longer claims a hook ALWAYS wins with the provis
     // always win, including over a built-in slot) and must survive.
     expect(help.out).toContain('A worktree-destroy.* hook, where one exists, ALWAYS wins');
 
-    // `worktree create --help` is a usage error that prints the same reference
-    // (--help is not a create flag), so the corrected text is what an operator
-    // typing that command reads.
+    // `worktree create --help` now prints the SAME reference help on stdout
+    // and exits 0 (taskflow-v2 a14 — it used to be a usage error, exit 2, with
+    // this same text only incidentally reachable via the "unknown argument"
+    // error's own USAGE dump on stderr; a11 asserted its DoD through that
+    // spelling because `--help` fell through the error path, not the help
+    // path). Either way, the corrected text is what an operator typing that
+    // command reads.
     const viaCreate = call(['create', '--help']);
-    expect(viaCreate.code).toBe(2);
-    expect(viaCreate.err).not.toContain('the provisioner is inert');
-    expect(viaCreate.err).toContain('PER FIELD');
+    expect(viaCreate.code).toBe(0);
+    expect(viaCreate.out).not.toContain('the provisioner is inert');
+    expect(viaCreate.out).toContain('PER FIELD');
 
     // The help also tells a reader where a worker's work actually is.
     expect(help.out).toContain('submodule_slots');

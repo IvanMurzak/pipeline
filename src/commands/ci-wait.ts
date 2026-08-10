@@ -413,6 +413,10 @@ function resolveDefaultBranch(gh: GhRunner, target: GhTarget): string | { error:
 // ---------------------------------------------------------------------------
 
 export function runCiWait(args: string[], deps: CiWaitDeps = realDeps): number {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
   const parsed = parseCiWaitArgs(args);
   if ('error' in parsed) {
     process.stderr.write(`pipeline ci-wait: ${parsed.error}\n${USAGE}`);
