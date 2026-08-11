@@ -12,8 +12,8 @@ permission-mode: bypassPermissions
 ## Goal
 
 Block until the pull request's CI reaches a terminal state, then report the
-factual result flag `ci_green` so the `## Graph` can route: green → `06-merge`,
-red → back to `02-implement` (bounded to 3) to fix and re-push.
+factual result flag `ci_green` so the `## Graph` can route: green → `merge`,
+red → back to `implement` (bounded to 3) to fix and re-push.
 
 ## Context
 
@@ -47,10 +47,3 @@ red → back to `02-implement` (bounded to 3) to fix and re-push.
 
 - The gate ran to a terminal state and `ci_green` is reported as a fact
   (`true` only on exit code 0). No files were modified.
-
-## Next
-
-`<pipeline-root>/steps/06-merge.md`
-
-(Routing is governed by the `## Graph` in `PIPELINE.md`: `ci_green:true` proceeds
-to `06-merge`; otherwise it loops back to `02-implement`, bounded to 3.)

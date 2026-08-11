@@ -79,10 +79,3 @@ All three reach the script through the environment as `PP_QUESTION` /
 
 - The script exited 0 and this step's `output` holds `docs_dir` plus the ranked
   `candidates` array it printed (possibly empty). No files were modified.
-
-## Next
-
-`<pipeline-root>/steps/02-select.md`
-
-(Routing is declared in `PIPELINE.md`'s `## Graph`; this line documents the
-sequence and is what an older runtime would follow.)

@@ -51,9 +51,3 @@ failure it HALTS; it is never auto-retried by an agent.
 - This step mutates the remote. If `git push` or `gh pr create` fails, HALT with
   a clear reason (report `outcome: halted`). Do NOT retry blindly and do NOT
   fabricate a PR number — a human resumes after fixing the cause.
-
-## Next
-
-`<pipeline-root>/steps/05-ci-wait.md`
-
-(Routing is governed by the `## Graph` in `PIPELINE.md`.)

@@ -36,10 +36,3 @@ plan the next step can execute — which files to touch and how to verify the wo
 
 - A concrete plan exists that names the files to change and the verification
   command. No files in the project were modified.
-
-## Next
-
-`<pipeline-root>/steps/02-implement.md`
-
-(Routing is governed by the `## Graph` in `PIPELINE.md`; this `## Next` is the
-primary forward hint only.)

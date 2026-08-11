@@ -7,11 +7,11 @@ answer to `${PP_QUESTION}`, and record that choice with a brief rationale.
 
 ## Context
 
-- The previous step (`01-retrieve`) recorded its results as output. Read them
+- The previous step (`retrieve`) recorded its results as output. Read them
   from the run's outputs store:
-  `<pipeline-root>/.runtime/<run-id>/outputs/01-retrieve.json` — an absolute
+  `<pipeline-root>/.runtime/<run-id>/outputs/retrieve.json` — an absolute
   `docs_dir` and the `candidates` array (equivalently
-  `${steps.01-retrieve.output.candidates}`). Your run context provides `<run-id>`
+  `${steps.retrieve.output.candidates}`). Your run context provides `<run-id>`
   and this pipeline's absolute root.
 - Each candidate `file` is relative to `docs_dir`, so a candidate's real path is
   `<docs_dir>/<file>` — read it there (no cwd guessing).
@@ -21,7 +21,7 @@ answer to `${PP_QUESTION}`, and record that choice with a brief rationale.
 
 ## Inputs
 
-- `docs_dir` and the `candidates` array from `01-retrieve` (`file`, `score`,
+- `docs_dir` and the `candidates` array from `retrieve` (`file`, `score`,
   `snippet` each; `file` relative to `docs_dir`).
 - `${PP_QUESTION}` — the question the source must be able to answer.
 
@@ -44,7 +44,3 @@ answer to `${PP_QUESTION}`, and record that choice with a brief rationale.
 - `output.selected` is exactly one candidate `file` (or `null` when there were no
   candidates), alongside `docs_dir` and a one-sentence `reason`. No files were
   modified.
-
-## Next
-
-`<pipeline-root>/steps/03-answer.md`

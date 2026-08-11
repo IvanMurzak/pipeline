@@ -28,15 +28,3 @@ versioning, deploy.
 
 - PP_BASE (default: main) — the base branch to branch from and squash-merge into.
 
-## Graph
-
-```json
-{
-"plan":{"goto":"implement"},
-"implement":{"goto":"review"},
-"review":[{"when":"changes_requested","goto":"implement","max":3},{"goto":"open-pr"}],
-"open-pr":{"goto":"ci-wait"},
-"ci-wait":[{"when":"ci_green","goto":"merge"},{"goto":"implement","max":3}],
-"merge":{"done":true}
-}
-```

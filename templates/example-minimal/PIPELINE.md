@@ -22,5 +22,5 @@ this note.
 
 ## Invariants
 
-- Two steps run in order: `01-prepare.md` then `02-finish.md`.
-- `02-finish.md` is the terminal step (its `## Next` says the pipeline is complete).
+- Two steps run in order: `prepare.md` then `finish.md`.
+- `finish.md` is the terminal step (its `## Next` says the pipeline is complete).

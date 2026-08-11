@@ -11,7 +11,3 @@ State the final outcome that completes the pipeline.
 ## Success Criteria
 
 - An observable, checkable condition that proves the pipeline is done.
-
-## Next
-
-Pipeline complete.

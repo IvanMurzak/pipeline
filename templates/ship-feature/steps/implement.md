@@ -58,9 +58,3 @@ for the review and CI-red fix loops (see the `## Graph`).
 
 - The changes are committed on the feature branch (off `${PP_BASE}`), the build/test
   command passes locally, and `output.branch` holds the branch name.
-
-## Next
-
-`<pipeline-root>/steps/03-review.md`
-
-(Routing is governed by the `## Graph` in `PIPELINE.md`.)

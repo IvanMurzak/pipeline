@@ -355,7 +355,7 @@ test('resolvePermissionMode: step frontmatter beats manifest, manifest beats acc
 
 // Regression guard (simplified-onboarding x1): a clean-machine `pipeline
 // init` runs the bundled support-answer template headlessly via `pipeline
-// drive`. Its 01-retrieve step USED to shell out to `bun` from an AGENT step —
+// drive`. Its retrieve step USED to shell out to `bun` from an AGENT step —
 // and with no permission-mode anywhere, resolvePermissionMode fell back to
 // 'acceptEdits', which auto-accepts EDITS but still gates Bash, so the step's
 // only Bash call was auto-denied ("This command requires approval") with no
@@ -369,10 +369,10 @@ test('resolvePermissionMode: step frontmatter beats manifest, manifest beats acc
 // guarantee worth pinning is the one that holds today: the step must STAY a
 // script step. Convert it back to an agent step and it needs the Bash grant
 // again — this fails first, before the silent auto-deny comes back.
-test('bundled support-answer 01-retrieve needs no Bash grant — it is a script step', () => {
+test('bundled support-answer retrieve needs no Bash grant — it is a script step', () => {
   const root = templateDir('support-answer');
   const plan = computePlan(root);
-  const step = plan.steps.find((s) => s.step_id === '01-retrieve');
+  const step = plan.steps.find((s) => s.step_id === 'retrieve');
   expect(step?.type).toBe('script');
   expect(step?.script_spec?.script).toBe('scripts/bm25_retrieve.ts');
   // The template must keep planning clean; a `permission-mode` left behind on a
@@ -386,8 +386,8 @@ test('bundled support-answer 01-retrieve needs no Bash grant — it is a script 
 // falls through to the manifest/default exactly as before the fix.
 test('resolvePermissionMode: bundled support-answer read-only steps are untouched', () => {
   const root = templateDir('support-answer');
-  expect(resolvePermissionMode(join(root, 'steps', '02-select.md'), root)).toBe('acceptEdits');
-  expect(resolvePermissionMode(join(root, 'steps', '03-answer.md'), root)).toBe('acceptEdits');
+  expect(resolvePermissionMode(join(root, 'steps', 'select.md'), root)).toBe('acceptEdits');
+  expect(resolvePermissionMode(join(root, 'steps', 'answer.md'), root)).toBe('acceptEdits');
 });
 
 // Scoping guard: ship-feature's steps that shell out to git/gh/the CI gate
@@ -397,12 +397,12 @@ test('resolvePermissionMode: bundled support-answer read-only steps are untouche
 test('resolvePermissionMode: bundled ship-feature steps — grant only where the step shells out', () => {
   const root = templateDir('ship-feature');
   const mode = (rel: string) => resolvePermissionMode(join(root, 'steps', rel), root);
-  expect(mode('01-plan.md')).toBe('acceptEdits');
-  expect(mode('02-implement.md')).toBe('bypassPermissions');
-  expect(mode('03-review.md')).toBe('bypassPermissions');
-  expect(mode('04-open-pr.md')).toBe('bypassPermissions');
-  expect(mode('05-ci-wait.md')).toBe('bypassPermissions');
-  expect(mode('06-merge.md')).toBe('bypassPermissions');
+  expect(mode('plan.md')).toBe('acceptEdits');
+  expect(mode('implement.md')).toBe('bypassPermissions');
+  expect(mode('review.md')).toBe('bypassPermissions');
+  expect(mode('open-pr.md')).toBe('bypassPermissions');
+  expect(mode('ci-wait.md')).toBe('bypassPermissions');
+  expect(mode('merge.md')).toBe('bypassPermissions');
 });
 
 // --- end-to-end drives --------------------------------------------------------

@@ -7,8 +7,8 @@ source file selected by the previous step, ending with a citation to that file.
 
 ## Context
 
-- The previous step (`02-select`) recorded the chosen source. Read it from the
-  run's outputs store: `<pipeline-root>/.runtime/<run-id>/outputs/02-select.json`
+- The previous step (`select`) recorded the chosen source. Read it from the
+  run's outputs store: `<pipeline-root>/.runtime/<run-id>/outputs/select.json`
   — the absolute `docs_dir`, the `selected` file (relative to `docs_dir`), and
   the `reason`. Your run context provides `<run-id>` and this pipeline's absolute
   root.
@@ -18,7 +18,7 @@ source file selected by the previous step, ending with a citation to that file.
 
 ## Inputs
 
-- `docs_dir` and `output.selected` from `02-select` (the source file, or `null`).
+- `docs_dir` and `output.selected` from `select` (the source file, or `null`).
 - `${PP_QUESTION}` — the question to answer.
 
 ## Steps
@@ -37,7 +37,3 @@ source file selected by the previous step, ending with a citation to that file.
 - The answer addresses `${PP_QUESTION}` using only the selected source and ends
   with a `Source: <path>` citation (or a clear "not covered" message when there
   was no source). No files were modified.
-
-## Next
-
-Pipeline complete.

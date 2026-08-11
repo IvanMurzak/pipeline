@@ -23,11 +23,6 @@ Out:
 - Retrieval: `scripts/bm25_retrieve.ts` — Bun, stdlib-only, no network, no LLM,
   self-tested by `bun test scripts/tests/`. Step 01 is a `type: script` step.
 
-## Graph
-
-```json
-{"01-retrieve": {"goto": "02-select"}, "02-select": {"goto": "03-answer"}, "03-answer": {"done": true}}
-```
 
 ## Invariants
 

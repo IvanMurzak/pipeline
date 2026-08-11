@@ -68,7 +68,7 @@ test('the shipped template produces a clean plan — zero errors AND zero warnin
 test('step 01 is a script step wired to the bundled retrieval script', () => {
   const plan = computePlan(TEMPLATE);
   const step = plan.steps[0]!;
-  expect(step.step_id).toBe('01-retrieve');
+  expect(step.step_id).toBe('retrieve');
   expect(step.type).toBe('script');
   expect(step.script_spec?.script).toBe('scripts/bm25_retrieve.ts');
   // No `command:` — the script takes NO arguments; its inputs arrive as PP_*
@@ -97,17 +97,21 @@ test('steps 02 and 03 stay agent steps — only the deterministic one was conver
 });
 
 test('routing is declared in the graph, so the template needs no absolute paths', () => {
-  // A sequential script step must carry an ABSOLUTE `## Next`, which a shipped
-  // template cannot know (it is copied to a path chosen by the user). Graph
-  // mode routes by step_id instead — that is why this pipeline declares one.
+  // Under the v2 manifest the ORDER is the manifest, and the graph is derived
+  // from it — verified by corrupting PIPELINE.md's `## Graph` and watching this
+  // come back unchanged. Every target is an edge LIST, because a step may have
+  // more than one outgoing edge.
   const plan = computePlan(TEMPLATE);
   expect(plan.graph).toEqual({
-    '01-retrieve': { goto: '02-select' },
-    '02-select': { goto: '03-answer' },
-    '03-answer': { done: true },
+    'retrieve': [{ goto: 'select' }],
+    'select': [{ goto: 'answer' }],
+    'answer': [{ done: true }],
   });
-  const stepText = readFileSync(join(TEMPLATE, 'steps', '01-retrieve.md'), 'utf8');
-  expect(stepText).toInclude('<pipeline-root>/steps/02-select.md');
+  // The step no longer names its successor at all. `## Next` was the v1 routing
+  // channel and the manifest replaced it, so the body carrying a pointer would
+  // be a second answer to a question the manifest already settles.
+  const stepText = readFileSync(join(TEMPLATE, 'steps', 'retrieve.md'), 'utf8');
+  expect(stepText).not.toInclude('## Next');
 });
 
 test('all three pipeline variables stay declared with defaults, so a bare run works', () => {
@@ -302,7 +306,7 @@ function happyRun() {
   if (happy === null) {
     const w = mkWorld(false);
     const res = inProject(w, () =>
-      invokeNext({ root: w.root, runId: 'r1', start: join(w.root, 'steps', '01-retrieve.md') }),
+      invokeNext({ root: w.root, runId: 'r1', start: join(w.root, 'steps', 'retrieve.md') }),
     );
     happy = { w, res };
   }
@@ -322,7 +326,7 @@ test(
     expect(res.action.action).toBe('run-step');
     const dispatched = (res.out as any).steps;
     expect(dispatched).toHaveLength(1);
-    expect(dispatched[0].step_id).toBe('02-select');
+    expect(dispatched[0].step_id).toBe('select');
     expect(dispatched[0].type).toBe('agent');
     expect((res.out as any).mode).toBe('graph');
   },
@@ -333,7 +337,7 @@ test(
   'step 01 persists its output to the exact file steps 02/03 read',
   () => {
     const { w } = happyRun();
-    const outFile = join(w.root, '.runtime', 'r1', 'outputs', '01-retrieve.json');
+    const outFile = join(w.root, '.runtime', 'r1', 'outputs', 'retrieve.json');
     expect(existsSync(outFile)).toBe(true);
     const out = readJson(outFile);
     // Steps 02 and 03 name this path and these two keys in their own bodies —
@@ -354,8 +358,8 @@ test(
     expect(out.docs_dir.startsWith(TEMPLATE)).toBe(false); // not the source template
     expect(out.candidates.length).toBeGreaterThan(0);
 
-    const stepBody = readFileSync(join(w.root, 'steps', '02-select.md'), 'utf8');
-    expect(stepBody).toInclude('outputs/01-retrieve.json');
+    const stepBody = readFileSync(join(w.root, 'steps', 'select.md'), 'utf8');
+    expect(stepBody).toInclude('outputs/retrieve.json');
   },
   RUN_TIMEOUT_MS,
 );
@@ -366,7 +370,7 @@ test(
     const { w } = happyRun();
     // §8: a `finished` entry is what stops a re-dispatch from re-executing the
     // script after a crash between success and state persistence.
-    const ledger = readJson(join(w.root, '.runtime', 'r1', 'ledger', '01-retrieve-1.json'));
+    const ledger = readJson(join(w.root, '.runtime', 'r1', 'ledger', 'retrieve-1.json'));
     expect(ledger.phase).toBe('finished');
     expect(ledger.record.outcome).toBe('completed');
     expect(ledger.record.flags).toEqual({ has_candidates: true });
@@ -382,12 +386,12 @@ test(
       invokeNext({
         root: w.root,
         runId: 'r2',
-        start: join(w.root, 'steps', '01-retrieve.md'),
+        start: join(w.root, 'steps', 'retrieve.md'),
         cliVars: { PP_QUESTION: 'how do I request a refund', PP_TOP_K: '1' },
       }),
     );
 
-    const out = readJson(join(w.root, '.runtime', 'r2', 'outputs', '01-retrieve.json'));
+    const out = readJson(join(w.root, '.runtime', 'r2', 'outputs', 'retrieve.json'));
     // A different question really produced a different source — proof the value
     // travelled all the way into the spawned process, not just into next.json.
     expect(out.candidates).toHaveLength(1);
@@ -404,7 +408,7 @@ test(
       invokeNext({
         root: w.root,
         runId: 'r3',
-        start: join(w.root, 'steps', '01-retrieve.md'),
+        start: join(w.root, 'steps', 'retrieve.md'),
         cliVars: { PP_DOCS_DIR: join(tmpdir(), 'sa-no-such-dir-xyz') },
       }),
     );
@@ -414,7 +418,7 @@ test(
     // the script), and the halt reason rides in the state. What matters for
     // this template is that the chain made no forward progress...
     expect(res.action.action).not.toBe('run-step');
-    expect(JSON.stringify(res.out)).not.toInclude('02-select');
+    expect(JSON.stringify(res.out)).not.toInclude('select');
 
     // ...and that the reason preserved BOTH the script's self-classification
     // and its own message, rather than a generic "script failed".
@@ -425,13 +429,13 @@ test(
     // A failure record plus the full log is written for whoever fixes it —
     // `<step_id>-<dispatch_index>-<attempt>`.
     const failures = join(w.root, '.runtime', 'r3', 'failures');
-    expect(existsSync(join(failures, '01-retrieve-1-1.json'))).toBe(true);
-    expect(existsSync(join(failures, '01-retrieve-1-1.log'))).toBe(true);
-    expect(readJson(join(failures, '01-retrieve-1-1.json')).class).toBe('env');
+    expect(existsSync(join(failures, 'retrieve-1-1.json'))).toBe(true);
+    expect(existsSync(join(failures, 'retrieve-1-1.log'))).toBe(true);
+    expect(readJson(join(failures, 'retrieve-1-1.json')).class).toBe('env');
 
     // And no output was persisted — a failed retrieval must not leave steps
     // 02/03 a file to read.
-    expect(existsSync(join(w.root, '.runtime', 'r3', 'outputs', '01-retrieve.json'))).toBe(false);
+    expect(existsSync(join(w.root, '.runtime', 'r3', 'outputs', 'retrieve.json'))).toBe(false);
   },
   RUN_TIMEOUT_MS,
 );

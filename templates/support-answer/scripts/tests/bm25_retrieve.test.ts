@@ -148,7 +148,7 @@ describe('result object', () => {
     const r = successResult('/docs', CANDIDATES, 'q?');
     expect(r.ok).toBe(true);
     expect(r.flags).toEqual({ has_candidates: true });
-    // `output` is EXACTLY what lands in .runtime/<run-id>/outputs/01-retrieve.json
+    // `output` is EXACTLY what lands in .runtime/<run-id>/outputs/retrieve.json
     // and what steps 02/03 read — no extra keys, no renames.
     expect(Object.keys(r.output).sort()).toEqual(['candidates', 'docs_dir']);
     expect(r.output).toEqual({ docs_dir: '/docs', candidates: CANDIDATES });

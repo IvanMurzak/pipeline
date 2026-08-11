@@ -12,7 +12,3 @@ State the single outcome this step must achieve.
 ## Success Criteria
 
 - An observable, checkable condition that proves this step is done.
-
-## Next
-
-`02-finish.md`

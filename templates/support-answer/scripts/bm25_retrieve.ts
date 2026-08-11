@@ -1,4 +1,4 @@
-// support-answer / 01-retrieve: dependency-free BM25 retrieval over a local
+// support-answer / retrieve: dependency-free BM25 retrieval over a local
 // folder of docs.
 //
 // Ranks the files in a docs directory against a natural-language question using
@@ -18,7 +18,7 @@
 //   }
 //
 // `output` is what the runtime persists to
-// `<pipeline-root>/.runtime/<run-id>/outputs/01-retrieve.json`, which is the
+// `<pipeline-root>/.runtime/<run-id>/outputs/retrieve.json`, which is the
 // exact file steps 02/03 already read — so the envelope is a wrapper around the
 // SAME payload this script has always produced, never a different one.
 //

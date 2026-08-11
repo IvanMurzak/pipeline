@@ -15,7 +15,7 @@ permission-mode: bypassPermissions
 Review the feature branch's diff against `${PP_BASE}` and decide, as a factual
 boolean, whether changes must be applied before opening a PR. This step DRIVES
 the bounded fix loop: if it requests changes, the `## Graph` routes back to
-`02-implement` (up to 3 times), otherwise it falls through to `04-open-pr`.
+`implement` (up to 3 times), otherwise it falls through to `open-pr`.
 
 ## Context
 
@@ -52,10 +52,3 @@ the bounded fix loop: if it requests changes, the `## Graph` routes back to
 - The diff was reviewed and the result flag `changes_requested` is reported as a
   fact: `true` (with `output.notes` listing the required changes) or `false`. No
   files were modified.
-
-## Next
-
-`<pipeline-root>/steps/04-open-pr.md`
-
-(Routing is governed by the `## Graph` in `PIPELINE.md`: `changes_requested:true`
-loops back to `02-implement` — bounded to 3 — otherwise it proceeds here.)

@@ -63,8 +63,8 @@ describe('pipeline clone', () => {
 
     const dest = join(proj, '.pipeline', 'example-minimal');
     expect(existsSync(join(dest, 'PIPELINE.md'))).toBe(true);
-    expect(existsSync(join(dest, 'steps', '01-prepare.md'))).toBe(true);
-    expect(existsSync(join(dest, 'steps', '02-finish.md'))).toBe(true);
+    expect(existsSync(join(dest, 'steps', 'prepare.md'))).toBe(true);
+    expect(existsSync(join(dest, 'steps', 'finish.md'))).toBe(true);
     // Copied content is byte-identical to the bundled source.
     expect(readFileSync(join(dest, 'PIPELINE.md'), 'utf8')).toBe(
       readFileSync(join(templateDir('example-minimal'), 'PIPELINE.md'), 'utf8'),
@@ -140,7 +140,7 @@ describe('pipeline clone', () => {
     expect(parsed.cloned).toBe(true);
     expect(parsed.template).toBe('example-minimal');
     expect(parsed.files).toContain('PIPELINE.md');
-    expect(parsed.files).toContain('steps/01-prepare.md');
+    expect(parsed.files).toContain('steps/prepare.md');
   });
 
   test('default target is the CURRENT working directory (real subprocess)', () => {

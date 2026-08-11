@@ -60,7 +60,3 @@ HALTS; it is never auto-retried by an agent.
 
 - This step mutates the remote. If `gh pr merge` fails, HALT with a clear reason
   (report `outcome: halted`); do NOT retry blindly.
-
-## Next
-
-Pipeline complete.
