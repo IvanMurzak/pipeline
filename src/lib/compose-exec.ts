@@ -41,6 +41,9 @@ import { join } from 'node:path';
 import type { ScriptParamSpec } from './script-types';
 import { validateOutputShape } from './script-step';
 import type { ActiveChildRun } from './next';
+// c2 — a composed child's record and its resolved params both carry run data.
+// See lib/output-scrubber.ts.
+import { scrub } from './output-scrubber';
 
 /**
  * Runaway guard on the command layer's composition recursion within ONE
@@ -124,7 +127,7 @@ export function readRunTree(pipelineRoot: string, runId: string): RunTreeRecord 
 function writeRunTree(record: RunTreeRecord): void {
   const f = runTreeFile(record.pipeline_root, record.run_id);
   mkdirSync(runDir(record.pipeline_root, record.run_id), { recursive: true });
-  writeFileSync(f, JSON.stringify(record, null, 2) + '\n', 'utf8');
+  writeFileSync(f, scrub(JSON.stringify(record, null, 2) + '\n'), 'utf8');
 }
 
 /** The record a run has — or WOULD have — as a tree ROOT (used when a run
@@ -243,7 +246,7 @@ export function deliverChildInputs(
   mkdirSync(dir, { recursive: true });
   if (params !== null) {
     const paramsFile = join(dir, 'params.json');
-    writeFileSync(paramsFile, JSON.stringify(params, null, 2) + '\n', 'utf8');
+    writeFileSync(paramsFile, scrub(JSON.stringify(params, null, 2) + '\n'), 'utf8');
     writeFileSync(join(dir, 'task-ref.json'), JSON.stringify({ task_file: paramsFile }), 'utf8');
     return paramsFile;
   }

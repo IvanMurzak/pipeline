@@ -161,6 +161,33 @@ import {
   taskFileFor,
 } from '../lib/compose-exec';
 import type { ActiveChildRun } from '../lib/next';
+import { scrub } from '../lib/output-scrubber';
+
+// ---------------------------------------------------------------------------
+// c2 — the two stream sinks this command owns
+// ---------------------------------------------------------------------------
+//
+// EVERY raw `process.stdout.write` / `process.stderr.write` in this file was
+// replaced by these two, so the provider-key scrubber cannot be bypassed by a
+// future write that forgets to call it: there is exactly one place per stream
+// where bytes leave this module, and both of them scrub. The action JSON
+// printed on stdout carries step prompts, halt reasons and executor-authored
+// records — the exact free-text fields 02 identifies as the leak path — and
+// stderr relays script-step warnings verbatim.
+//
+// `drive` does NOT go through here (it calls `invokeNext` directly and owns
+// its own scrub-wrapped sinks), but `pipeline next` is the same engine driven
+// from a shell, so it gets the same guarantee rather than a weaker one.
+
+/** stdout, scrubbed. The only stdout write in this file. */
+function stdoutWrite(s: string): void {
+  process.stdout.write(scrub(s));
+}
+
+/** stderr, scrubbed. The only stderr write in this file. */
+function stderrWrite(s: string): void {
+  process.stderr.write(scrub(s));
+}
 
 interface NextArgs {
   root?: string;
@@ -447,7 +474,7 @@ export function writeBriefFile(
     // best-effort — the dir was just created above
   }
   const briefFile = join(dir, `${String(n).padStart(2, '0')}.json`);
-  writeFileSync(briefFile, JSON.stringify(out, null, 2) + '\n', 'utf8');
+  writeFileSync(briefFile, scrub(JSON.stringify(out, null, 2) + '\n'), 'utf8');
   return { action: action.action, brief_file: briefFile, phase: phaseForAction(action) };
 }
 
@@ -506,7 +533,7 @@ function saveState(root: string, runId: string, state: NextState): void {
   if (!existsSync(gi)) writeFileSync(gi, '*\n', 'utf8');
   const dir = stateDir(root, runId);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'next.json'), JSON.stringify(state, null, 2) + '\n', 'utf8');
+  writeFileSync(join(dir, 'next.json'), scrub(JSON.stringify(state, null, 2) + '\n'), 'utf8');
 }
 
 /** Resolve an OFF-PLAN step's own model from disk: its `model:` frontmatter,
@@ -1145,7 +1172,7 @@ function writeWorktreeArtifactStubs(wtPipelineRoot: string, runId: string): void
  *  affects the printed action JSON (stdout) or the exit code. */
 function warnNote(msg: string): void {
   try {
-    process.stderr.write(`pipeline next: ${msg}\n`);
+    stderrWrite(`pipeline next: ${msg}\n`);
   } catch {
     // best-effort
   }
@@ -1270,7 +1297,7 @@ function persistOutput(
   try {
     const f = outputsFile(root, runId, stepId);
     mkdirSync(dirname(f), { recursive: true });
-    writeFileSync(f, json + '\n', 'utf8');
+    writeFileSync(f, scrub(json + '\n'), 'utf8');
     return null;
   } catch (e) {
     return `step '${stepId}' output could not be persisted: ${(e as Error).message}`;
@@ -1292,7 +1319,7 @@ function writeFeedbackFile(root: string, runId: string, stepId: string, body: st
     if (!existsSync(gi)) writeFileSync(gi, '*\n', 'utf8');
     let n = 1;
     while (existsSync(join(dir, `${stepId}-${String(n).padStart(2, '0')}.md`)) && n < 100) n++;
-    writeFileSync(join(dir, `${stepId}-${String(n).padStart(2, '0')}.md`), body, 'utf8');
+    writeFileSync(join(dir, `${stepId}-${String(n).padStart(2, '0')}.md`), scrub(body), 'utf8');
   } catch (e) {
     warnNote(`feedback file for script step ${stepId} could not be written: ${(e as Error).message}`);
   }
@@ -2944,13 +2971,13 @@ const USAGE =
 
 export function runNext(args: string[]): number {
   if (args.includes('--help') || args.includes('-h')) {
-    process.stdout.write(USAGE);
+    stdoutWrite(USAGE);
     return 0;
   }
 
   const a = parseArgs(args);
   if (!a.root || !a.runId) {
-    process.stderr.write('pipeline next: --root and --run-id are required\n');
+    stderrWrite('pipeline next: --root and --run-id are required\n');
     return 2;
   }
   // `--record-file <path>`: read the record JSON from a UTF-8 file, then flow
@@ -2959,7 +2986,7 @@ export function runNext(args: string[]): number {
   // file is read-only here — never deleted or modified.
   if (a.recordFile !== undefined) {
     if (a.recordSeen) {
-      process.stderr.write('pipeline next: --record and --record-file are mutually exclusive\n');
+      stderrWrite('pipeline next: --record and --record-file are mutually exclusive\n');
       return 2;
     }
     let raw: string;
@@ -2967,12 +2994,12 @@ export function runNext(args: string[]): number {
       raw = readFileSync(a.recordFile, 'utf8');
     } catch (e) {
       const why = e instanceof Error ? e.message : String(e);
-      process.stderr.write(`pipeline next: --record-file ${a.recordFile} could not be read: ${why}\n`);
+      stderrWrite(`pipeline next: --record-file ${a.recordFile} could not be read: ${why}\n`);
       return 2;
     }
     applyRecord(a, parseRecord(raw));
     if (a.recordError !== undefined) {
-      process.stderr.write(`pipeline next: --record-file ${a.recordFile}: ${a.recordError}\n`);
+      stderrWrite(`pipeline next: --record-file ${a.recordFile}: ${a.recordError}\n`);
       return 2;
     }
   }
@@ -2980,24 +3007,24 @@ export function runNext(args: string[]): number {
   // (exit 2) — never a silent auto-resume — so the manager retries with valid
   // JSON instead of discarding the completed step the record was reporting.
   if (a.recordError !== undefined) {
-    process.stderr.write(`pipeline next: ${a.recordError}\n`);
+    stderrWrite(`pipeline next: ${a.recordError}\n`);
     return 2;
   }
   // Same loudness for a malformed `--model` / `--effort` — a typo'd override
   // must never be silently dropped (the run would quietly execute on the
   // wrong model/effort).
   if (a.modelError !== undefined) {
-    process.stderr.write(`pipeline next: ${a.modelError}\n`);
+    stderrWrite(`pipeline next: ${a.modelError}\n`);
     return 2;
   }
   if (a.effortError !== undefined) {
-    process.stderr.write(`pipeline next: ${a.effortError}\n`);
+    stderrWrite(`pipeline next: ${a.effortError}\n`);
     return 2;
   }
   // Same loudness for a malformed `--var` (no NAME=value shape) — a typo'd
   // override must never be silently dropped (L10/T11).
   if (a.varsError !== undefined) {
-    process.stderr.write(`pipeline next: ${a.varsError}\n`);
+    stderrWrite(`pipeline next: ${a.varsError}\n`);
     return 2;
   }
   // `--vars-file`: strict dotenv load BEFORE any state exists — unreadable or
@@ -3007,7 +3034,7 @@ export function runNext(args: string[]): number {
   if (a.varsFile !== undefined) {
     const loaded = loadVarsFile(a.varsFile);
     if (!loaded.ok) {
-      process.stderr.write(`pipeline next: ${loaded.error}\n`);
+      stderrWrite(`pipeline next: ${loaded.error}\n`);
       return 2;
     }
     fileVars = loaded.vars;
@@ -3019,7 +3046,7 @@ export function runNext(args: string[]): number {
   // runs (no phantom halt action/event, no state or stats touched).
   const frozen = frozenVariablesError(a.root, a.runId, cliVars);
   if (frozen !== null) {
-    process.stderr.write(`pipeline next: ${frozen}\n`);
+    stderrWrite(`pipeline next: ${frozen}\n`);
     return 2;
   }
 
@@ -3043,10 +3070,10 @@ export function runNext(args: string[]): number {
   // stdout, and stdout carries only the three-key control signal.
   if (a.briefFile) {
     const control = writeBriefFile(a.root, a.runId, res.out, res.action);
-    process.stdout.write(JSON.stringify(control, null, 2) + '\n');
+    stdoutWrite(JSON.stringify(control, null, 2) + '\n');
     return res.code;
   }
 
-  process.stdout.write(JSON.stringify(res.out, null, 2) + '\n');
+  stdoutWrite(JSON.stringify(res.out, null, 2) + '\n');
   return res.code;
 }

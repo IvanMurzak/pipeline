@@ -43,6 +43,9 @@ import {
 import { join } from 'node:path';
 import { telemetryDir, type OutboxCounters, type OutboxRecord } from './telemetry-outbox';
 import type { FlushResult } from './telemetry-upload';
+// c2 — the status file records the last flush, INCLUDING its error text, which
+// is produced by an HTTP client we do not control. See lib/output-scrubber.ts.
+import { scrub } from './output-scrubber';
 
 // ---------------------------------------------------------------------------
 // The report shape
@@ -222,7 +225,7 @@ export function lastFlushPath(projectRoot: string): string {
 
 function writeJsonAtomic(path: string, value: unknown): void {
   const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-  writeFileSync(tmp, `${JSON.stringify(value)}\n`, 'utf-8');
+  writeFileSync(tmp, scrub(`${JSON.stringify(value)}\n`), 'utf-8');
   try {
     renameSync(tmp, path);
   } catch (e) {

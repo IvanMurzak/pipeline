@@ -57,6 +57,12 @@ import type {
   ScriptResult,
   ScriptStepSpec,
 } from './script-types';
+// c2 — this module is a SUBPROCESS RELAY: a failed script's stdout and stderr
+// are written verbatim to a sibling `.log` and, tail-clipped, into the failure
+// record. A script that echoed its own environment would put the provider key
+// in both. Every write here goes through the scrubber; see
+// lib/output-scrubber.ts.
+import { scrub } from './output-scrubber';
 
 // ---------------------------------------------------------------------------
 // Process seam (mirrors the GitRunner style in lib/git.ts)
@@ -672,7 +678,7 @@ export function parseNextSection(iterationPath: string): NextParse {
 
 function writeJson(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(value, null, 2) + '\n', 'utf8');
+  writeFileSync(path, scrub(JSON.stringify(value, null, 2) + '\n'), 'utf8');
 }
 
 /** Atomic variant for the LEDGER (§8): write a sibling temp file, then
@@ -683,7 +689,7 @@ function writeJson(path: string, value: unknown): void {
 function writeJsonAtomic(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n', 'utf8');
+  writeFileSync(tmp, scrub(JSON.stringify(value, null, 2) + '\n'), 'utf8');
   renameSync(tmp, path);
 }
 
@@ -906,7 +912,7 @@ export function executeScriptStep(
     const logBody = run
       ? `# stdout\n${run.stdout}\n\n# stderr\n${run.stderr}\n`
       : `# no execution — ${failure.class} failure before spawn\n${failure.detail}\n`;
-    writeFileSync(logPath, logBody, 'utf8');
+    writeFileSync(logPath, scrub(logBody), 'utf8');
     const record: ScriptStepRecord = {
       kind: 'step',
       outcome: 'halted',
@@ -1171,7 +1177,11 @@ export function executeScriptStep(
     // Intermediate transient failures still persist their §6.2.1 records.
     const midPath = join(failuresDir, `${ctx.stepId}-${ctx.dispatchIndex}-${attempt}.json`);
     writeJson(midPath, failure);
-    writeFileSync(midPath.replace(/\.json$/, '.log'), `# stdout\n${run.stdout}\n\n# stderr\n${run.stderr}\n`, 'utf8');
+    writeFileSync(
+      midPath.replace(/\.json$/, '.log'),
+      scrub(`# stdout\n${run.stdout}\n\n# stderr\n${run.stderr}\n`),
+      'utf8',
+    );
   }
 
   return finalize(last!.failure, last!.run, attempt);

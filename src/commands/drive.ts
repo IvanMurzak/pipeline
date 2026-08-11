@@ -192,6 +192,10 @@ import {
   type StepSession,
 } from '../lib/step-transcripts';
 import { parseFrontmatter } from '../lib/frontmatter';
+// c2 — layer two of the provider-key defence. EVERY byte this command emits or
+// persists goes through `scrub`; see lib/output-scrubber.ts and the sink
+// enumeration in tests/output-scrubber-sinks.test.ts.
+import { scrub, scrubWriter, scrubbedRelay } from '../lib/output-scrubber';
 
 // Re-exported: StepSession historically lived here (launcher/tests import it).
 export type { StepSession };
@@ -545,6 +549,13 @@ function subprocessExecutor(
       }
       let settled = false;
       let outBuf = '';
+      // c2 — the child's stderr arrives in OS-sized chunks, so a key could
+      // straddle a boundary and match neither half. `scrubbedRelay` holds the
+      // trailing partial line back until its newline arrives; `err` is already
+      // scrub-wrapped, so this is reassembly on top of redaction, not instead
+      // of it. Rebuilt with `stream` on the Windows shell retry, and FLUSHED on
+      // every terminal path below — an unflushed carry is lost output.
+      let stderrRelay = scrubbedRelay(err);
       // Fed chunk-by-chunk below; rebuilt if the Windows shell retry fires so
       // a half-read stream can never leak into the retry's summary.
       let stream = new ClaudeStreamParser({
@@ -605,13 +616,15 @@ function subprocessExecutor(
           // Live: frames are discriminated here, mid-run, not after the exit.
           stream.push(text);
         });
-        child.stderr?.on('data', (d: unknown) => err(String(d)));
+        child.stderr?.on('data', (d: unknown) => stderrRelay(String(d)));
         child.on('error', (e: unknown) => {
           // Windows: `claude` installs as a .cmd shim that only a shell can
           // launch — retry ONCE through the shell before giving up. Direct
           // spawn stays the default (no extra cmd.exe per step).
           if (!useShell && process.platform === 'win32') {
             outBuf = '';
+            stderrRelay.flush();
+            stderrRelay = scrubbedRelay(err);
             stream = new ClaudeStreamParser({
               onToolCall: (call) => onToolCall?.(req, call),
               onNonJson: (line) => err(line + '\n'),
@@ -619,6 +632,7 @@ function subprocessExecutor(
             launch(true);
             return;
           }
+          stderrRelay.flush();
           finish({ code: null, error: e instanceof Error ? e.message : String(e) });
         });
         child.on('close', (code: number | null) => {
@@ -628,6 +642,7 @@ function subprocessExecutor(
             // A stream cut short by SIGTERM (exit 143) simply has no terminal
             // `result` frame — end() closes it without inventing an error.
             stream.end();
+            stderrRelay.flush();
             finish({ code, stdout: outBuf, stream: stream.summary() });
           }
         });
@@ -660,7 +675,7 @@ export const MAX_CRASH_RESUMES = 2;
 
 function writeStepSession(sessionsDir: string, stepId: string, s: StepSession): void {
   try {
-    writeFileSync(join(sessionsDir, `${stepId}.json`), JSON.stringify(s, null, 2), 'utf8');
+    writeFileSync(join(sessionsDir, `${stepId}.json`), scrub(JSON.stringify(s, null, 2)), 'utf8');
   } catch {
     // best-effort — a lost session file degrades to a fresh spawn next time
   }
@@ -1177,8 +1192,13 @@ const USAGE =
   '                      [--executor-cmd <template>] [--json]\n';
 
 export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<number> {
-  const out = deps.out ?? ((s: string) => process.stdout.write(s));
-  const err = deps.err ?? ((s: string) => process.stderr.write(s));
+  // c2 — the two sinks this command writes through, both wrapped OUTSIDE the
+  // `??` so an INJECTED sink (tests, commands/init.ts) gets exactly the same
+  // guarantee as the real stream, and `scrub` again on the default arm so the
+  // invariant "no raw stream write in this closure passes unscrubbed text" is
+  // checkable by reading one line. Double-scrubbing is free and idempotent.
+  const out = scrubWriter(deps.out ?? ((s: string) => process.stdout.write(scrub(s))));
+  const err = scrubWriter(deps.err ?? ((s: string) => process.stderr.write(scrub(s))));
   if (args.includes('--help') || args.includes('-h')) {
     out(USAGE);
     return 0;
@@ -1346,7 +1366,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     }
     taskFile = join(rootAbs, '.runtime', runId, 'task.md');
     try {
-      writeFileSync(taskFile, a.task, 'utf8');
+      writeFileSync(taskFile, scrub(a.task), 'utf8');
     } catch (e) {
       err(`pipeline drive: cannot write task file: ${e instanceof Error ? e.message : String(e)}\n`);
       return 2;
@@ -1577,7 +1597,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
   const briefsFile = join(rootAbs, '.runtime', runId, 'script-briefs.json');
   const persistScriptBriefs = (briefs: string[]): void => {
     try {
-      writeFileSync(briefsFile, JSON.stringify({ briefs }), 'utf8');
+      writeFileSync(briefsFile, scrub(JSON.stringify({ briefs })), 'utf8');
     } catch {
       // best-effort
     }
@@ -1744,7 +1764,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         sess.status = 'done';
         writeStepSession(sessionsDir, key, sess);
         try {
-          writeFileSync(recordFile, JSON.stringify(structured), 'utf8');
+          writeFileSync(recordFile, scrub(JSON.stringify(structured)), 'utf8');
         } catch {
           // best-effort observability copy — the in-memory object is authoritative
         }
@@ -2205,7 +2225,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
         // Persist the canonical observability copy — drive's own write, never
         // permission-gated. The record file consumers see is ALWAYS this one.
         try {
-          writeFileSync(canonicalRecordFile, JSON.stringify(attemptRaw), 'utf8');
+          writeFileSync(canonicalRecordFile, scrub(JSON.stringify(attemptRaw)), 'utf8');
         } catch (e) {
           progress('warning', {
             detail: `failed to persist record to ${canonicalRecordFile}: ${e instanceof Error ? e.message : String(e)}`,
