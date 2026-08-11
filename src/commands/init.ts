@@ -323,7 +323,7 @@ export type PluginStatus = 'installed' | 'skipped' | 'failed';
  *  stderr and continues (the clone is still useful). */
 function installPlugin(deps: InitDeps): { status: PluginStatus; warning?: string } {
   const marketplace = deps.claudeCli(['plugin', 'marketplace', 'add', 'IvanMurzak/pipeline-claude-marketplace']);
-  const install = deps.claudeCli(['plugin', 'install', 'pipeline@ai-pipeline']);
+  const install = deps.claudeCli(['plugin', 'install', 'pipeline@pipeline']);
   if (marketplace.code === 0 && install.code === 0) return { status: 'installed' };
   const detail = install.code !== 0 ? install.stderr || install.stdout : marketplace.stderr || marketplace.stdout;
   return {
@@ -609,7 +609,7 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
       const res = installPlugin(deps);
       pluginStatus = res.status;
       if (res.status === 'installed') {
-        if (!parsed.json) line(deps, '✓ Plugin installed          pipeline@ai-pipeline');
+        if (!parsed.json) line(deps, '✓ Plugin installed          pipeline@pipeline');
       } else if (res.warning) {
         warnings.push(res.warning);
         if (!parsed.json) line(deps, `⚠ ${res.warning} — continuing (the clone is still useful).`);
