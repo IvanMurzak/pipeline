@@ -13,7 +13,7 @@ import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep, basename, dirname } from 'node:path';
 import { parseFrontmatter, type FrontmatterValue } from './frontmatter';
 import { extractGraph, validateGraph, type Graph } from './graph';
-import { MANIFEST_FILENAME, parseManifest, type BodyEntry } from './manifest';
+import { MANIFEST_FILENAME, parseManifest, type BodyEntry, type Runner } from './manifest';
 import { planFromManifest } from './manifest-plan';
 import { normalizeEffort, normalizeModel } from './model';
 import {
@@ -125,12 +125,18 @@ export interface Plan {
   mode: PipelineMode;
   isolation: Isolation;
   /**
-   * Who drives the run: `manager` (a pipeline-manager subagent, the default)
-   * or `headless` (a detached CLI-driven runner). From the optional `runner`
-   * frontmatter key of PIPELINE.md; unknown values warn and fall back to
-   * `manager` (mirrors the `execution:` / `isolation:` parsing).
+   * Who drives the run — one of the four E7/E15 modes (see {@link Runner} in
+   * lib/manifest.ts): `session`, `manager` (a pipeline-manager subagent, the
+   * default), `driver` (a detached CLI-driven runner), or `standalone`.
+   *
+   * From the optional `runner:` key: a v2 manifest's top-level `runner:`, or a
+   * v1 PIPELINE.md's `runner:` frontmatter, which keeps its older two-value
+   * vocabulary (`manager` / `headless`) and maps read-time onto this union —
+   * `headless` becomes `driver`, the same mode under its new name, not a
+   * different one. Unknown values warn and fall back to `manager` (mirrors the
+   * `execution:` / `isolation:` parsing).
    */
-  runner: 'manager' | 'headless';
+  runner: Runner;
   default_model: string | null;
   /** Pipeline-level reasoning effort (PIPELINE.md `effort:`), null = inherit. */
   default_effort: string | null;
@@ -1000,7 +1006,7 @@ function computePlanFromMarkdown(pipelineRoot: string, options: ComputePlanOptio
   // 1. PIPELINE.md frontmatter (execution / isolation / default model).
   let execution = 'sequential';
   let isolation: Isolation = 'worktree';
-  let runner: 'manager' | 'headless' = 'manager';
+  let runner: Runner = 'manager';
   let manifestModel: string | null = null;
   let manifestEffort: string | null = null;
   let manifestBody = '';
@@ -1053,8 +1059,12 @@ function computePlanFromMarkdown(pipelineRoot: string, options: ComputePlanOptio
     else if (iso && iso !== 'worktree')
       warnings.push(`PIPELINE.md: unknown isolation '${iso}' — treating as worktree`);
 
+    // v1's vocabulary stays two values on the wire — `manager` / `headless` —
+    // but `headless` now maps onto the manifest's `driver` mode: same
+    // behaviour, renamed (E7/E15). Neither the accepted spellings nor the
+    // fallback-with-warning behaviour changes here.
     const run = typeof fields.runner === 'string' ? fields.runner.toLowerCase() : '';
-    if (run === 'headless') runner = 'headless';
+    if (run === 'headless') runner = 'driver';
     else if (run && run !== 'manager')
       warnings.push(`PIPELINE.md: unknown runner '${run}', using manager`);
 

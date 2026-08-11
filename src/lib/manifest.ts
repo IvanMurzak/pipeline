@@ -73,11 +73,21 @@ export type Isolation = 'none' | 'step' | 'run';
 export type StepType = 'agent' | 'script' | 'pipeline' | 'gate';
 /** What a `type: script` step does when it fails past the mechanical ladder. */
 export type OnFailure = 'halt' | 'agent';
+/** Who drives the run (E7/E15) — the axis is WHERE THE LOOP LIVES, not what
+ *  executes one step:
+ *    session    — the main Claude Code session calls `pipeline next` itself
+ *    manager    — a `pipeline-manager` subagent runs the loop (the default)
+ *    driver     — `pipeline drive`, a process we own; no model in the loop
+ *    standalone — the same owned loop, stepping through the Agent SDK
+ *  Absent ⇒ `manager` (E10) — today's only behaviour, so no existing pipeline
+ *  changes meaning. */
+export type Runner = 'session' | 'manager' | 'driver' | 'standalone';
 
 const EXECUTIONS: Execution[] = ['sequential', 'parallel'];
 const ISOLATIONS: Isolation[] = ['none', 'step', 'run'];
 const STEP_TYPES: StepType[] = ['agent', 'script', 'pipeline', 'gate'];
 const ON_FAILURES: OnFailure[] = ['halt', 'agent'];
+const RUNNERS: Runner[] = ['session', 'manager', 'driver', 'standalone'];
 const NAME_RE = /^[a-z0-9][a-z0-9._-]*$/i;
 
 /** One resolved include in a step's body.
@@ -142,6 +152,9 @@ export interface Manifest {
   description: string | null;
   execution: Execution;
   isolation: Isolation;
+  /** Who drives the run (E7/E15) — see {@link Runner}. Absent in the manifest
+   *  ⇒ `manager` (E10). */
+  runner: Runner;
   base_branch: string;
   self_improve: boolean;
   defaults: { model: string | null; effort: string | null };
@@ -640,6 +653,9 @@ export function parseManifest(text: string): Manifest {
   const isolation = doc.isolation === undefined
     ? 'none'
     : readEnum(doc.isolation, ISOLATIONS, 'isolation', errors);
+  const runner = doc.runner === undefined
+    ? 'manager'
+    : readEnum(doc.runner, RUNNERS, 'runner', errors);
   const selfImprove = readBool(doc.self_improve, 'self_improve', errors) ?? true;
 
   const defaultsMap = readMap(doc.defaults, 'defaults', errors);
@@ -673,6 +689,7 @@ export function parseManifest(text: string): Manifest {
     description: readString(doc.description, 'description', errors),
     execution: execution ?? 'sequential',
     isolation: isolation ?? 'none',
+    runner: runner ?? 'manager',
     base_branch: readString(doc.base_branch, 'base_branch', errors) ?? 'main',
     self_improve: selfImprove,
     defaults: {
@@ -695,6 +712,7 @@ function blank(over: Partial<Manifest>): Manifest {
     description: null,
     execution: 'sequential',
     isolation: 'none',
+    runner: 'manager',
     base_branch: 'main',
     self_improve: true,
     defaults: { model: null, effort: null },

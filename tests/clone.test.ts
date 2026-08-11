@@ -188,6 +188,14 @@ describe('bundled template library', () => {
         expect(plan.errors).toEqual([]);
         expect(plan.steps.length).toBeGreaterThan(0);
       });
+
+      // None of the bundled `pipeline.yml` fixtures declares `runner:` — this
+      // pins that the new key changes nothing for them (E10): absent still
+      // resolves to `manager`, same as before the key existed at all.
+      test('declares no runner: and so resolves to the manager default, unchanged', () => {
+        const plan = computePlan(dir);
+        expect(plan.runner).toBe('manager');
+      });
     });
   }
 

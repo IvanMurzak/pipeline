@@ -346,11 +346,11 @@ test('runner defaults to manager when absent (and with no PIPELINE.md at all)', 
   expect(withManifest.warnings).toEqual([]);
 });
 
-test('runner: headless is parsed and surfaced', () => {
+test('runner: headless is parsed and mapped onto the v2 name `driver`', () => {
   const plan = computePlan(
     scaffold('---\nrunner: headless\n---\n', { '01-a.md': '---\n---\n' }),
   );
-  expect(plan.runner).toBe('headless');
+  expect(plan.runner).toBe('driver');
   expect(plan.warnings).toEqual([]);
 });
 
