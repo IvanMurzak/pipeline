@@ -36,6 +36,9 @@ import { ensureGeneratedDir } from './generated-dir';
 import { resolveProjectRoot } from './event';
 import { shipFinishedRunRecord } from './telemetry-ship';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+// c2 — runs.jsonl, the per-run .log and SUMMARY.md all carry halt reasons and
+// tool-failure detail verbatim. See lib/output-scrubber.ts.
+import { scrub } from './output-scrubber';
 
 // ---------------------------------------------------------------------------
 // Switch + paths
@@ -182,7 +185,7 @@ export function statsAppend(pipelineRoot: string, runId: string, line: Omit<Buff
     const loc = statsLocation(pipelineRoot);
     const p = bufferPath(loc, runId);
     mkdirSync(dirname(p), { recursive: true });
-    appendFileSync(p, JSON.stringify({ t: line.t ?? Date.now(), ...line }) + '\n', 'utf8');
+    appendFileSync(p, scrub(JSON.stringify({ t: line.t ?? Date.now(), ...line }) + '\n'), 'utf8');
   } catch {
     // best-effort — never affect the run
   }
@@ -509,8 +512,8 @@ export function statsFinalizeRun(
       endedMs: Date.now(),
     });
     ensureGeneratedDir(join(loc.base, loc.rel, 'runs'), loc.base);
-    appendFileSync(runsFile, JSON.stringify(rec) + '\n', 'utf8');
-    writeFileSync(join(loc.base, loc.rel, 'runs', `${runId}.log`), renderRunLog(rec), 'utf8');
+    appendFileSync(runsFile, scrub(JSON.stringify(rec) + '\n'), 'utf8');
+    writeFileSync(join(loc.base, loc.rel, 'runs', `${runId}.log`), scrub(renderRunLog(rec)), 'utf8');
     if (existsSync(buf)) unlinkSync(buf);
     renderSummary(loc.base);
     // b21 — AFTER the record is durable on disk, so a crash between the two
@@ -678,20 +681,22 @@ export function statsEnrichTokens(
     }
     const next = rewriteRunTokens(readFileSync(runsFile, 'utf8'), runId, tokens);
     if (next === null) return false;
-    writeFileSync(runsFile, next, 'utf8');
+    writeFileSync(runsFile, scrub(next), 'utf8');
     const log = join(dirname(runsFile), 'runs', `${runId}.log`);
     if (existsSync(log)) {
       appendFileSync(
         log,
-        `tokens: in=${tokens.input} out=${tokens.output} cache_read=${tokens.cache_read} cache_write=${tokens.cache_creation}` +
-          (tokens.tools_called != null ? ` tools=${tokens.tools_called}` : '') +
-          (tokens.tools_failed != null ? ` tool_fails=${tokens.tools_failed}` : '') +
-          (tokens.agents_spawned != null ? ` agents=${tokens.agents_spawned}` : '') +
-          (tokens.cost_usd != null ? ` cost=$${tokens.cost_usd.toFixed(4)}` : '') +
-          ` (folded ${new Date().toISOString()})\n`,
+        scrub(
+          `tokens: in=${tokens.input} out=${tokens.output} cache_read=${tokens.cache_read} cache_write=${tokens.cache_creation}` +
+            (tokens.tools_called != null ? ` tools=${tokens.tools_called}` : '') +
+            (tokens.tools_failed != null ? ` tool_fails=${tokens.tools_failed}` : '') +
+            (tokens.agents_spawned != null ? ` agents=${tokens.agents_spawned}` : '') +
+            (tokens.cost_usd != null ? ` cost=$${tokens.cost_usd.toFixed(4)}` : '') +
+            ` (folded ${new Date().toISOString()})\n`,
+        ),
       );
       if (failures && failures.length) {
-        appendFileSync(log, renderFailureLogSection(failures, tokens.tools_failed ?? failures.length));
+        appendFileSync(log, scrub(renderFailureLogSection(failures, tokens.tools_failed ?? failures.length)));
       }
     }
     renderSummary(base);
@@ -876,7 +881,7 @@ export function renderSummary(base: string): void {
       if (existsSync(f)) records.push(...parseRunRecords(readFileSync(f, 'utf8')));
     }
     ensureGeneratedDir(base);
-    writeFileSync(join(base, 'SUMMARY.md'), renderSummaryMd(records, findInflight(base)), 'utf8');
+    writeFileSync(join(base, 'SUMMARY.md'), scrub(renderSummaryMd(records, findInflight(base))), 'utf8');
   } catch {
     // best-effort
   }

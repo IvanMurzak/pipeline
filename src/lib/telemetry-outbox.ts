@@ -146,6 +146,11 @@ import {
   stripStatsFailureExcerpts,
   type PrivacyTier,
 } from './vendor/privacy';
+// c2 — the outbox is what LEAVES THIS MACHINE. The privacy filter above is a
+// positive allowlist, but it is bypassed above the `metadata` tier and its
+// allowed free-text fields carry 256 characters, which is ample room for a
+// quoted key. There is no credential detector in that filter; this is it.
+import { scrub } from './output-scrubber';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -521,7 +526,7 @@ function offsetFollowsNewline(path: string, offset: number): boolean {
  *  replaces an existing destination on both NTFS and POSIX. */
 function writeFileAtomic(path: string, data: string): void {
   const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-  writeFileSync(tmp, data, 'utf-8');
+  writeFileSync(tmp, scrub(data), 'utf-8');
   try {
     renameSync(tmp, path);
   } catch (e) {
@@ -723,7 +728,7 @@ export class TelemetryOutbox {
       ((info) => {
         try {
           process.stderr.write(
-            `[pipeline-telemetry] dropped ${info.count} record(s) (${info.reason}): ${info.detail}\n`,
+            scrub(`[pipeline-telemetry] dropped ${info.count} record(s) (${info.reason}): ${info.detail}\n`),
           );
         } catch {
           /* never fail a run over a log line */
@@ -738,7 +743,7 @@ export class TelemetryOutbox {
       ((info) => {
         try {
           process.stderr.write(
-            `[pipeline-telemetry] excluded ${info.count} record(s) (${info.reason}): ${info.detail}\n`,
+            scrub(`[pipeline-telemetry] excluded ${info.count} record(s) (${info.reason}): ${info.detail}\n`),
           );
         } catch {
           /* never fail a run over a log line */
@@ -982,7 +987,7 @@ export class TelemetryOutbox {
       const moving = records.filter((r) => queuedKeys.has(recordKey(r)));
       if (moving.length === 0) return 0;
       try {
-        appendFileSync(this.quarantinePath, moving.map((r) => `${JSON.stringify(r)}\n`).join(''), 'utf-8');
+        appendFileSync(this.quarantinePath, scrub(moving.map((r) => `${JSON.stringify(r)}\n`).join('')), 'utf-8');
       } catch {
         // The set-aside file could not be written (read-only checkout, disk
         // full). Removing the records now would lose them, so nothing moves.
@@ -1107,7 +1112,7 @@ export class TelemetryOutbox {
     const record: OutboxRecord = { org: this.org, run_id: runId, seq, kind, payload: filtered };
     const line = `${JSON.stringify(record)}\n`;
     try {
-      appendFileSync(this.outboxPath, line, 'utf-8');
+      appendFileSync(this.outboxPath, scrub(line), 'utf-8');
     } catch {
       // The append failed (read-only checkout, disk full). The seq is already
       // consumed — a GAP in the sequence, which is safe: `(run_id, seq)` is a

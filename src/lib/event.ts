@@ -33,6 +33,11 @@ import { ensureGeneratedDir } from './generated-dir';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, dirname, resolve, isAbsolute, basename } from 'node:path';
+// c2 — the events journal is the free-text path 02 names explicitly
+// (`halt_reason` on iteration.completed / pipeline.halted / run.halted), and
+// the privacy allowlist that guards it has no credential detector. Every byte
+// this module appends goes through the scrubber.
+import { scrub } from './output-scrubber';
 
 // Schema v5 — see EVENTS.md. Kept in lockstep with analytics-relay.ts /
 // server.ts. v4 added the optional `step_id` field on iteration.* events; v5
@@ -52,7 +57,7 @@ export const MIRROR_BINDING_SCHEMA = 1;
 const DEBUG = process.env.PIPELINE_JOURNAL_DEBUG === '1';
 
 function log(msg: string): void {
-  if (DEBUG) process.stderr.write(`[pipeline-event] ${msg}\n`);
+  if (DEBUG) process.stderr.write(scrub(`[pipeline-event] ${msg}\n`));
 }
 
 /** Transcript opt-out switch (`PIPELINE_JOURNAL_TRANSCRIPTS`, default ON). Gates
@@ -379,7 +384,7 @@ function appendEventLine(runtimeDir: string, event: unknown): void {
   }
   // Compact JSON, no spaces — matches Python separators=(",",":").
   const line = JSON.stringify(event);
-  appendFileSync(journal, line + '\n', 'utf-8');
+  appendFileSync(journal, scrub(line + '\n'), 'utf-8');
 }
 
 // ---------------------------------------------------------------------------
@@ -658,7 +663,7 @@ export function registerMirrorBinding(argv: string[]): number {
     mkdirSync(dirname(bp), { recursive: true });
     // Python uses json.dumps(..., ensure_ascii=False) (default separators);
     // JS JSON.stringify has no spaces either, so the lines match.
-    appendFileSync(bp, JSON.stringify(binding) + '\n', 'utf-8');
+    appendFileSync(bp, scrub(JSON.stringify(binding) + '\n'), 'utf-8');
   } catch (e) {
     log(`mirror binding write failed: ${e}`);
   }
@@ -742,7 +747,7 @@ export function registerDriveSessionBinding(b: DriveSessionBinding): void {
   try {
     const bp = mirrorBindingsPath();
     mkdirSync(dirname(bp), { recursive: true });
-    appendFileSync(bp, JSON.stringify(binding) + '\n', 'utf-8');
+    appendFileSync(bp, scrub(JSON.stringify(binding) + '\n'), 'utf-8');
   } catch (e) {
     log(`drive session binding write failed: ${e}`);
   }
@@ -812,7 +817,7 @@ export function writeLiveness(argv: string[]): number {
     mkdirSync(d, { recursive: true });
     writeFileSync(
       join(d, `${runId}.alive`),
-      JSON.stringify({ pid, run_id: String(runId), started_at: utcNowIso() }),
+      scrub(JSON.stringify({ pid, run_id: String(runId), started_at: utcNowIso() })),
       'utf-8',
     );
   } catch (e) {

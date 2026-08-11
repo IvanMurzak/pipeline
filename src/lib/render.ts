@@ -70,6 +70,10 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { scanOccurrences, substituteText, type ResolvedVars } from './substitution';
+// c2 — a rendered step body is template text with RUN VARIABLES substituted
+// in, and a variable can hold anything a user put in it. See
+// lib/output-scrubber.ts.
+import { scrub } from './output-scrubber';
 
 // Entry names excluded from the mirror at EVERY level (denylist, see module
 // header): run-scoped artifact trees + VCS internals. `.runtime` is the hard
@@ -237,7 +241,7 @@ function atomicReplace(dest: string, produce: (tmp: string) => void): void {
 }
 
 function writeFileAtomic(dest: string, content: string): void {
-  atomicReplace(dest, (tmp) => writeFileSync(tmp, content, 'utf8'));
+  atomicReplace(dest, (tmp) => writeFileSync(tmp, scrub(content), 'utf8'));
 }
 
 function copyFileAtomic(src: string, dest: string): void {

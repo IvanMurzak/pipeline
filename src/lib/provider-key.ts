@@ -82,8 +82,28 @@
 // This package's own hard-won rule — "when inspecting a secrets file, print
 // the LENGTH, never the content" — is the reason `describeProviderKey` exists
 // and returns a byte count rather than anything derived from the value.
+//
+// ── HOW LAYER TWO LEARNS THE VALUES (c2) ──────────────────────────────────
+//
+// `lib/output-scrubber.ts` redacts values it KNOWS, so it has to be told them
+// — and the ONE module allowed to know them is this one. So the arrow points
+// OWNER → SCRUBBER: every construction path here calls `registerSecret`, and
+// the scrubber neither imports this module nor mentions `revealProviderKey`.
+// Had it been the other way round — the scrubber reaching in for the
+// plaintext — c1's "exactly one module holds the key" property would be gone,
+// and `tests/provider-key-ownership.test.ts` would have had to widen its
+// allowlist to say so. It did not, and must not.
+//
+// The register is fed at CONSTRUCTION (the `ProviderKey` constructor below),
+// which is the single funnel every rung passes through, plus the two places a
+// plaintext exists without a holder: `persistProviderKey`'s argument, and the
+// `ANTHROPIC_API_KEY` value a run can SEE even when a higher rung wins — 02
+// asks for "every key the ladder can produce in one run, not only the one in
+// use", and an environment key that lost to `--api-key` is still sitting in
+// the environment of every subprocess we spawn.
 
 import { spawnSync } from 'node:child_process';
+import { registerSecret } from './output-scrubber';
 import {
   credentialFilePath,
   readCredentialStore,
@@ -184,6 +204,11 @@ export class ProviderKey {
   constructor(source: ProviderKeySource, secret: string) {
     this.source = source;
     SECRETS.set(this, secret);
+    // Layer two, fed at the ONE funnel every rung passes through. A holder
+    // that exists is a value the run can leak, whether or not the ladder
+    // ended up selecting it, so registration is unconditional and happens
+    // BEFORE the holder is returned to anyone.
+    registerSecret(secret);
   }
 
   /** `JSON.stringify` calls this at ANY nesting depth, which is the whole
@@ -493,6 +518,12 @@ export function persistProviderKey(
 ): { path: string; backend: 'keychain' | 'file' } {
   const value = secret.trim();
   if (value.length === 0) throw new ProviderKeyError('refusing to store an empty API key');
+  // A plaintext that never becomes a `ProviderKey` — it goes straight from the
+  // CLI's input to the store — so the constructor's registration cannot cover
+  // it. NOTE the one place this must NOT reach: `lib/cloud-config.ts`'s writers
+  // are deliberately NOT scrubbed, because the credential store is where this
+  // value is SUPPOSED to land. See tests/output-scrubber-sinks.test.ts.
+  registerSecret(value);
 
   const path = credentialFilePath(homeCtxOf(deps));
   const store = readCredentialStore(deps.fs, path);
@@ -538,6 +569,17 @@ export function resolveProviderKey(
   deps: ProviderKeyDeps,
   opts: ResolveProviderKeyOptions = {},
 ): ProviderKey | undefined {
+  // Layer two, BEFORE the ladder runs: 02 asks the scrubber to cover "every
+  // key the ladder can produce in one run, not only the one in use", and rung
+  // 3's value is visible to this process — and inherited by every subprocess
+  // it spawns — regardless of which rung wins. Reading it costs nothing and
+  // cannot throw. Rungs 1/2/4 register through the `ProviderKey` constructor
+  // as they are constructed; rung 4 is deliberately NOT probed here, because
+  // reading the store does file I/O and can legitimately throw, and turning a
+  // winning higher rung into an error would break "first match wins".
+  const fromEnvSeen = (deps.env[PROVIDER_KEY_ENV] ?? '').trim();
+  if (fromEnvSeen.length > 0) registerSecret(fromEnvSeen);
+
   // Rung 1 — the flag.
   if (opts.flagKey !== undefined) return opts.flagKey;
 
@@ -551,9 +593,8 @@ export function resolveProviderKey(
     });
   }
 
-  // Rung 3 — the environment.
-  const fromEnv = (deps.env[PROVIDER_KEY_ENV] ?? '').trim();
-  if (fromEnv.length > 0) return new ProviderKey('env', fromEnv);
+  // Rung 3 — the environment (already registered above, whichever rung wins).
+  if (fromEnvSeen.length > 0) return new ProviderKey('env', fromEnvSeen);
 
   // Rung 4 — our credential store.
   return readStoreRung(deps);

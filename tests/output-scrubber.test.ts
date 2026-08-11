@@ -1,0 +1,451 @@
+// output-scrubber.test.ts — c2's BEHAVIOURAL half: "the key appears nowhere in
+// what was written".
+//
+// `output-scrubber-sinks.test.ts` proves the STRUCTURAL half — that every sink
+// reachable from `drive` routes through this module, so there is no unwrapped
+// hole left to write through. `output-scrubber-drive.test.ts` proves the two
+// halves compose, end to end, through a real subprocess.
+//
+// EVERY key-shaped value in this file is a placeholder. Nothing here is, or
+// resembles, a live credential, and the assertions below would pass or fail
+// identically for any string — which is the point of value-based redaction.
+//
+// NOTE on ordering: the register is APPEND-ONLY by design (see the module
+// header — there is no `clear`, not even for tests), so every test uses its
+// OWN distinct placeholder and no test depends on the register being empty
+// once another has run. `bun scripts/parallel-tests.ts` gives each FILE its
+// own process, so the register never crosses suites either.
+
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  MIN_SECRET_LENGTH,
+  REDACTION_MARKER,
+  registerSecret,
+  registeredSecretCount,
+  scrub,
+  scrubWriter,
+  scrubbedRelay,
+} from '../src/lib/output-scrubber';
+import {
+  extractProviderKeyFlag,
+  resolveProviderKey,
+  PROVIDER_KEY_ENV,
+  PROVIDER_KEY_HELPER_ENV,
+  type ProviderKeyDeps,
+} from '../src/lib/provider-key';
+import type { CloudFs } from '../src/lib/cloud-config';
+
+const MODULE_PATH = join(import.meta.dir, '..', 'src', 'lib', 'output-scrubber.ts');
+
+// ---------------------------------------------------------------------------
+// Placeholders — one per concern, so append-only registration never couples
+// two tests together.
+// ---------------------------------------------------------------------------
+
+const P_BASIC = 'PLACEHOLDER-NOT-A-REAL-KEY-basic-0000000000';
+const P_SHORT_A = 'PLACEHOLDER-NOT-A-REAL-KEY-len-A';
+const P_LONG_B = 'PLACEHOLDER-NOT-A-REAL-KEY-len-B-and-very-much-longer-than-A-0000';
+const P_OUTER = 'PLACEHOLDER-NOT-A-REAL-KEY-outer-CONTAINS-inner-tail';
+const P_INNER = 'CONTAINS-inner';
+const P_ENCODED = 'PLACEHOLDER-NOT-A-REAL-KEY-encoded /+ "quoted" \\slashed';
+const P_SINK = 'PLACEHOLDER-NOT-A-REAL-KEY-through-a-sink-000';
+const P_STACK = 'PLACEHOLDER-NOT-A-REAL-KEY-inside-a-stack-trace';
+const P_SUBPROC = 'PLACEHOLDER-NOT-A-REAL-KEY-relayed-from-a-subprocess';
+const P_SPLIT = 'PLACEHOLDER-NOT-A-REAL-KEY-split-across-two-chunks-000000';
+const P_ENVOFF = 'PLACEHOLDER-NOT-A-REAL-KEY-cannot-be-switched-off-00';
+const P_FLAG = 'PLACEHOLDER-NOT-A-REAL-KEY-from-the-flag-rung';
+const P_LADDER_ENV = 'PLACEHOLDER-NOT-A-REAL-KEY-from-the-env-rung-losing';
+const P_HELPER = 'PLACEHOLDER-NOT-A-REAL-KEY-from-the-helper-rung';
+
+/** Collects everything a sink was handed. */
+function collector(): { sink: (s: string) => void; written: string[]; text: () => string } {
+  const written: string[] = [];
+  return { sink: (s) => written.push(s), written, text: () => written.join('') };
+}
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+describe('the register', () => {
+  test('accepts a plausible secret and reports acceptance without echoing it', () => {
+    const before = registeredSecretCount();
+    expect(registerSecret(P_BASIC)).toBe(true);
+    expect(registeredSecretCount()).toBeGreaterThan(before);
+    // The RETURN is a boolean, never the value — nothing about this API hands
+    // a caller a route back to plaintext.
+    expect(typeof registerSecret(P_BASIC)).toBe('boolean');
+  });
+
+  test('refuses a value too short to redact safely, rather than shredding ordinary output', () => {
+    const tooShort = 'x'.repeat(MIN_SECRET_LENGTH - 1);
+    expect(registerSecret(tooShort)).toBe(false);
+    expect(registerSecret('')).toBe(false);
+    expect(registerSecret('   ')).toBe(false);
+    // …and the refusal is real: the short value still flows.
+    expect(scrub(`a ${tooShort} b`)).toBe(`a ${tooShort} b`);
+  });
+
+  test('registration is idempotent', () => {
+    registerSecret(P_BASIC);
+    const after = registeredSecretCount();
+    registerSecret(P_BASIC);
+    registerSecret(`  ${P_BASIC}  `); // trimmed to the same value
+    expect(registeredSecretCount()).toBe(after);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Redaction
+// ---------------------------------------------------------------------------
+
+describe('scrub', () => {
+  test('replaces every occurrence, leaving no fragment of the value behind', () => {
+    registerSecret(P_BASIC);
+    const text = `header ${P_BASIC} middle ${P_BASIC}${P_BASIC} tail\n`;
+    const got = scrub(text);
+    expect(got).not.toContain(P_BASIC);
+    // Not even a prefix of it: a partial match would be a partial leak.
+    expect(got).not.toContain(P_BASIC.slice(0, 20));
+    expect(got).toBe(`header ${REDACTION_MARKER} middle ${REDACTION_MARKER}${REDACTION_MARKER} tail\n`);
+  });
+
+  test('leaves unrelated text byte-identical', () => {
+    registerSecret(P_BASIC);
+    const text = 'nothing secret here — just a run log with a sha 4f3c9a1 and a path /tmp/x\n';
+    expect(scrub(text)).toBe(text);
+  });
+
+  test('is idempotent — scrubbing already-scrubbed text changes nothing', () => {
+    registerSecret(P_BASIC);
+    const once = scrub(`x ${P_BASIC} y`);
+    expect(scrub(once)).toBe(once);
+  });
+
+  test('a secret that CONTAINS another is redacted whole, with no plaintext tail', () => {
+    registerSecret(P_OUTER);
+    registerSecret(P_INNER);
+    const got = scrub(`> ${P_OUTER} <`);
+    expect(got).not.toContain(P_INNER);
+    expect(got).not.toContain('inner-tail');
+    expect(got).toBe(`> ${REDACTION_MARKER} <`);
+  });
+
+  test('catches the value in the encodings it can be wearing at a sink', () => {
+    registerSecret(P_ENCODED);
+    // JSON — every .jsonl sink on the drive path writes through JSON.stringify,
+    // and this value carries a quote and a backslash, so the serialised form is
+    // NOT the raw form.
+    const serialised = JSON.stringify({ halt_reason: `failed: ${P_ENCODED}` });
+    expect(serialised).not.toContain(P_ENCODED); // the trap this guards against
+    const scrubbedJson = scrub(serialised);
+    expect(scrubbedJson).not.toContain(JSON.stringify(P_ENCODED).slice(1, -1));
+    expect(JSON.parse(scrubbedJson).halt_reason).toBe(`failed: ${REDACTION_MARKER}`);
+
+    // percent-encoded (a URL or form body) and base64 (a Basic auth header, or
+    // an HTTP client dumping its request).
+    expect(scrub(`?k=${encodeURIComponent(P_ENCODED)}`)).not.toContain(encodeURIComponent(P_ENCODED));
+    const b64 = Buffer.from(P_ENCODED, 'utf-8').toString('base64');
+    expect(scrub(`Authorization: Basic ${b64}`)).toBe(`Authorization: Basic ${REDACTION_MARKER}`);
+  });
+
+  test('substituting the marker into serialised JSON leaves it parseable', () => {
+    registerSecret(P_BASIC);
+    const line = JSON.stringify({ event: 'run.halted', halt_reason: `boom ${P_BASIC}` }) + '\n';
+    const got = scrub(line);
+    expect(() => JSON.parse(got)).not.toThrow();
+    expect(JSON.parse(got).halt_reason).toBe(`boom ${REDACTION_MARKER}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The marker leaks nothing — DoD "fixed-width, does not encode the key's length"
+// ---------------------------------------------------------------------------
+
+describe('the redaction marker', () => {
+  test('is one fixed constant carrying no digit, no length, no fragment', () => {
+    expect(REDACTION_MARKER).toBe('[redacted]');
+    expect(/\d/.test(REDACTION_MARKER)).toBe(false);
+    // JSON-hostile characters would break every .jsonl sink that substitutes it.
+    expect(/["\\\u0000-\u001f]/.test(REDACTION_MARKER)).toBe(false);
+  });
+
+  test('two secrets of DIFFERENT lengths produce byte-identical output', () => {
+    expect(P_SHORT_A.length).not.toBe(P_LONG_B.length);
+    registerSecret(P_SHORT_A);
+    registerSecret(P_LONG_B);
+    const a = scrub(`prefix ${P_SHORT_A} suffix`);
+    const b = scrub(`prefix ${P_LONG_B} suffix`);
+    // Byte-identical — an observer of the output cannot tell the two apart,
+    // let alone recover a length. A marker sized to the secret would fail here.
+    expect(a).toBe(b);
+    expect(Buffer.byteLength(a, 'utf-8')).toBe(Buffer.byteLength(b, 'utf-8'));
+  });
+
+  test('the marker is the same width whatever the secret was', () => {
+    registerSecret(P_SHORT_A);
+    registerSecret(P_LONG_B);
+    const widths = new Set(
+      [P_SHORT_A, P_LONG_B].map((s) => {
+        const got = scrub(s);
+        return got.length;
+      }),
+    );
+    expect([...widths]).toEqual([REDACTION_MARKER.length]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wrapped sinks
+// ---------------------------------------------------------------------------
+
+describe('scrubWriter', () => {
+  test('nothing reaches the wrapped sink unscrubbed', () => {
+    registerSecret(P_SINK);
+    const c = collector();
+    const write = scrubWriter(c.sink);
+    write(`[drive] step.halted reason=${P_SINK}\n`);
+    write('[drive] step.done\n');
+    expect(c.text()).not.toContain(P_SINK);
+    expect(c.text()).toContain(REDACTION_MARKER);
+    expect(c.text()).toContain('[drive] step.done\n');
+  });
+
+  test('a STACK TRACE carrying the key is scrubbed, and stays a usable stack trace', () => {
+    registerSecret(P_STACK);
+    const c = collector();
+    const write = scrubWriter(c.sink);
+    // The shape 02 is worried about: third-party code we do not control builds
+    // an Error whose MESSAGE quotes the request it just made.
+    const e = new Error(`401 from provider: {"x-api-key":"${P_STACK}"}`);
+    write(String(e.stack) + '\n');
+    expect(c.text()).not.toContain(P_STACK);
+    expect(c.text()).toContain(REDACTION_MARKER);
+    // Still diagnostically useful — we redacted a value, not the trace.
+    expect(c.text()).toContain('Error: 401 from provider');
+    expect(c.text()).toContain('output-scrubber.test');
+  });
+
+  test('a RELAYED SUBPROCESS ERROR carrying the key is scrubbed', () => {
+    registerSecret(P_SUBPROC);
+    const c = collector();
+    const write = scrubWriter(c.sink);
+    // What a child prints on its own stderr, relayed verbatim by the executor.
+    write(`Traceback (most recent call last):\n  File "run.py", line 3\nRuntimeError: bad key ${P_SUBPROC}\n`);
+    expect(c.text()).not.toContain(P_SUBPROC);
+    expect(c.text()).toContain('RuntimeError: bad key ' + REDACTION_MARKER);
+  });
+});
+
+describe('scrubbedRelay — chunk boundaries', () => {
+  test('a key SPLIT ACROSS TWO CHUNKS never reaches the sink in either half', () => {
+    registerSecret(P_SPLIT);
+    const c = collector();
+    const relay = scrubbedRelay(c.sink);
+    const cut = 17;
+    // The OS decides where a `data` event ends. Per-chunk scrubbing alone would
+    // match neither half and write both out as plaintext.
+    relay('prefix ' + P_SPLIT.slice(0, cut));
+    relay(P_SPLIT.slice(cut) + ' suffix\n');
+    const got = c.text();
+    expect(got).not.toContain(P_SPLIT);
+    expect(got).not.toContain(P_SPLIT.slice(0, cut));
+    expect(got).not.toContain(P_SPLIT.slice(cut));
+    expect(got).toBe(`prefix ${REDACTION_MARKER} suffix\n`);
+  });
+
+  test('a key split across MANY one-character chunks is still caught', () => {
+    registerSecret(P_SPLIT);
+    const c = collector();
+    const relay = scrubbedRelay(c.sink);
+    for (const ch of `x ${P_SPLIT} y\n`) relay(ch);
+    expect(c.text()).not.toContain(P_SPLIT);
+    expect(c.text()).toBe(`x ${REDACTION_MARKER} y\n`);
+  });
+
+  test('a newline-terminated write is released immediately — progress output is not delayed', () => {
+    const c = collector();
+    const relay = scrubbedRelay(c.sink);
+    relay('[drive] step.start\n');
+    // Released on the same call, without waiting for a flush or a next chunk.
+    expect(c.text()).toBe('[drive] step.start\n');
+  });
+
+  test('flush releases the held partial line — an unflushed tail would be lost output', () => {
+    registerSecret(P_SPLIT);
+    const c = collector();
+    const relay = scrubbedRelay(c.sink);
+    relay(`tail without a newline ${P_SPLIT}`);
+    expect(c.text()).toBe(''); // held: the line is not complete yet
+    relay.flush();
+    expect(c.text()).toBe(`tail without a newline ${REDACTION_MARKER}`);
+    relay.flush(); // idempotent — a second flush emits nothing
+    expect(c.text()).toBe(`tail without a newline ${REDACTION_MARKER}`);
+  });
+
+  test('an unbounded single line is bounded, and the seam cannot split a secret', () => {
+    registerSecret(P_SPLIT);
+    const c = collector();
+    const relay = scrubbedRelay(c.sink);
+    relay('.'.repeat(70_000)); // past MAX_CARRY — the relay must emit, not grow
+    expect(c.text().length).toBeGreaterThan(0);
+    // The secret, written straight after the forced emit, still redacts whole.
+    relay(P_SPLIT + '\n');
+    expect(c.text()).not.toContain(P_SPLIT);
+    expect(c.text()).toContain(REDACTION_MARKER);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// No escape hatch — DoD "no flag or environment variable disables scrubbing"
+// ---------------------------------------------------------------------------
+
+describe('scrubbing cannot be turned off', () => {
+  test('the module reads no environment variable at all', () => {
+    const src = readFileSync(MODULE_PATH, 'utf-8');
+    // Stripped of comments, so the header's prose about env vars does not
+    // itself trip the assertion it is describing.
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    expect(code).not.toContain('process.env');
+    expect(code).not.toContain('Bun.env');
+    expect(code).not.toContain('getenv');
+  });
+
+  test('the module exports no way to remove a secret, empty the register, or bypass it', () => {
+    const src = readFileSync(MODULE_PATH, 'utf-8');
+    const exported = [...src.matchAll(/export (?:function|const|type|interface|class) (\w+)/g)].map((m) => m[1]);
+    expect(exported.length).toBeGreaterThan(0);
+    const forbidden = /(disable|unregister|clear|reset|bypass|skip|off|plaintext|reveal)/i;
+    expect(exported.filter((n) => forbidden.test(n))).toEqual([]);
+    // The exports are exactly the intended surface — a new one is a review
+    // decision, not an accident.
+    expect(exported.sort()).toEqual(
+      [
+        'MIN_SECRET_LENGTH',
+        'REDACTION_MARKER',
+        'ScrubbedRelay',
+        'Sink',
+        'registerSecret',
+        'registeredSecretCount',
+        'scrub',
+        'scrubWriter',
+        'scrubbedRelay',
+      ].sort(),
+    );
+  });
+
+  test('every plausible "turn it off" environment variable is inert', () => {
+    registerSecret(P_ENVOFF);
+    const names = [
+      'PIPELINE_NO_SCRUB',
+      'PIPELINE_SCRUB',
+      'PIPELINE_SCRUB_DISABLED',
+      'PIPELINE_DEBUG',
+      'PIPELINE_JOURNAL_DEBUG',
+      'NO_SCRUB',
+      'DEBUG',
+      'VERBOSE',
+    ];
+    const saved = new Map(names.map((n) => [n, process.env[n]]));
+    try {
+      for (const n of names) process.env[n] = '1';
+      expect(scrub(`x ${P_ENVOFF} y`)).toBe(`x ${REDACTION_MARKER} y`);
+      for (const n of names) process.env[n] = '0';
+      expect(scrub(`x ${P_ENVOFF} y`)).toBe(`x ${REDACTION_MARKER} y`);
+    } finally {
+      for (const [n, v] of saved) {
+        if (v === undefined) delete process.env[n];
+        else process.env[n] = v;
+      }
+    }
+  });
+
+  test('no module in src/ names a scrub-disabling switch', () => {
+    // A flag would have to be READ somewhere; this catches the read side even
+    // if a future author put the switch in another file.
+    const src = readFileSync(MODULE_PATH, 'utf-8');
+    expect(/\b(no|disable|skip)[-_]?scrub\b/i.test(src)).toBe(false);
+    expect(/\bscrub[-_]?(off|disabled?)\b/i.test(src)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The owner feeds the register — c1 + c2 composed
+// ---------------------------------------------------------------------------
+
+/** A `CloudFs` that would throw if anything reached it. Rungs 1–3 never touch
+ *  the filesystem, and these tests assert that by construction. */
+const noFs: CloudFs = {
+  existsSync: () => {
+    throw new Error('the filesystem must not be touched by rungs 1-3');
+  },
+  readFileSync: () => {
+    throw new Error('the filesystem must not be touched by rungs 1-3');
+  },
+  writeFileSync: () => {
+    throw new Error('the filesystem must not be touched by rungs 1-3');
+  },
+  mkdirSync: () => {
+    throw new Error('the filesystem must not be touched by rungs 1-3');
+  },
+  chmodSync: () => {
+    throw new Error('the filesystem must not be touched by rungs 1-3');
+  },
+  renameSync: () => {
+    throw new Error('the filesystem must not be touched by rungs 1-3');
+  },
+  unlinkSync: () => {
+    throw new Error('the filesystem must not be touched by rungs 1-3');
+  },
+};
+
+function depsWith(env: Record<string, string | undefined>): ProviderKeyDeps {
+  return { platform: 'linux', env, homedir: '/fake-home', fs: noFs };
+}
+
+describe('the owning module teaches the scrubber, and the scrubber never reaches back', () => {
+  test('rung 1 (the flag) registers as the holder is constructed', () => {
+    const { key } = extractProviderKeyFlag(['drive', '--api-key', P_FLAG, '--root', '/x']);
+    expect(key).toBeDefined();
+    expect(scrub(`argv echo: --api-key ${P_FLAG}`)).toBe(`argv echo: --api-key ${REDACTION_MARKER}`);
+  });
+
+  test('EVERY key the ladder can see in one run is redacted, not only the rung that won', () => {
+    // 02: "Redact every key the ladder can produce in one run, not only the one
+    // in use." The flag wins here, but `ANTHROPIC_API_KEY` is still sitting in
+    // the environment of every subprocess this run spawns.
+    const { key: flagKey } = extractProviderKeyFlag(['--api-key', P_FLAG]);
+    const chosen = resolveProviderKey(depsWith({ [PROVIDER_KEY_ENV]: P_LADDER_ENV }), { flagKey });
+    expect(chosen?.source).toBe('flag'); // the losing rung did NOT win…
+    // …and is redacted anyway.
+    expect(scrub(`env dump: ${PROVIDER_KEY_ENV}=${P_LADDER_ENV}`)).toBe(
+      `env dump: ${PROVIDER_KEY_ENV}=${REDACTION_MARKER}`,
+    );
+    expect(scrub(P_FLAG)).toBe(REDACTION_MARKER);
+  });
+
+  test('rung 2 (the helper) registers what the helper printed, without the value reaching an error', () => {
+    const deps: ProviderKeyDeps = {
+      ...depsWith({ [PROVIDER_KEY_HELPER_ENV]: 'op read op://vault/anthropic/key' }),
+      runHelper: () => ({ status: 0, stdout: `${P_HELPER}\n`, stderr: '' }),
+    };
+    const key = resolveProviderKey(deps);
+    expect(key?.source).toBe('helper');
+    expect(scrub(`helper stdout echoed: ${P_HELPER}`)).toBe(`helper stdout echoed: ${REDACTION_MARKER}`);
+  });
+
+  test('the scrubber does not import the owner, and never names the reveal boundary', () => {
+    // This is what keeps c1's "exactly one module holds the key" property true
+    // WITHOUT widening tests/provider-key-ownership.test.ts's allowlist: the
+    // dependency arrow points owner → scrubber, never the other way. That test
+    // scans source TEXT, comments included, so the assertion here is on the
+    // WHOLE file rather than on code alone — a comment naming the boundary
+    // would fail c1's suite just as loudly as a call would.
+    const src = readFileSync(MODULE_PATH, 'utf-8');
+    expect(src).not.toContain(['reveal', 'Provider', 'Key'].join(''));
+    expect(src).not.toContain("from './provider-key'");
+    expect(/^\s*import\s/m.test(src)).toBe(false); // it imports nothing at all
+  });
+});

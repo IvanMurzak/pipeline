@@ -93,6 +93,7 @@ import { cloudJsonPath, realFs, type CloudFs } from '../lib/cloud-config';
 import { resolveUploadTarget, TelemetryUploader, type UploadFetch, type UploadTarget } from '../lib/telemetry-upload';
 import type { FetchLike } from '../lib/credential-refresh';
 import { recordLastFlush } from '../lib/telemetry-status';
+import { scrub } from '../lib/output-scrubber';
 
 // ---------------------------------------------------------------------------
 // The lock path — the ONE thing the hook must agree with this module about.
@@ -595,11 +596,14 @@ export const realTelemetryDaemonCliDeps: TelemetryDaemonCliDeps = {
   homedir: homedir(),
   now: () => Date.now(),
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  // c2 — the daemon's own streams. It runs detached with its own module state,
+  // so its register is populated by whatever key IT resolves; wrapping costs
+  // nothing and keeps the drive closure free of any unscrubbed stream write.
   out: (s) => {
-    process.stdout.write(s);
+    process.stdout.write(scrub(s));
   },
   err: (s) => {
-    process.stderr.write(s);
+    process.stderr.write(scrub(s));
   },
 };
 

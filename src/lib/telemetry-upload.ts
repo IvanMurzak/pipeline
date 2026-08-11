@@ -143,6 +143,9 @@ import {
   stripStatsFailureExcerpts,
   type PrivacyTier,
 } from './vendor/privacy';
+// c2 — see lib/output-scrubber.ts; the uploader persists its own state and
+// error text, both of which pass through third-party code.
+import { scrub } from './output-scrubber';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -989,7 +992,7 @@ export function chunkByRun(
  *  `telemetry-outbox.ts`'s `writeFileAtomic`. */
 function writeJsonAtomic(path: string, value: unknown): void {
   const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-  writeFileSync(tmp, `${JSON.stringify(value)}\n`, 'utf-8');
+  writeFileSync(tmp, scrub(`${JSON.stringify(value)}\n`), 'utf-8');
   try {
     renameSync(tmp, path);
   } catch (e) {
