@@ -1,0 +1,19 @@
+src/lib/match.ts
+  s_5d2b750d4bf8b3::t_937a75726399e8 310-366,369-381
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "7275cda4f2b9640110a00cc04acccce4dce556f0",
+  "prompts": {},
+  "sessions": {
+    "s_5d2b750d4bf8b3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_5d2b750d4bf8b3",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
