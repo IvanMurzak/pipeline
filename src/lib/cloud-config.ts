@@ -141,10 +141,46 @@ export interface StoredCredential {
   user_email?: string;
 }
 
+/**
+ * c1 — a provider API key at rest (rung 4 of the ladder in
+ * `lib/provider-key.ts`). SECRET, and deliberately stored in THIS file rather
+ * than a second one: the per-user location, the `0700`/`0600` modes, the
+ * Windows ACL and the atomic write-then-rename already exist here and are
+ * already tested, and a second store would be a second thing to get right.
+ *
+ * Written and read ONLY by `lib/provider-key.ts` — no other module is allowed
+ * to touch it, which is what makes "one module owns the key" true at rest as
+ * well as in memory.
+ */
+export interface StoredProviderKey {
+  /** The key (a SECRET). Absent when `in_keychain` is true. */
+  api_key?: string;
+  /** `true` when the value was moved into the OS keychain
+   *  (`lib/credential-keychain.ts`) instead of living inline here — the same
+   *  marker `StoredCredential.refresh_token_in_keychain` uses, for the same
+   *  reason: the file must record that a value EXISTS somewhere even when it
+   *  no longer holds it. */
+  in_keychain?: boolean;
+  /** Non-secret — epoch ms when the key was stored. */
+  stored_at?: number;
+}
+
 export interface CredentialStore {
   version: 1;
   /** Keyed by normalized control-plane base URL — one credential per server. */
   servers: Record<string, StoredCredential>;
+  /**
+   * c1 — provider API keys, keyed by provider id (`anthropic` today). Owned
+   * exclusively by `lib/provider-key.ts`.
+   *
+   * ⚠ PRESERVED, NOT PARSED, BY `readCredentialStore`. Every writer of this
+   * store does read-modify-write and hands the WHOLE object back to
+   * `writeCredentialStore`, so a field this reader dropped would be silently
+   * deleted the next time anyone connected, refreshed a token, or polled for
+   * notifications. That is why the reader below carries it through explicitly
+   * rather than rebuilding `{ version, servers }` — see its own note.
+   */
+  provider_keys?: Record<string, StoredProviderKey>;
 }
 
 /** Non-secret — safe to commit. Written to `<cwd>/.pipeline/cloud.json`. */
@@ -265,7 +301,18 @@ export function readCredentialStore(fs: CloudFs, filePath: string): CredentialSt
     obj && typeof obj === 'object' && obj.servers && typeof obj.servers === 'object'
       ? (obj.servers as Record<string, StoredCredential>)
       : {};
-  return { version: 1, servers };
+  // c1 — carried through rather than dropped. This reader rebuilds the store
+  // from named fields, and EVERY writer round-trips it (read → mutate
+  // `servers` → `writeCredentialStore(whole object)`), so anything this
+  // function omits is deleted from disk by the next unrelated write. Adding a
+  // top-level field therefore means adding it HERE too; there is no
+  // pass-through of unknown keys, deliberately, so the on-disk shape stays
+  // one this file describes in full.
+  const providerKeys =
+    obj && typeof obj === 'object' && obj.provider_keys && typeof obj.provider_keys === 'object'
+      ? (obj.provider_keys as Record<string, StoredProviderKey>)
+      : undefined;
+  return providerKeys ? { version: 1, servers, provider_keys: providerKeys } : { version: 1, servers };
 }
 
 /**
