@@ -231,6 +231,12 @@ describe('what a v2 manifest cannot carry is reported, never dropped', () => {
     expect(r.err).toContain('cannot express');
   });
 
+  test("a v1 `runner: headless` pipeline is named as unsupported by THIS migration (it doesn't emit runner: yet), even though the v2 manifest can now say `runner: driver`", () => {
+    const root = scaffold('---\nrunner: headless\n---\n# P\n', LINEAR);
+    const r = migrate(root, ['--dry-run']);
+    expect(r.err).toContain('runner: driver');
+  });
+
   test('a (required) variable is named as unsupported', () => {
     const root = scaffold(
       '# P\n\n## Variables\n- `PP_TOKEN` (required) — the API token.\n',

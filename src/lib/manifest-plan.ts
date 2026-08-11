@@ -174,10 +174,10 @@ export function planFromManifest(
 
   // A script whose timeout exceeds what a manager-driven `pipeline next` call
   // can honor would be killed by the outer Bash ceiling instead of by the CLI,
-  // losing its failure record. v2 has no `runner:` key yet, so every manifest
-  // is manager-driven and the lint always applies.
+  // losing its failure record. Only `runner: manager` dispatches through that
+  // call at all — the same gate v1's PIPELINE.md parsing applies.
   for (const s of steps) {
-    if (s.script_spec && s.script_spec.timeoutS > MANAGER_SAFE_TIMEOUT_S) {
+    if (manifest.runner === 'manager' && s.script_spec && s.script_spec.timeoutS > MANAGER_SAFE_TIMEOUT_S) {
       warnings.push(
         `step '${s.step_id}': script timeout ${s.script_spec.timeoutS}s exceeds the manager-safe ${MANAGER_SAFE_TIMEOUT_S}s — split the step`,
       );
@@ -189,7 +189,7 @@ export function planFromManifest(
   return {
     mode: manifest.execution,
     isolation: ISOLATION_BY_SCOPE[manifest.isolation],
-    runner: 'manager',
+    runner: manifest.runner,
     default_model: defaultModel ?? null,
     default_effort: defaultEffort ?? null,
     steps,

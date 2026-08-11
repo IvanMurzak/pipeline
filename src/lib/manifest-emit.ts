@@ -19,8 +19,9 @@
 //
 //   * a script step's inline `command:` (v2 has only `script:`),
 //   * a `${PP_*}` variable declared `(required)` (`vars:` carries defaults),
-//   * `runner: headless`, and the external-worktree flags `finalize:` /
-//     `delete_branches:` / `worktree_hook_dir:`.
+//   * `runner: headless` (a v2 manifest CAN say `runner: driver` now — E7/E15 —
+//     this migration just doesn't emit it yet), and the external-worktree flags
+//     `finalize:` / `delete_branches:` / `worktree_hook_dir:`.
 
 import { MANIFEST_SCHEMA, type Execution, type Isolation as ManifestIsolation } from './manifest';
 import type { Isolation, Plan, PlanStep } from './plan';
@@ -165,8 +166,13 @@ export function emitManifest(input: EmitManifestInput): EmitManifestResult {
   const nameOf = new Map(renames.map((r) => [r.from, r.to] as const));
   const unsupported: string[] = [];
 
-  if (plan.runner === 'headless') {
-    unsupported.push("`runner: headless` — a v2 manifest has no runner key; every manifest run is manager-driven");
+  if (plan.runner === 'driver') {
+    // v1's `headless` renamed onto the manifest vocabulary (E7/E15) — a v2
+    // manifest CAN say `runner: driver` now, this migration just doesn't emit
+    // it yet, so say that rather than the now-false "no runner key" claim.
+    unsupported.push(
+      "`runner: driver` (v1's `headless`) — not emitted by this migration yet; add `runner: driver` to the generated file by hand",
+    );
   }
   if (plan.finalize) {
     unsupported.push(

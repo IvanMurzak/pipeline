@@ -165,6 +165,21 @@ describe('isolation is a scope, translated to the mechanism the engine implement
   });
 });
 
+describe('runner is the manifest\'s value, straight through (E7/E15)', () => {
+  test.each(['session', 'manager', 'driver', 'standalone'] as const)(
+    'runner: %s carries onto the plan unchanged',
+    (mode) => {
+      const p = plan(`schema: 2\nname: demo\nrunner: ${mode}\nsteps:\n  - name: a\n    body: a.md\n`);
+      expect(p.errors).toEqual([]);
+      expect(p.runner).toBe(mode);
+    },
+  );
+
+  test('absent runner: resolves to manager — E10, today\'s behaviour unchanged', () => {
+    expect(plan(LINEAR).runner).toBe('manager');
+  });
+});
+
 describe('step bodies and the path the engine keys on', () => {
   test('a body path is resolved against the pipeline root, and rel drops the steps/ prefix', () => {
     const p = plan(LINEAR);
@@ -271,6 +286,13 @@ steps:
   test('a timeout the manager cannot honor warns — the outer call would kill it first', () => {
     const p = plan(`schema: 2\nname: demo\nsteps:\n  - name: b\n    type: script\n    script: s.py\n    timeout: 900\n`);
     expect(p.warnings.some((w) => w.includes("step 'b'") && w.includes('manager-safe'))).toBe(true);
+  });
+
+  test('the manager-safe lint only applies under runner: manager — a driver run never calls `pipeline next` that way', () => {
+    const p = plan(
+      `schema: 2\nname: demo\nrunner: driver\nsteps:\n  - name: b\n    type: script\n    script: s.py\n    timeout: 900\n`,
+    );
+    expect(p.warnings.some((w) => w.includes('manager-safe'))).toBe(false);
   });
 
   test('a script step carries no AGENT retry budget — its own lives on the spec', () => {

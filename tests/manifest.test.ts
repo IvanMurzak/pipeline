@@ -7,6 +7,7 @@ import {
   bodyFiles,
   frozenBodyFiles,
   MANIFEST_SCHEMA,
+  type Runner,
 } from '../src/lib/manifest';
 
 /**
@@ -44,6 +45,7 @@ describe('header', () => {
     expect(m.schema).toBe(MANIFEST_SCHEMA);
     expect(m.execution).toBe('sequential');
     expect(m.isolation).toBe('none');
+    expect(m.runner).toBe('manager');
     expect(m.base_branch).toBe('main');
     expect(m.self_improve).toBe(true);
     expect(m.steps).toHaveLength(1);
@@ -82,6 +84,7 @@ name: full
 description: does things
 execution: parallel
 isolation: run
+runner: driver
 base_branch: next
 self_improve: false
 defaults:
@@ -98,6 +101,7 @@ steps:
     expect(m.errors).toEqual([]);
     expect(m.execution).toBe('parallel');
     expect(m.isolation).toBe('run');
+    expect(m.runner).toBe('driver');
     expect(m.base_branch).toBe('next');
     expect(m.self_improve).toBe(false);
     expect(m.defaults).toEqual({ model: 'opus', effort: 'high' });
@@ -129,9 +133,45 @@ describe('unknown values are errors, never fallbacks', () => {
     expect(m.errors.some((e) => e.startsWith('execution:'))).toBe(true);
   });
 
+  test('unknown runner is refused, not warned-and-defaulted', () => {
+    const m = parse(`schema: 2\nname: d\nrunner: headless\nsteps:\n  - name: a\n    body: a.md\n`);
+    expect(m.errors.some((e) => e.startsWith('runner:') && e.includes('headless'))).toBe(true);
+    expect(m.errors.some((e) => e.includes('session | manager | driver | standalone'))).toBe(true);
+  });
+
   test('a mistyped scalar is reported with its path', () => {
     const m = parse(`schema: 2\nname: d\nself_improve: yes-please\nsteps:\n  - name: a\n    body: a.md\n`);
     expect(m.errors.some((e) => e.startsWith('self_improve:'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runner: — the execution mode (E7/E15)
+// ---------------------------------------------------------------------------
+
+describe('runner:', () => {
+  test('absent runner: defaults to manager — today\'s behaviour, unchanged', () => {
+    const m = parse(MINIMAL);
+    expect(m.errors).toEqual([]);
+    expect(m.runner).toBe('manager');
+  });
+
+  test('each of the four mode names parses cleanly', () => {
+    const modes: Runner[] = ['session', 'manager', 'driver', 'standalone'];
+    for (const mode of modes) {
+      const m = parse(`schema: 2\nname: d\nrunner: ${mode}\nsteps:\n  - name: a\n    body: a.md\n`);
+      expect(m.errors).toEqual([]);
+      expect(m.runner).toBe(mode);
+    }
+  });
+
+  test('runner: headless — the retired v1 spelling — is refused, not silently mapped', () => {
+    // v2 has no read-time mapping of its own: the rename from `headless` to
+    // `driver` happens once, in the v1 PIPELINE.md reader (lib/plan.ts). A v2
+    // manifest names the mode directly.
+    const m = parse(`schema: 2\nname: d\nrunner: headless\nsteps:\n  - name: a\n    body: a.md\n`);
+    expect(m.errors.some((e) => e.startsWith('runner:'))).toBe(true);
+    expect(m.runner).toBe('manager');
   });
 });
 
