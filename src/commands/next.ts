@@ -3,7 +3,7 @@
 //   [--default-effort <level>] [--effort <step_id>=<level> ...]
 //   [--var NAME=value ...] [--vars-file <path>]
 //   [--record '<json>' | --record-file <path>] [--resume] [--manual-hooks]
-//   [--manual-scripts]`
+//   [--manual-scripts] [--brief-file]`
 //
 // The mechanical orchestration driver. Each call returns the NEXT action the
 // pipeline-manager should perform, given the run's persisted state + the
@@ -15,6 +15,16 @@
 // inline argv (mutually exclusive with `--record`); the file content then flows
 // through the IDENTICAL parse + state-machine path as an inline `--record`.
 // The file is never deleted or modified.
+//
+// `--brief-file` (E5, execution-modes/01-modes.md) changes DELIVERY only,
+// never DECISION: the exact `out` object that would otherwise print to stdout
+// is instead written verbatim to `.runtime/<run-id>/briefs/<NN>.json`, and
+// stdout carries only the three-key control signal
+// `{action, brief_file, phase}` the caller dispatches on. Scoped to `session`
+// mode, where a subagent-per-step loop is what actually accumulates the
+// twenty-actions-plus-twenty-reports context cost this saves; the win is
+// modest elsewhere. Absent the flag, output is byte-for-byte what it was
+// before this flag existed.
 //
 // Actions returned to the manager: run-step | merge | run-improver
 //   | run-script-creator | retrospective | done | halt | blocked.
@@ -89,6 +99,7 @@ import {
   type NextRecord,
   type NextOpts,
   type NextAction,
+  type NextPhase,
   type StepRecord,
   type WorktreeRecord,
 } from '../lib/next';
@@ -199,6 +210,12 @@ interface NextArgs {
    *  raw script-type run-step actions to the caller instead of executing them
    *  in-process — the caller records the step record itself. */
   manualScripts: boolean;
+  /** `--brief-file` (E5, execution-modes/01-modes.md): write the full action to
+   *  `.runtime/<run-id>/briefs/` and print only the three-key control signal
+   *  instead of the full action JSON. Scoped to `session` mode (USAGE says so;
+   *  nothing here enforces it — the flag is harmless, just less useful,
+   *  elsewhere). */
+  briefFile: boolean;
 }
 
 /** Result of parsing a `--record` value: a record (or null = absent/empty), or a
@@ -236,7 +253,7 @@ function addEffortOverride(out: { effortOverrides?: Record<string, string>; effo
 }
 
 function parseArgs(args: string[]): NextArgs {
-  const out: NextArgs = { resume: false, record: null, manualHooks: false, manualScripts: false };
+  const out: NextArgs = { resume: false, record: null, manualHooks: false, manualScripts: false, briefFile: false };
   const take = (i: number) => args[i + 1];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -271,6 +288,7 @@ function parseArgs(args: string[]): NextArgs {
     else if (a === '--resume') out.resume = true;
     else if (a === '--manual-hooks') out.manualHooks = true;
     else if (a === '--manual-scripts') out.manualScripts = true;
+    else if (a === '--brief-file') out.briefFile = true;
   }
   return out;
 }
@@ -334,6 +352,103 @@ function parseRecord(raw: string | undefined): RecordParse {
 
 function stateDir(root: string, runId: string): string {
   return join(root, '.runtime', runId);
+}
+
+// ---------------------------------------------------------------------------
+// `--brief-file` (E5, execution-modes/01-modes.md)
+// ---------------------------------------------------------------------------
+
+/** `.runtime/<run-id>/briefs/` — already inside the cursor's own `.runtime/`
+ *  home (stateDir), so it rides the SAME gitignore stub `saveState` writes;
+ *  nothing new needs provisioning or cleaning up. */
+function briefsDir(root: string, runId: string): string {
+  return join(stateDir(root, runId), 'briefs');
+}
+
+/**
+ * The `NextPhase` a just-returned action leaves the persisted run parked in —
+ * a static mirror of the engine's own `state.phase = '…'` assignments
+ * (lib/next.ts): every branch that returns a given action kind sets exactly
+ * one phase for it. Kept here as a pure function of `action.action` alone
+ * rather than plumbed through `InvokeNextResult`, since NextState is
+ * otherwise irrelevant to printing.
+ *
+ * `continue` is the one command-layer-only action (§7 call-budget hand-off):
+ * it never advances the engine, so it reports the phase the pending dispatch
+ * was ALREADY parked in — always `await-step` (a script-typed run-step or
+ * layer dispatch is the only thing `continue` ever re-emits).
+ *
+ * The exhaustive switch + `never` default mean a future `NextAction` member
+ * fails to compile here until it is taught its phase, instead of silently
+ * printing an unmapped one.
+ */
+function phaseForAction(action: NextAction): NextPhase {
+  switch (action.action) {
+    case 'run-step':
+    case 'continue':
+      return 'await-step';
+    case 'merge':
+      return 'await-merge';
+    case 'run-improver':
+      return 'await-improver';
+    case 'run-script-creator':
+      return 'await-script';
+    case 'retrospective':
+      return 'await-retro';
+    case 'provision-worktree':
+      return 'await-provision';
+    case 'finalize-worktree':
+      return 'await-finalize';
+    case 'teardown-worktree':
+      return 'await-teardown';
+    case 'blocked':
+      return 'blocked';
+    case 'done':
+    case 'halt':
+      return 'terminal';
+    default: {
+      const exhaustive: never = action;
+      throw new Error(`--brief-file: no phase mapped for action ${JSON.stringify(exhaustive)}`);
+    }
+  }
+}
+
+/**
+ * `--brief-file`: persist the FULL action `out` — byte-identical to what
+ * `pipeline next` prints without the flag — under `.runtime/<run-id>/briefs/`,
+ * and return the printable control object carrying EXACTLY `action`,
+ * `brief_file`, `phase`. Nothing else: an extra field defeats the flag's
+ * purpose, since the caller dispatches on this object without ever opening the
+ * file (the subagent it spawns reads the file itself).
+ *
+ * Files are named by an incrementing sequence counted from what's already in
+ * the run's `briefs/` dir — NOT `NextState.index`, which bumps only on a real
+ * step dispatch. Reusing it would let a non-run-step action (a `merge`, an
+ * improver/script-creator dispatch, `blocked`, …) that leaves `index`
+ * unchanged silently overwrite the still-unread brief of the run-step call
+ * that led to it.
+ *
+ * Exported so every `NextAction` kind can be exercised directly against real
+ * engine output, independent of how elaborate a fixture is needed to reach it
+ * through a live run (`continue`, the worktree lifecycle actions).
+ */
+export function writeBriefFile(
+  root: string,
+  runId: string,
+  out: Record<string, unknown>,
+  action: NextAction,
+): { action: string; brief_file: string; phase: NextPhase } {
+  const dir = briefsDir(root, runId);
+  mkdirSync(dir, { recursive: true });
+  let n = 1;
+  try {
+    n = readdirSync(dir).filter((f) => f.endsWith('.json')).length + 1;
+  } catch {
+    // best-effort — the dir was just created above
+  }
+  const briefFile = join(dir, `${String(n).padStart(2, '0')}.json`);
+  writeFileSync(briefFile, JSON.stringify(out, null, 2) + '\n', 'utf8');
+  return { action: action.action, brief_file: briefFile, phase: phaseForAction(action) };
 }
 
 function loadState(root: string, runId: string): NextState | null {
@@ -2819,7 +2934,13 @@ const USAGE =
   '                     [--default-effort <level>] [--effort <step_id>=<level> ...]\n' +
   '                     [--var NAME=value ...] [--vars-file <path>]\n' +
   "                     [--record '<json>' | --record-file <path>] [--resume]\n" +
-  '                     [--manual-hooks] [--manual-scripts]\n';
+  '                     [--manual-hooks] [--manual-scripts] [--brief-file]\n' +
+  '\n' +
+  '  --brief-file   Write the full action to .runtime/<run-id>/briefs/ and print\n' +
+  '                 only {action, brief_file, phase} instead of the full action\n' +
+  '                 JSON. Scoped to `session` mode: the context saving is real\n' +
+  '                 there (one accumulating action+report per step); modest in\n' +
+  '                 `manager`, where the subagent report is the larger cost.\n';
 
 export function runNext(args: string[]): number {
   if (args.includes('--help') || args.includes('-h')) {
@@ -2916,6 +3037,15 @@ export function runNext(args: string[]): number {
     manualHooks: a.manualHooks,
     manualScripts: a.manualScripts,
   });
+
+  // `--brief-file` (E5): DELIVERY only — the underlying action is byte-for-
+  // byte identical to `res.out`; it just lands in a file instead of on
+  // stdout, and stdout carries only the three-key control signal.
+  if (a.briefFile) {
+    const control = writeBriefFile(a.root, a.runId, res.out, res.action);
+    process.stdout.write(JSON.stringify(control, null, 2) + '\n');
+    return res.code;
+  }
 
   process.stdout.write(JSON.stringify(res.out, null, 2) + '\n');
   return res.code;
