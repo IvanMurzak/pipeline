@@ -307,9 +307,78 @@ export function roundScore(x: number): number {
 
 const NUMERIC_PREFIX_RE = /^(\d+)[-_]/;
 
-/** Resolve the pipeline's first iteration file, or null. */
+function statSafe(p: string): ReturnType<typeof statSync> | null {
+  try {
+    return statSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/** The `body:` of the manifest's first step, pipeline-root-relative, or null.
+ *
+ *  Deliberately a narrow scan rather than a full parse: this module is loaded by
+ *  the BM25 matcher, which runs on every prompt through the match hook and must
+ *  stay dependency-light. It reads the first `body:` under `steps:` and accepts
+ *  both the scalar form and the first entry of a list. */
+function firstBodyFromManifest(ymlPath: string): string | null {
+  let text: string;
+  try {
+    text = readFileSync(ymlPath, 'utf8');
+  } catch {
+    return null;
+  }
+  const lines = text.split(/\r?\n/);
+  let inSteps = false;
+  let seenFirstStep = false;
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, '');
+    if (!inSteps) {
+      if (/^steps:\s*$/.test(line)) inSteps = true;
+      continue;
+    }
+    if (/^\S/.test(line)) break; // dedented out of `steps:`
+    if (/^\s*-\s/.test(line)) {
+      if (seenFirstStep) break; // second step reached without a body
+      seenFirstStep = true;
+    }
+    const m = /^\s*(?:-\s*)?body:\s*(.+?)\s*$/.exec(line);
+    if (m) {
+      const v = m[1].replace(/^["']|["']$/g, '');
+      if (v && v !== '|' && v !== '>' && !v.startsWith('[')) return v;
+      return null; // a list or block form; the caller falls back to "no file"
+    }
+  }
+  return null;
+}
+
+/** Resolve the pipeline's first iteration file, or null.
+ *
+ *  Under schema 2 the first step is the manifest's FIRST ENTRY, and step files
+ *  carry no numeric prefix — ordering moved into `pipeline.yml` precisely so a
+ *  filename would stop being a second, competing answer. The v1 scan below
+ *  requires that prefix and silently skips every file without one, so a v2
+ *  pipeline read through it looks like a pipeline with no steps at all. That is
+ *  how `department new --from-pipeline` started refusing the bundled templates
+ *  the moment they were migrated.
+ *
+ *  So: consult the manifest when there is one, and keep the prefix scan for the
+ *  v1 pipelines that still rely on it. */
 export function findFirstIteration(manifestPath: string): string | null {
   const pipelineRoot = dirname(manifestPath);
+
+  const manifestYml = join(pipelineRoot, 'pipeline.yml');
+  if (statSafe(manifestYml)?.isFile()) {
+    const first = firstBodyFromManifest(manifestYml);
+    if (first) {
+      const abs = join(pipelineRoot, first);
+      if (statSafe(abs)?.isFile()) return abs;
+    }
+    // A manifest whose first step has no body (a script or gate step) has no
+    // iteration file to point at, and the prefix scan cannot invent one.
+    return null;
+  }
+
   const stepsDir = join(pipelineRoot, 'steps');
   let st;
   try {
