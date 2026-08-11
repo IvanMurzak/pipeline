@@ -301,16 +301,39 @@ export class ClaudeStreamParser {
       return;
     }
     // The first real frame proves this IS a stream — the whole-document
-    // fallback can never apply, so stop paying for it.
-    this.fallbackOpen = false;
-    this.fallback = '';
-    this.counts.frames += 1;
-    this.frame(parsed);
+    // fallback can never apply, so stop paying for it. Shared with the
+    // already-parsed entry point so both feeds count and discriminate
+    // identically.
+    this.pushFrame(parsed);
   }
 
   private keepForFallback(raw: string): void {
     if (!this.fallbackOpen || this.fallback.length > MAX_FALLBACK_BYTES) return;
     this.fallback += raw + '\n';
+  }
+
+  /**
+   * Feed one ALREADY-PARSED frame — the seam an SDK-backed executor uses
+   * (`lib/executors/sdk.ts`). The Agent SDK yields the SAME objects this
+   * parser would otherwise reach by `JSON.parse`-ing a stream-json line: its
+   * `SDKAssistantMessage` carries `parent_tool_use_id` and a `message.content`
+   * array of blocks, and its `SDKResultMessage` is the terminal `result`
+   * frame field-for-field. Handing the object over directly — rather than
+   * re-serialising it so {@link push} can parse it back — keeps ONE
+   * implementation of the discrimination, depth and tally rules for both
+   * executors, which is the property `envelopeOf`'s "both paths obey one
+   * contract" comment depends on.
+   *
+   * A frame that arrives this way is by definition not text, so it can never
+   * be `non_json` and can never feed the whole-document fallback — it closes
+   * that buffer exactly as a parsed line does. Never throws.
+   */
+  pushFrame(frame: Record<string, unknown>): void {
+    if (this.ended) return;
+    this.fallbackOpen = false;
+    this.fallback = '';
+    this.counts.frames += 1;
+    this.frame(frame);
   }
 
   /** Discriminate on `(type, subtype)` — rule 1. */
