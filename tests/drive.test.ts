@@ -562,7 +562,10 @@ test('drive: envelope usage enriches the finished run\'s .stats tokens (cost inc
   expect(existsSync(runsFile)).toBe(true);
   const rec = JSON.parse(readFileSync(runsFile, 'utf8').trim().split('\n')[0]);
   expect(rec.run_id).toBe(run);
-  expect(rec.runner).toBe('headless');
+  // E15: `pipeline drive` tags its stats records `driver`, not the retired
+  // `headless` spelling (lib/stats.ts's read-time shim still maps an OLD
+  // on-disk `headless` record to `driver`; this is what a NEW run writes).
+  expect(rec.runner).toBe('driver');
   expect(rec.tokens).toEqual({ input: 10, output: 20, cache_read: 30, cache_creation: 40, cost_usd: 0.05 });
   // The per-run log got the cost line.
   const log = readFileSync(join(base, 'proj', '.pipeline', '.stats', 'pipe', 'runs', `${run}.log`), 'utf8');

@@ -1272,7 +1272,10 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
   const rootAbs = resolve(root);
   // Tag this run's stats records (lib/stats.ts reads it at finalize) so the
   // measurement files distinguish headless runs from manager-driven ones.
-  process.env.PIPELINE_STATS_RUNNER = 'headless';
+  // E15: the record-layer vocabulary renamed this mode's name to `driver`
+  // (Runner, lib/manifest.ts) — `headless` is still read correctly via the
+  // read-time shim in lib/stats.ts, but no longer written.
+  process.env.PIPELINE_STATS_RUNNER = 'driver';
   // NOTE: the merge cwd is NOT process.cwd() — runMerge resolves the project
   // root enclosing --root itself (B3) so merges never land in a random cwd.
   const progress = (event: string, fields: Record<string, unknown> = {}) => {

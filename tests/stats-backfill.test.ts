@@ -88,6 +88,13 @@ function baseRecord(over: Partial<RunRecord> & { run_id: string }): RunRecord {
   };
 }
 
+/** E15 retired this spelling from `RunRecord.runner`'s type (now `Runner`,
+ *  lib/manifest.ts) — kept here, deliberately outside the union, for ONE
+ *  fixture below that proves the backfill's source-select still treats an
+ *  on-disk pre-rename record exactly like a `driver` one, via lib/stats.ts's
+ *  read-time shim. Every other fixture in this file uses the current name. */
+const LEGACY_HEADLESS_RUNNER = 'headless' as unknown as RunRecord['runner'];
+
 function writeRuns(records: RunRecord[], rel = 'demo'): void {
   mkdirSync(join(statsDir(rel), 'runs'), { recursive: true });
   writeFileSync(runsJsonlPath(rel), records.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
@@ -206,7 +213,10 @@ describe('backfillProject', () => {
   // -------------------------------------------------------------------------
 
   test('headless record: folds pinned step-session transcripts, enriches tokens + tool counts', () => {
-    const rec = baseRecord({ run_id: 'hl-1', runner: 'headless', pipeline: 'demo' });
+    // E15: this record deliberately keeps the pre-rename on-disk spelling —
+    // lib/stats.ts's read-time shim maps it to `driver` before this module
+    // ever branches on it, so the SAME pinned-session source-select applies.
+    const rec = baseRecord({ run_id: 'hl-1', runner: LEGACY_HEADLESS_RUNNER, pipeline: 'demo' });
     writeRuns([rec]);
 
     const pipelineRoot = join(projectRoot, '.pipeline', 'demo');
@@ -239,7 +249,7 @@ describe('backfillProject', () => {
   });
 
   test('headless record: usage.json envelope totals take precedence over the transcript fold', () => {
-    const rec = baseRecord({ run_id: 'hl-usage', runner: 'headless', pipeline: 'demo' });
+    const rec = baseRecord({ run_id: 'hl-usage', runner: 'driver', pipeline: 'demo' });
     writeRuns([rec]);
 
     const pipelineRoot = join(projectRoot, '.pipeline', 'demo');
@@ -282,7 +292,7 @@ describe('backfillProject', () => {
   });
 
   test('headless record: no sessions dir and no usage.json → transcript_pruned', () => {
-    const rec = baseRecord({ run_id: 'hl-pruned', runner: 'headless', pipeline: 'demo' });
+    const rec = baseRecord({ run_id: 'hl-pruned', runner: 'driver', pipeline: 'demo' });
     writeRuns([rec]);
     const report = backfillProject(projectRoot, { homeOverride: home });
     expect(report.transcript_pruned).toEqual(['hl-pruned']);
@@ -346,7 +356,7 @@ describe('backfillProject', () => {
     // `.runtime/<run>/sessions` path join — a real per-record guard trip,
     // not a JSON-parse failure (parseRunRecords already filters those out
     // silently, unchanged behavior).
-    const bad = baseRecord({ run_id: 'bad-1', runner: 'headless', pipeline: { nested: true } as unknown as string });
+    const bad = baseRecord({ run_id: 'bad-1', runner: 'driver', pipeline: { nested: true } as unknown as string });
     mkdirSync(join(statsDir(), 'runs'), { recursive: true });
     writeFileSync(runsJsonlPath(), [JSON.stringify(bad), JSON.stringify(good)].join('\n') + '\n', 'utf8');
     writeManagerTranscript('good-1', good.started_at as string, good.ended_at, { fail: false });
@@ -359,7 +369,7 @@ describe('backfillProject', () => {
   });
 
   test("hintMode 'always': uniform fold against the hint regardless of `runner`", () => {
-    const rec = baseRecord({ run_id: 'hint-1', runner: 'headless', pipeline: 'demo' });
+    const rec = baseRecord({ run_id: 'hint-1', runner: 'driver', pipeline: 'demo' });
     writeRuns([rec]);
     // No step-session evidence exists at all for this headless record — the
     // normal headless path would prune it. The hint short-circuit bypasses
@@ -389,7 +399,7 @@ describe('backfillProject', () => {
   // Stop transcript (hours of unrelated work) would time-window-match a stale
   // tokens-null record and corrupt it with someone else's usage.
   test("hintMode 'correlated' (default): an uncorrelated hint is ignored, the record falls back to its normal source", () => {
-    const rec = baseRecord({ run_id: 'hint-uncorr', runner: 'headless', pipeline: 'demo' });
+    const rec = baseRecord({ run_id: 'hint-uncorr', runner: 'driver', pipeline: 'demo' });
     writeRuns([rec]);
     const dir = join(home, '.claude', 'projects', encodeClaudeProjectDir(projectRoot));
     mkdirSync(dir, { recursive: true });
@@ -413,7 +423,7 @@ describe('backfillProject', () => {
   });
 
   test("hintMode 'correlated' (default): a hint naming the run IS applied", () => {
-    const rec = baseRecord({ run_id: 'hint-corr', runner: 'headless', pipeline: 'demo' });
+    const rec = baseRecord({ run_id: 'hint-corr', runner: 'driver', pipeline: 'demo' });
     writeRuns([rec]);
     const dir = join(home, '.claude', 'projects', encodeClaudeProjectDir(projectRoot));
     mkdirSync(dir, { recursive: true });
@@ -494,7 +504,7 @@ describe('hint correlation index', () => {
     // A 40-char sha whose interior contains the run id — `includes` matched
     // this, so the index must too, or the Stop rung would silently stop
     // enriching such runs.
-    const rec = baseRecord({ run_id: 'abcdef123456', runner: 'headless', pipeline: 'demo' });
+    const rec = baseRecord({ run_id: 'abcdef123456', runner: 'driver', pipeline: 'demo' });
     writeRuns([rec]);
     const dir = join(home, '.claude', 'projects', encodeClaudeProjectDir(projectRootFor()));
     mkdirSync(dir, { recursive: true });
@@ -516,7 +526,7 @@ describe('hint correlation index', () => {
   });
 
   test('a NON-hex-shaped run id falls back to a direct scan', () => {
-    const rec = baseRecord({ run_id: 'legacy-run-id', runner: 'headless', pipeline: 'demo' });
+    const rec = baseRecord({ run_id: 'legacy-run-id', runner: 'driver', pipeline: 'demo' });
     writeRuns([rec]);
     const dir = join(home, '.claude', 'projects', encodeClaudeProjectDir(projectRootFor()));
     mkdirSync(dir, { recursive: true });
@@ -537,7 +547,7 @@ describe('hint correlation index', () => {
   });
 
   test('an id absent from the hint still does NOT correlate', () => {
-    const rec = baseRecord({ run_id: 'ffffffffffff', runner: 'headless', pipeline: 'demo' });
+    const rec = baseRecord({ run_id: 'ffffffffffff', runner: 'driver', pipeline: 'demo' });
     writeRuns([rec]);
     const dir = join(home, '.claude', 'projects', encodeClaudeProjectDir(projectRootFor()));
     mkdirSync(dir, { recursive: true });
@@ -593,7 +603,7 @@ describe('hint correlation index', () => {
   test('a UUIDv7 run id correlates AND is answered from the index, never a rescan', () => {
     const runId = newId();
     expect(runId).toHaveLength(36);
-    const rec = baseRecord({ run_id: runId, runner: 'headless', pipeline: 'demo' });
+    const rec = baseRecord({ run_id: runId, runner: 'driver', pipeline: 'demo' });
     writeRuns([rec]);
     const transcript = writeHintMentioning([runId], 'uuidv7.jsonl');
 
@@ -610,7 +620,7 @@ describe('hint correlation index', () => {
     // hookIdFromToolUseId mints v5 for bypass spawns; those records land in
     // .stats exactly like v7 ones and must not fall off the fast path.
     const runId = '0f8c2b40-1a3d-5e6f-8a9b-0c1d2e3f4a5b';
-    const rec = baseRecord({ run_id: runId, runner: 'headless', pipeline: 'demo' });
+    const rec = baseRecord({ run_id: runId, runner: 'driver', pipeline: 'demo' });
     writeRuns([rec]);
     const transcript = writeHintMentioning([runId], 'uuidv5.jsonl');
 
@@ -620,7 +630,7 @@ describe('hint correlation index', () => {
   });
 
   test('a UUIDv7 ABSENT from the hint is still (correctly) rejected by the index', () => {
-    const rec = baseRecord({ run_id: newId(), runner: 'headless', pipeline: 'demo' });
+    const rec = baseRecord({ run_id: newId(), runner: 'driver', pipeline: 'demo' });
     writeRuns([rec]);
     const transcript = writeHintMentioning([newId()], 'other-uuid.jsonl');
 
@@ -639,7 +649,7 @@ describe('hint correlation index', () => {
     const v5 = '0f8c2b40-1a3d-5e6f-8a9b-0c1d2e3f4a5b';
     const hex12 = 'abcdef012345';
     const custom = 'my-own-run-id';
-    writeRuns([v7, v5, hex12, custom].map((run_id) => baseRecord({ run_id, runner: 'headless', pipeline: 'demo' })));
+    writeRuns([v7, v5, hex12, custom].map((run_id) => baseRecord({ run_id, runner: 'driver', pipeline: 'demo' })));
     const transcript = writeHintMentioning([v7, v5, hex12, custom], 'mixed.jsonl');
 
     resetCorrelationProbe();
@@ -658,8 +668,8 @@ describe('hint correlation index', () => {
     const first = '11111111-1111-1111-1111-1111';
     const overlapped = '22222222-2222-2222-2222-222222222222';
     const embedded = 'aabbccdd-eeff-7011-8022-334455667788';
-    const rec = baseRecord({ run_id: overlapped, runner: 'headless', pipeline: 'demo' });
-    const rec2 = baseRecord({ run_id: embedded, runner: 'headless', pipeline: 'demo' });
+    const rec = baseRecord({ run_id: overlapped, runner: 'driver', pipeline: 'demo' });
+    const rec2 = baseRecord({ run_id: embedded, runner: 'driver', pipeline: 'demo' });
     writeRuns([rec, rec2]);
     const dir = join(home, '.claude', 'projects', encodeClaudeProjectDir(projectRootFor()));
     mkdirSync(dir, { recursive: true });
