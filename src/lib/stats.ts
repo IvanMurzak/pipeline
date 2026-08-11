@@ -39,6 +39,9 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 // c2 — runs.jsonl, the per-run .log and SUMMARY.md all carry halt reasons and
 // tool-failure detail verbatim. See lib/output-scrubber.ts.
 import { scrub } from './output-scrubber';
+// E15 — the mode vocabulary (a1 introduced it on Plan.runner); reused here
+// rather than declaring a second copy of the same four names.
+import type { Runner } from './manifest';
 
 // ---------------------------------------------------------------------------
 // Switch + paths
@@ -277,7 +280,14 @@ export interface RunRecord {
   duration_s: number | null;
   outcome: string;
   halt_reason: string | null;
-  runner: string;
+  /** Which of the four execution modes ran (E7/E15) — see {@link Runner}.
+   *  A DIFFERENT axis from `mode` below: this is WHO drove the run, `mode` is
+   *  the execution topology. Narrowed from a loose `string` to the manifest's
+   *  own vocabulary — no new field, per E15 (an earlier plan to add one
+   *  existed only to dodge a collision that disappears once `runner` is used
+   *  for what it is named after). Historical/foreign values are handled at
+   *  READ time by {@link normalizeRunner}, never by rewriting the file. */
+  runner: Runner;
   mode: string | null;
   steps_run: number;
   steps: StepStat[];
@@ -316,10 +326,34 @@ function stepIdOf(line: BufferLine): string {
   return sid ?? (path ? basename(path).replace(/\.md$/i, '') : 'step');
 }
 
+const RUNNER_VALUES: ReadonlySet<string> = new Set<Runner>(['session', 'manager', 'driver', 'standalone']);
+
+/**
+ * Coerce an arbitrary `runner` value (an env var, or a field parsed out of a
+ * JSONL line whose actual on-disk shape predates the four-mode vocabulary)
+ * onto {@link Runner} — the record-layer read-time shim (E15).
+ *
+ * `headless` — `pipeline drive`'s pre-E15 spelling — becomes `driver`, the
+ * SAME mode under its new name (mirrors the PIPELINE.md/`plan.ts` shim for
+ * the manifest layer). Anything else unrecognised (a stray value, a corrupt
+ * field, absent) degrades to `manager` rather than throwing: run records are
+ * historical data, a reader that crashes on an old file is worse than one
+ * that degrades, and `manager` is the SAME fallback the manifest itself uses
+ * for an absent `runner:` (E10). The record on disk is never rewritten —
+ * this mapping is applied fresh on every read (parseRunRecords) and at
+ * finalize time for a brand-new record (statsFinalizeRun); it never touches
+ * an EXISTING record's bytes (rewriteRunTokens only ever fills `tokens`).
+ */
+export function normalizeRunner(v: unknown): Runner {
+  const s = typeof v === 'string' ? v.trim().toLowerCase() : '';
+  if (s === 'headless') return 'driver';
+  return RUNNER_VALUES.has(s) ? (s as Runner) : 'manager';
+}
+
 /** Pure fold: timeline buffer → the run's summary record. Exported for tests. */
 export function summarizeRun(
   lines: BufferLine[],
-  args: { runId: string; pipeline: string; outcome: string; haltReason: string | null; runner: string; endedMs: number },
+  args: { runId: string; pipeline: string; outcome: string; haltReason: string | null; runner: Runner; endedMs: number },
 ): RunRecord {
   const startedMs = lines.length ? lines[0].t : null;
   let mode: string | null = null;
@@ -508,7 +542,7 @@ export function statsFinalizeRun(
       pipeline: loc.rel,
       outcome,
       haltReason,
-      runner: (process.env.PIPELINE_STATS_RUNNER ?? '').trim() || 'manager',
+      runner: normalizeRunner(process.env.PIPELINE_STATS_RUNNER),
       endedMs: Date.now(),
     });
     ensureGeneratedDir(join(loc.base, loc.rel, 'runs'), loc.base);
@@ -548,6 +582,10 @@ export function findRunsFiles(base: string, depth = 8): string[] {
   return out;
 }
 
+/** The record-layer read-time shim (E15) lives HERE — the one path every
+ *  consumer (rendering, `logs.ts`, `stats-backfill.ts`, SUMMARY.md) reads
+ *  records through — so `runner` is normalized (see {@link normalizeRunner})
+ *  exactly once per read and the file on disk is never touched. */
 export function parseRunRecords(text: string): RunRecord[] {
   const out: RunRecord[] = [];
   for (const raw of text.split('\n')) {
@@ -555,7 +593,9 @@ export function parseRunRecords(text: string): RunRecord[] {
     if (!t) continue;
     try {
       const o = JSON.parse(t) as RunRecord;
-      if (o && typeof o === 'object' && typeof o.run_id === 'string') out.push(o);
+      if (o && typeof o === 'object' && typeof o.run_id === 'string') {
+        out.push({ ...o, runner: normalizeRunner((o as unknown as { runner: unknown }).runner) });
+      }
     } catch {
       // skip corrupt lines
     }

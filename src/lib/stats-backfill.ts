@@ -23,8 +23,10 @@
 // record and corrupt it with unrelated usage.
 //
 // Source select per record:
-//   - `runner === 'headless'` (a `pipeline drive` run) → the pinned per-step
-//     session transcripts (`.runtime/<run>/sessions/`, apps/pipeline-cli/src/
+//   - `runner === 'driver'` (a `pipeline drive` run — E15 renamed this from
+//     `headless`; a pre-E15 record reads as `driver` here too via
+//     lib/stats.ts's read-time shim) → the pinned per-step session
+//     transcripts (`.runtime/<run>/sessions/`, apps/pipeline-cli/src/
 //     lib/step-transcripts.ts), envelope `usage.json` preferred over the
 //     transcript-folded tokens when it carries any usage/cost — the SAME
 //     precedence `pipeline drive`'s own terminal-action enrichment uses
@@ -37,9 +39,9 @@
 //   - `transcriptHint` + `hintMode:'always'` overrides BOTH branches: every
 //     in-window tokens-null record is folded against the hint, regardless of
 //     `runner` — byte-compatible with the pre-refactor SubagentStop relay,
-//     which never branched on `runner` at all (a headless record's window
-//     essentially never overlaps a pipeline-manager transcript, so that fold
-//     is a harmless zero — E2 in 01-current-architecture.md §6).
+//     which never branched on `runner` at all (a driver/headless record's
+//     window essentially never overlaps a pipeline-manager transcript, so
+//     that fold is a harmless zero — E2 in 01-current-architecture.md §6).
 //   - `transcriptHint` + `hintMode:'correlated'` (default) uses the hint only
 //     for records whose run_id occurs in it; every other record falls back to
 //     the normal runner-based select above.
@@ -424,7 +426,10 @@ export function backfillProject(projectRoot: string, opts: BackfillOptions = {})
           // which is where a pipeline-manager's transcript lives when the
           // hint is a main-session file).
           result = foldManagerStyle(opts.transcriptHint as string, rec);
-        } else if (rec.runner === 'headless') {
+        } else if (rec.runner === 'driver') {
+          // E15: `headless` renamed to `driver` on the wire; a pre-E15 record
+          // reads as `driver` here too via lib/stats.ts's read-time shim, so
+          // this branch still selects the SAME pinned-session source.
           const runtimeDir = join(root, '.pipeline', rec.pipeline, '.runtime', rec.run_id);
           result = foldHeadlessStyle(runtimeDir, opts.homeOverride);
         } else {

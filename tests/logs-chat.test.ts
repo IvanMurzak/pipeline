@@ -67,7 +67,7 @@ function baseRunRecord(overrides: Partial<RunRecord> = {}): RunRecord {
     duration_s: 12,
     outcome: 'completed',
     halt_reason: null,
-    runner: 'headless',
+    runner: 'driver',
     mode: 'driver',
     steps_run: 1,
     steps: [],
@@ -160,11 +160,22 @@ describe('findRunRecord', () => {
 // runLogsChat — headless (`pipeline drive`) source path
 // ---------------------------------------------------------------------------
 
+/** E15 retired this spelling from `RunRecord.runner`'s type (now `Runner`,
+ *  lib/manifest.ts) — kept here, deliberately outside the union, to write ONE
+ *  fixture whose on-disk shape predates the rename and prove lib/stats.ts's
+ *  read-time shim (`headless` reads as `driver`) end to end through
+ *  `pipeline logs --chat`. Every other fixture below uses the current name. */
+const LEGACY_HEADLESS_RUNNER = 'headless' as unknown as RunRecord['runner'];
+
 describe('runLogsChat: headless run', () => {
   test('renders the step session + its subagent fan-out, tagged and in order', () => {
     const runId = 'run-headless-1';
     const spawnCwd = join(projectRoot, 'wt');
-    writeRunsJsonl('demo', [baseRunRecord({ run_id: runId, runner: 'headless', mode: 'driver' })]);
+    // E15: on-disk `runner: 'headless'` (the pre-rename spelling this fixture
+    // deliberately keeps, to prove the read-time shim) reads as `driver` —
+    // `mode` is the UNRELATED execution-topology field and is deliberately a
+    // different value here, so the header proves the two are never conflated.
+    writeRunsJsonl('demo', [baseRunRecord({ run_id: runId, runner: LEGACY_HEADLESS_RUNNER, mode: 'sequential' })]);
     writeSessionFile('demo', runId, '01-build', 'sess-1', spawnCwd);
 
     writeTranscript(sessionFile(spawnCwd, 'sess-1'), [
@@ -181,7 +192,12 @@ describe('runLogsChat: headless run', () => {
     const text = out.join('');
 
     expect(text).toContain(`run ${runId}`);
-    expect(text).toContain('headless/driver');
+    // Read-time shim: the on-disk 'headless' renders as 'driver' (E15), and
+    // stays distinct from 'sequential' (mode) — never conflated, never the
+    // retired name (the run id itself legitimately contains "headless", so
+    // this checks the header's runner/mode segment specifically).
+    expect(text).toContain('driver/sequential');
+    expect(text).not.toContain('· headless/');
     expect(text).toContain('step: 01-build');
     expect(text).toContain('ASSISTANT 01-build');
     expect(text).toContain('Running the build.');
@@ -205,7 +221,7 @@ describe('runLogsChat: headless run', () => {
   test('two steps render in step_id order, each under its own header', () => {
     const runId = 'run-headless-2';
     const spawnCwd = join(projectRoot, 'wt');
-    writeRunsJsonl('demo', [baseRunRecord({ run_id: runId, runner: 'headless' })]);
+    writeRunsJsonl('demo', [baseRunRecord({ run_id: runId, runner: 'driver' })]);
     writeSessionFile('demo', runId, '02-second', 'sess-b', spawnCwd);
     writeSessionFile('demo', runId, '01-first', 'sess-a', spawnCwd);
     writeTranscript(sessionFile(spawnCwd, 'sess-a'), [assistantTurn('2026-08-01T10:00:00.000Z', 'first step turn')]);
@@ -221,7 +237,7 @@ describe('runLogsChat: headless run', () => {
   test('--json emits one JSON object per rendered entry, step/kind-attributed', () => {
     const runId = 'run-headless-json';
     const spawnCwd = join(projectRoot, 'wt');
-    writeRunsJsonl('demo', [baseRunRecord({ run_id: runId, runner: 'headless' })]);
+    writeRunsJsonl('demo', [baseRunRecord({ run_id: runId, runner: 'driver' })]);
     writeSessionFile('demo', runId, '01-build', 'sess-1', spawnCwd);
     writeTranscript(sessionFile(spawnCwd, 'sess-1'), [assistantTurn('2026-08-01T10:00:00.000Z', 'hello')]);
 
@@ -238,7 +254,7 @@ describe('runLogsChat: headless run', () => {
 
   test('a run that exists but has no transcript on disk: a clear message, not a crash', () => {
     const runId = 'run-no-transcript';
-    writeRunsJsonl('demo', [baseRunRecord({ run_id: runId, runner: 'headless' })]);
+    writeRunsJsonl('demo', [baseRunRecord({ run_id: runId, runner: 'driver' })]);
     // No sessions/ dir was ever written for this run (e.g. it ran elsewhere,
     // or the transcript was already cleaned up).
     const code = runLogsChat(runId, opts(), home);
@@ -326,7 +342,7 @@ describe('runLogsChat: uploads nothing', () => {
   test('rendering a full headless run touches zero network calls', () => {
     const runId = 'run-offline-check';
     const spawnCwd = join(projectRoot, 'wt');
-    writeRunsJsonl('demo', [baseRunRecord({ run_id: runId, runner: 'headless' })]);
+    writeRunsJsonl('demo', [baseRunRecord({ run_id: runId, runner: 'driver' })]);
     writeSessionFile('demo', runId, '01-build', 'sess-1', spawnCwd);
     writeTranscript(sessionFile(spawnCwd, 'sess-1'), [
       assistantTurn('2026-08-01T10:00:00.000Z', 'a turn', { id: 't1', name: 'Bash', input: { command: 'ls' } }),
@@ -341,7 +357,7 @@ describe('runLogsChat: uploads nothing', () => {
 
   test('the unknown-run-id and missing-transcript messages also touch zero network calls', () => {
     expect(runLogsChat('nope', opts(), home)).toBe(0);
-    writeRunsJsonl('demo', [baseRunRecord({ run_id: 'run-x', runner: 'headless' })]);
+    writeRunsJsonl('demo', [baseRunRecord({ run_id: 'run-x', runner: 'driver' })]);
     expect(runLogsChat('run-x', opts(), home)).toBe(0);
     expect(fetchCalls).toBe(0);
   });

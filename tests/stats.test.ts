@@ -11,6 +11,7 @@ import {
   attributeFailureStep,
   failedToolCounts,
   fmtDuration,
+  normalizeRunner,
   parseBufferLines,
   renderFailureLogSection,
   renderRunLog,
@@ -327,14 +328,27 @@ describe('file lifecycle: append → finalize → enrich', () => {
     expect(existsSync(join(sandbox, '.pipeline', '.stats'))).toBe(false);
   });
 
-  test('runner tag from PIPELINE_STATS_RUNNER (headless drive)', () => {
-    process.env.PIPELINE_STATS_RUNNER = 'headless';
+  test('runner tag from PIPELINE_STATS_RUNNER (E15: `pipeline drive` tags `driver`, not the retired `headless`)', () => {
+    process.env.PIPELINE_STATS_RUNNER = 'driver';
     const root = mkPipeline('p3');
     statsAppend(root, 'run-d', { k: 'run.started' });
     statsFinalizeRun(root, 'run-d', 'completed', null);
     const base = join(sandbox, '.pipeline', '.stats');
     const [rec] = parseRunRecords(readFileSync(join(base, 'p3', 'runs.jsonl'), 'utf8'));
-    expect(rec.runner).toBe('headless');
+    expect(rec.runner).toBe('driver');
+  });
+
+  // E15: a stray/legacy PIPELINE_STATS_RUNNER value is normalized at finalize
+  // time too (normalizeRunner is the SAME function the read path uses) — a
+  // brand-new record never carries anything outside the four-name vocabulary.
+  test('a legacy PIPELINE_STATS_RUNNER=headless still finalizes the NEW record as driver', () => {
+    process.env.PIPELINE_STATS_RUNNER = 'headless';
+    const root = mkPipeline('p3b');
+    statsAppend(root, 'run-d2', { k: 'run.started' });
+    statsFinalizeRun(root, 'run-d2', 'completed', null);
+    const base = join(sandbox, '.pipeline', '.stats');
+    const [rec] = parseRunRecords(readFileSync(join(base, 'p3b', 'runs.jsonl'), 'utf8'));
+    expect(rec.runner).toBe('driver');
   });
 
   test('token enrichment rewrites the record, appends to the log, refreshes SUMMARY', () => {
@@ -517,6 +531,131 @@ describe('file lifecycle: append → finalize → enrich', () => {
     expect(rec.llm_steps).toBeUndefined(); // absent ⇒ unknown, legacy behavior
     // tokens null ⇒ the relay enrichment path still fills it in (unchanged).
     expect(rewriteRunTokens(legacy, 'old', { input: 1, output: 2, cache_read: 0, cache_creation: 0 })).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// E15 — RunRecord.runner: string → the four-mode union, with a read-time
+// shim. Per the taskflow spec: no new field (runner IS the mode vocabulary,
+// mode stays the execution topology, untouched); a record whose runner is
+// `headless` (pre-E15 `pipeline drive`) reads as `driver`; an unrecognised
+// value degrades to `manager` rather than throwing; nothing on disk is ever
+// rewritten as a side effect of reading it.
+// ---------------------------------------------------------------------------
+
+describe('E15 — normalizeRunner (pure)', () => {
+  test('the four current names pass through unchanged', () => {
+    for (const r of ['session', 'manager', 'driver', 'standalone'] as const) {
+      expect(normalizeRunner(r)).toBe(r);
+    }
+  });
+
+  test('the retired v1 spelling `headless` maps to `driver` — same mode, new name', () => {
+    expect(normalizeRunner('headless')).toBe('driver');
+  });
+
+  test('trims and lowercases before matching', () => {
+    expect(normalizeRunner('  Driver  ')).toBe('driver');
+    expect(normalizeRunner('HEADLESS')).toBe('driver');
+  });
+
+  test('anything unrecognised — a stray value, corrupt data, absent — degrades to `manager`, never throws', () => {
+    expect(normalizeRunner('wat')).toBe('manager');
+    expect(normalizeRunner('')).toBe('manager');
+    expect(normalizeRunner(undefined)).toBe('manager');
+    expect(normalizeRunner(null)).toBe('manager');
+    expect(normalizeRunner(42)).toBe('manager');
+    expect(normalizeRunner({ nested: true })).toBe('manager');
+  });
+});
+
+describe('E15 — read-time shim applied by parseRunRecords', () => {
+  /** A minimal, otherwise-valid RunRecord JSONL line — same shape the
+   *  'pre-0.71 record' fixture above uses — with `runner` overridable so each
+   *  test isolates exactly the field under test. */
+  function fixtureLine(runner: unknown): string {
+    return (
+      JSON.stringify({
+        schema: 1,
+        run_id: 'fixture-run',
+        pipeline: 'p',
+        started_at: '2026-01-01T00:00:00.000Z',
+        ended_at: '2026-01-01T00:05:00.000Z',
+        duration_s: 300,
+        outcome: 'completed',
+        halt_reason: null,
+        runner,
+        mode: 'sequential',
+        steps_run: 0,
+        steps: [],
+        improver_runs: 0,
+        improver_applied: 0,
+        scripts_created: 0,
+        merges: 0,
+        merge_conflicts: 0,
+        tokens: null,
+      }) + '\n'
+    );
+  }
+
+  test('a fixture record with runner: "headless" reads as driver', () => {
+    const [rec] = parseRunRecords(fixtureLine('headless'));
+    expect(rec.runner).toBe('driver');
+  });
+
+  test('a fixture record with an unrecognised runner degrades to manager instead of throwing', () => {
+    expect(() => parseRunRecords(fixtureLine('wat'))).not.toThrow();
+    const [rec] = parseRunRecords(fixtureLine('wat'));
+    expect(rec.runner).toBe('manager');
+  });
+
+  test('a record already using the current vocabulary (driver) is left as-is', () => {
+    const [rec] = parseRunRecords(fixtureLine('driver'));
+    expect(rec.runner).toBe('driver');
+  });
+
+  test('reading an on-disk runs.jsonl fixture never rewrites the file (shim is read-time only)', () => {
+    const dir = join(sandbox, '.pipeline', '.stats', 'legacy-fixture');
+    mkdirSync(dir, { recursive: true });
+    const runsFile = join(dir, 'runs.jsonl');
+    writeFileSync(runsFile, fixtureLine('headless'), 'utf8');
+    const before = readFileSync(runsFile, 'utf8');
+
+    const [rec] = parseRunRecords(before);
+    expect(rec.runner).toBe('driver'); // in-memory: shimmed
+
+    const after = readFileSync(runsFile, 'utf8');
+    expect(after).toBe(before); // on disk: byte-identical, untouched
+    expect(after).toContain('"runner":"headless"'); // the historical value survives verbatim
+  });
+});
+
+describe('E15 — renderRunLog distinguishes runner from mode (no conflation)', () => {
+  test('prints labeled runner: … , mode: … using the current vocabulary', () => {
+    const rec: RunRecord = {
+      schema: 1,
+      run_id: 'r1',
+      pipeline: 'p',
+      started_at: '2026-01-01T00:00:00.000Z',
+      ended_at: '2026-01-01T00:01:00.000Z',
+      duration_s: 60,
+      outcome: 'completed',
+      halt_reason: null,
+      runner: 'driver',
+      mode: 'sequential',
+      steps_run: 0,
+      steps: [],
+      improver_runs: 0,
+      improver_applied: 0,
+      scripts_created: 0,
+      merges: 0,
+      merge_conflicts: 0,
+      tokens: null,
+    };
+    const log = renderRunLog(rec);
+    expect(log).toContain('(runner: driver, mode: sequential)');
+    // never a bare "driver/sequential" or other conflated form
+    expect(log).not.toContain('driver/sequential');
   });
 });
 

@@ -195,7 +195,9 @@ test('drive: mixed agent+script run — script executes in-process (no executor 
   const rec = JSON.parse(readFileSync(runsFile, 'utf8').trim().split('\n')[0]);
   expect(rec.run_id).toBe(run);
   expect(rec.outcome).toBe('completed');
-  expect(rec.runner).toBe('headless');
+  // E15: `pipeline drive` tags its stats records `driver`, not the retired
+  // `headless` spelling.
+  expect(rec.runner).toBe('driver');
   expect(rec.steps_run).toBe(3);
   expect(rec.llm_steps).toBe(2); // only the two AGENT dispatches count
   // Exactly one recorded step is tagged step_type:script (the in-process step).

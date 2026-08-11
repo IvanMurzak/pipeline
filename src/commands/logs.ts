@@ -333,13 +333,15 @@ interface ChatTranscriptFile {
 }
 
 /** Locate every transcript file for a resolved run, source-selected exactly
- *  like lib/stats-backfill.ts's fold does (same `runner` branch): headless
- *  (`pipeline drive`) runs pin one session per step
- *  (`.runtime/<run>/sessions/`); everything else (`manager`, unset/legacy)
- *  is a single manager-transcript session located by content correlation
- *  (`findTranscriptByRunId` — the file that mentions this run_id the most). */
+ *  like lib/stats-backfill.ts's fold does (same `runner` branch): a `driver`
+ *  (`pipeline drive`) run — including a pre-E15 record whose on-disk `runner`
+ *  reads `headless` via lib/stats.ts's read-time shim — pins one session per
+ *  step (`.runtime/<run>/sessions/`); everything else (`manager`, unset/
+ *  legacy) is a single manager-transcript session located by content
+ *  correlation (`findTranscriptByRunId` — the file that mentions this run_id
+ *  the most). */
 function transcriptFilesForRun(projectRoot: string, rec: RunRecord, homeOverride?: string): ChatTranscriptFile[] {
-  if (rec.runner === 'headless') {
+  if (rec.runner === 'driver') {
     const sessionsDir = join(projectRoot, '.pipeline', rec.pipeline, '.runtime', rec.run_id, 'sessions');
     const refs = [...readStepSessionRefs(sessionsDir)].sort((a, b) =>
       a.step_id < b.step_id ? -1 : a.step_id > b.step_id ? 1 : 0,
@@ -558,7 +560,7 @@ export function runLogsChat(runId: string, opts: LogsArgs, homeOverride?: string
   }
 
   const window: ChatWindow | null =
-    rec.runner === 'headless' ? null : { startMs: rec.started_at ? Date.parse(rec.started_at) : null, endMs: Date.parse(rec.ended_at) };
+    rec.runner === 'driver' ? null : { startMs: rec.started_at ? Date.parse(rec.started_at) : null, endMs: Date.parse(rec.ended_at) };
 
   if (!opts.json) {
     process.stdout.write(
