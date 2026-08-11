@@ -341,14 +341,48 @@ describe('dependency and runtime-branch constraints', () => {
     expect(code).not.toContain('typeof Bun');
   });
 
-  test('the CLI package still declares zero runtime dependencies', () => {
-    const pkg = JSON.parse(readFileSync(join(CLI_ROOT, 'package.json'), 'utf-8')) as Record<
-      string,
-      Record<string, string> | undefined
-    >;
-    for (const field of ['dependencies', 'peerDependencies', 'optionalDependencies'] as const) {
-      expect(Object.keys(pkg[field] ?? {})).toEqual([]);
-    }
+  test('installing the CLI package still pulls NOTHING down', () => {
+    // WHY THIS ASSERTION CHANGED SHAPE (execution-modes c3).
+    //
+    // It used to require all three dependency fields to be empty. The
+    // `standalone` executor (`src/lib/executors/sdk.ts`) needs
+    // `@anthropic-ai/claude-agent-sdk`, which is not a small thing to hand
+    // every user: measured at 0.3.228 it resolves to ~101 packages and ~315 MB,
+    // because it declares three REQUIRED peers of its own and a per-platform
+    // optional dependency that is the Claude Code binary (283 MB on
+    // win32-x64).
+    //
+    // So the GUARANTEE this test exists to protect — a plain `bun install` of
+    // this package downloads nothing, and there is no install step — is now
+    // kept by a different mechanism, and the assertion pins the mechanism
+    // rather than the old shape:
+    //
+    //   - `dependencies` must still be empty; those are always installed.
+    //   - `optionalDependencies` must ALSO still be empty. This is the trap:
+    //     "optional" there means "tolerate an install FAILURE", not "skip", so
+    //     an entry would cost the full download while looking like an opt-out.
+    //   - `peerDependencies` may name a package ONLY if it is marked optional
+    //     in `peerDependenciesMeta`. That is the one form neither npm nor bun
+    //     auto-installs, which is what keeps `standalone` genuinely opt-in.
+    //
+    // Loosening any of the three re-imposes the install this package has never
+    // had. Adding a plain dependency is not a lint failure to silence.
+    const pkg = JSON.parse(readFileSync(join(CLI_ROOT, 'package.json'), 'utf-8')) as {
+      dependencies?: Record<string, string>;
+      peerDependencies?: Record<string, string>;
+      optionalDependencies?: Record<string, string>;
+      peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+    };
+
+    // Auto-installed, both of them — these stay empty.
+    expect(Object.keys(pkg.dependencies ?? {})).toEqual([]);
+    expect(Object.keys(pkg.optionalDependencies ?? {})).toEqual([]);
+
+    // Every declared peer must be explicitly optional, or it is auto-installed
+    // by npm 7+ and by bun, and the guarantee is gone.
+    const meta = pkg.peerDependenciesMeta ?? {};
+    const notOptional = Object.keys(pkg.peerDependencies ?? {}).filter((name) => meta[name]?.optional !== true);
+    expect(notOptional).toEqual([]);
   });
 });
 
