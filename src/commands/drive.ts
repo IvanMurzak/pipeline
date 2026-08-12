@@ -4,7 +4,8 @@
 //   [--var NAME=value ...] [--vars-file <path>]
 //   [--answer <text> | --answer-file <path>]
 //   [--task <text> | --task-file <path>]
-//   [--executor-cmd <template>] [--json]`
+//   [--executor <claude-cli|claude-sdk|codex-cli>] [--executor-cmd <template>]
+//   [--json]`
 //
 // Task delivery: generic pipelines (e.g. an implement-task template) need the
 // concrete task text. `--task <text>` writes it to
@@ -149,6 +150,16 @@ import { addVarFlag, loadVarsFile, mergeCliVars } from '../lib/run-vars';
 import type { ActionStep, LayerResultEntry, MergeBranch, NextRecord, StepRecord } from '../lib/next';
 import { realGit, type GitResult, type GitRunner } from '../lib/git';
 import { ensureGeneratedDir } from '../lib/generated-dir';
+// c5 — --executor selection: computePlan reads the manifest's declared
+// `runner:` (a1) so an absent flag can follow it (`runner: standalone` ⇒
+// claude-sdk); Runner is the shared enum type, reused rather than redeclared.
+import { computePlan } from '../lib/plan';
+import type { Runner } from '../lib/manifest';
+// c4's seams cover all three DriveDeps runner members together — the
+// `--executor=claude-sdk` wiring is a spread of this, never a rebuild of one
+// seam at a time (see the "no claude -p subprocess" tests in
+// tests/sdk-seams.test.ts, which this selection is what makes real).
+import { sdkDriveSeams } from '../lib/executors/sdk-seams';
 import {
   addUsage,
   emptyUsage,
@@ -350,6 +361,20 @@ export interface DriveDeps {
   /** stderr sink (progress lines + warnings + relayed executor output). */
   err?: (s: string) => void;
 }
+
+/** The vendor-qualified `--executor` values (E8/E15, c5): which
+ *  `ExecutorRunner` IMPLEMENTATION runs a step. `driver` and `standalone`
+ *  (01-modes.md) share this one loop and differ only in this choice, which is
+ *  why it is a flag on one command rather than two command names.
+ *
+ *  Deliberately vendor-qualified rather than a bare `cli`: a second vendor
+ *  would force renaming a released flag value, which is a migration inside
+ *  somebody's CI scripts. `subagent` — the fourth Axis-2 value — is NOT a
+ *  member of this type: it is the host's own Agent tool, implied by
+ *  `session`/`manager`, and meaningless without a live session, which
+ *  `pipeline drive` never has (see setExecutorFlag's rejection message). */
+export const EXECUTOR_KINDS = ['claude-cli', 'claude-sdk', 'codex-cli'] as const;
+export type ExecutorKind = (typeof EXECUTOR_KINDS)[number];
 
 // ---------------------------------------------------------------------------
 // Executor command template
@@ -1029,6 +1054,17 @@ interface DriveArgs {
   /** The run's task statement (--task text | --task-file path). */
   task?: string;
   taskFile?: string;
+  /** `--executor <claude-cli|claude-sdk|codex-cli>` (E8/E15, c5): selects the
+   *  ExecutorRunner IMPLEMENTATION. Distinct from `executorCmd` below, which
+   *  overrides the subprocess COMMAND TEMPLATE within a CLI implementation —
+   *  see USAGE, which spells out the difference in one line each. undefined ⇒
+   *  resolved against the manifest's declared `runner:` (see runDrive). */
+  executor?: ExecutorKind;
+  /** Set when `--executor` named a value outside EXECUTOR_KINDS, INCLUDING
+   *  `subagent` (rejected with its own session-only explanation) — a loud
+   *  parse-time error, exit 2, exactly the modelError/effortError/varsError
+   *  convention. Never a silent fallback to claude-cli. */
+  executorError?: string;
   executorCmd?: string;
   json: boolean;
 }
@@ -1062,6 +1098,29 @@ function addEffortOverride(out: DriveArgs, v: string | undefined): void {
   (out.effortOverrides ??= {})[id] = effort;
 }
 
+/** Validate one `--executor` value onto args.executor/executorError — the
+ *  same eager, loud-error convention as addModelOverride/addEffortOverride: a
+ *  malformed or unrecognised value is a parse-time error, never a value that
+ *  silently resolves to something else later. `subagent` is a real Axis-2
+ *  value (01-modes.md) but is not a member of EXECUTOR_KINDS — it is implied
+ *  by session/manager and meaningless without a live session, which `pipeline
+ *  drive` never has — so it gets its own explanatory message rather than the
+ *  generic "unknown value" one. */
+function setExecutorFlag(out: DriveArgs, v: string | undefined): void {
+  if (v === 'subagent') {
+    out.executorError =
+      "--executor=subagent is not accepted here — it is the host's own Agent tool, implied by " +
+      'session/manager, and only exists inside a live Claude Code session (pipeline drive runs no ' +
+      'session, by definition). Pass --executor=claude-cli, claude-sdk, or codex-cli instead.';
+    return;
+  }
+  if (v !== undefined && (EXECUTOR_KINDS as readonly string[]).includes(v)) {
+    out.executor = v as ExecutorKind;
+    return;
+  }
+  out.executorError = `--executor: unknown value ${JSON.stringify(v ?? '')} — expected one of ${EXECUTOR_KINDS.join(' | ')}`;
+}
+
 function parseArgs(args: string[]): DriveArgs {
   const out: DriveArgs = { resume: false, json: false };
   const take = (i: number) => args[i + 1];
@@ -1086,6 +1145,8 @@ function parseArgs(args: string[]): DriveArgs {
     else if (eq('--var') !== undefined) addVarFlag(out, eq('--var'));
     else if (a === '--vars-file') out.varsFile = take(i++);
     else if (eq('--vars-file') !== undefined) out.varsFile = eq('--vars-file');
+    else if (a === '--executor') setExecutorFlag(out, take(i++));
+    else if (eq('--executor') !== undefined) setExecutorFlag(out, eq('--executor'));
     else if (a === '--executor-cmd') out.executorCmd = take(i++);
     else if (eq('--executor-cmd') !== undefined) out.executorCmd = eq('--executor-cmd');
     else if (a === '--answer') out.answer = take(i++);
@@ -1189,7 +1250,9 @@ const USAGE =
   '                      [--var NAME=value ...] [--vars-file <path>]\n' +
   '                      [--answer <text> | --answer-file <path>]\n' +
   '                      [--task <text> | --task-file <path>]\n' +
-  '                      [--executor-cmd <template>] [--json]\n';
+  '                      [--executor <claude-cli|claude-sdk|codex-cli>]  (which implementation runs a step; default claude-cli)\n' +
+  '                      [--executor-cmd <template>]  (overrides the subprocess command template a CLI executor runs)\n' +
+  '                      [--json]\n';
 
 export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<number> {
   // c2 — the two sinks this command writes through, both wrapped OUTSIDE the
@@ -1218,6 +1281,10 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
   }
   if (a.effortError !== undefined) {
     err(`pipeline drive: ${a.effortError}\n`);
+    return 2;
+  }
+  if (a.executorError !== undefined) {
+    err(`pipeline drive: ${a.executorError}\n`);
     return 2;
   }
   // PP_* variables (env-variables design): same loud usage errors as `next`,
@@ -1304,8 +1371,49 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     });
   };
 
+  // ---------------------------------------------------------------------------
+  // Executor selection (E8/E15, c5) — --executor picks the IMPLEMENTATION that
+  // runs a step; --executor-cmd (below, unchanged) overrides the SUBPROCESS
+  // COMMAND TEMPLATE within a CLI implementation (claude-cli / codex-cli). The
+  // two compose rather than collide: one says WHAT runs a step, the other says
+  // HOW a command-line one is invoked — see USAGE for the one-line-each split.
+  //
+  // Absent --executor, the manifest decides (a1): only `runner: standalone`
+  // has an opinion on this axis at all — it names the exact driver+claude-sdk
+  // pairing the modes table calls `standalone` (01-modes.md) — so it alone
+  // moves the default to claude-sdk. Every other declared (or absent) runner
+  // value leaves today's default, claude-cli, untouched (DoD: "absent the
+  // flag, behaviour is identical to today"). When an explicit flag AND a
+  // `standalone` manifest both speak and they actually differ, the flag wins,
+  // and that is reported ONCE here, at selection time — never per step, never
+  // silently (the manner "no silent fallback" governs this whole flag).
+  const manifestRunner: Runner = computePlan(rootAbs).runner;
+  const impliedExecutor: ExecutorKind = manifestRunner === 'standalone' ? 'claude-sdk' : 'claude-cli';
+  const executorKind: ExecutorKind = a.executor ?? impliedExecutor;
+  if (a.executor !== undefined && manifestRunner === 'standalone' && a.executor !== impliedExecutor) {
+    progress('executor.override', {
+      manifest_runner: manifestRunner,
+      executor: a.executor,
+      detail: `manifest declares runner: standalone (implies --executor=claude-sdk); --executor=${a.executor} wins for this run`,
+    });
+  }
+
   const template = a.executorCmd ?? process.env.PIPELINE_DRIVE_EXECUTOR_CMD ?? DEFAULT_EXECUTOR_TEMPLATE;
-  const executor = deps.executor ?? subprocessExecutor(template, stepRecordSchemaJson(), err, noteToolCall);
+  // c4's seams cover all three DriveDeps runner members TOGETHER (step +
+  // improver + script-creator, below) — built ONCE here, so the inapplicable-
+  // template warnings sdkDriveSeams already emits for PIPELINE_DRIVE_EXECUTOR_CMD
+  // and the two self-improvement variables fire once per run, never once per
+  // spawn, and c5 adds no second copy of that report (c4's own open note on the
+  // overlap). `pluginDir` is passed explicitly here, through the SAME helper
+  // the CLI templates use for their own `{plugin_dir}` token, rather than left
+  // to sdk-seams.ts's own CLAUDE_PLUGIN_ROOT default (c4's other open note) —
+  // so both implementations resolve the plugin root through one piece of code
+  // instead of two copies that can drift apart.
+  const sdkSeams =
+    executorKind === 'claude-sdk'
+      ? sdkDriveSeams({ err, onToolCall: noteToolCall, pluginDir: pluginDirToken() })
+      : null;
+  const executor = deps.executor ?? sdkSeams?.executor ?? subprocessExecutor(template, stepRecordSchemaJson(), err, noteToolCall);
   const git = deps.git ?? realGit;
 
   // Track provider-limit errors for the final JSON (06.7 / D11). Any step may
@@ -1531,8 +1639,14 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
   // ---------------------------------------------------------------------------
 
   const selfImprove = selfImproveEnabled();
+  // c4/c5: under claude-sdk the improver and script-creator MUST come from the
+  // same sdkSeams object as the step executor above — never wired one seam at
+  // a time (tests/sdk-seams.test.ts's positive control shows exactly what that
+  // omission looks like: a run that completes, reports success, and silently
+  // spawns `claude -p` for self-improvement anyway).
   const improverRunner =
     deps.improver ??
+    sdkSeams?.improver ??
     subprocessExecutor(
       process.env.PIPELINE_DRIVE_IMPROVER_CMD ?? DEFAULT_IMPROVER_TEMPLATE,
       improverSchemaJson(),
@@ -1541,6 +1655,7 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     );
   const scriptCreatorRunner =
     deps.scriptCreator ??
+    sdkSeams?.scriptCreator ??
     subprocessExecutor(
       process.env.PIPELINE_DRIVE_SCRIPT_CREATOR_CMD ?? DEFAULT_SCRIPT_CREATOR_TEMPLATE,
       scriptCreatorSchemaJson(),
