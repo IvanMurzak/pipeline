@@ -134,6 +134,9 @@ export interface SdkOptions {
   /** Answer delivery — the same session continues. */
   resume?: string;
   additionalDirectories?: string[];
+  /** Permission pre-approval. The SDK's separate `tools` option — the one that
+   *  governs which tools EXIST — is absent from this subset because this
+   *  runner never sets it; see {@link PRE_APPROVED_TOOLS}. */
   allowedTools?: string[];
   settingSources?: SdkSettingSource[];
   plugins?: SdkPluginConfig[];
@@ -220,12 +223,69 @@ export function asPermissionMode(v: string | null | undefined): SdkPermissionMod
 // ---------------------------------------------------------------------------
 
 /**
- * The Agent tool, which MUST be allowed or intra-step helpers cannot exist
- * (02 K-3). A step-executor that cannot spawn a helper is a different product
- * from the one the other three modes run, so this is unconditional: callers
- * ADD to it and cannot remove it.
+ * Tools this runner always PRE-APPROVES, ahead of anything a caller adds.
+ * Unconditional: callers ADD to this list and cannot remove from it.
+ *
+ * ── WHAT THIS BUYS, AND WHAT IT DOES NOT ──────────────────────────────────
+ *
+ * `allowedTools` is a PERMISSION pre-approval list — the tools named on it
+ * run without stopping to ask. It does NOT decide which tools exist. The
+ * SDK's own declaration says so in as many words: *"List of tool names that
+ * are auto-allowed without prompting for permission... To restrict which
+ * tools are available, use the `tools` option instead."*
+ *
+ * (One documented edge, stated so this comment does not overreach: the SDK's
+ * `tools` docstring notes that on NATIVE builds, which may serve search via
+ * Bash `find`/`grep` rather than dedicated tools, naming `Grep`/`Glob` in
+ * either `tools` OR `allowedTools` is what gets them. That is a
+ * build-specific availability quirk for those two tools; it was not
+ * reproducible on the build measured here, where both are already in the
+ * default set, and it does not extend to the Agent tool, which was measured
+ * directly.)
+ *
+ * That distinction is load-bearing, because an earlier version of this
+ * comment asserted the opposite — that the Agent tool *"MUST be allowed or
+ * intra-step helpers cannot exist"*. Measured against a real
+ * `@anthropic-ai/claude-agent-sdk@0.3.228` install, that was FALSE: including
+ * or omitting `'Agent'` here leaves the tool list byte-identical (33 built-in
+ * tools either way — see `docs/sdk-delta-measurement.md` §1, and the
+ * follow-up probes recorded below). Naming the Agent tool here is therefore
+ * not what makes a helper possible; it is what keeps a HEADLESS run from
+ * stalling on a permission prompt when a step spawns one, which matters
+ * because there is no interactive user present to clear that prompt.
+ *
+ * The pre-approval is at least correctly NAMED, which was worth checking
+ * separately: on the Claude Code binary bundled with that SDK release the
+ * subagent tool surfaces in `system/init.tools` as `Task`, not `Agent` — but
+ * the permission engine resolves BOTH spellings to the same tool
+ * (`--disallowedTools Agent` and `--disallowedTools Task` each drop it from
+ * that list, 33 → 32). So do not "fix" this constant to `'Task'` by
+ * pattern-matching an init frame.
+ *
+ * ── WHY `Options.tools` IS DELIBERATELY LEFT UNSET ────────────────────────
+ *
+ * Existence is governed by `Options.tools`, and {@link buildSdkOptions} never
+ * sets it — ON PURPOSE, not by oversight. Measured on the same install:
+ *
+ *   - Omitting `tools` yields the FULL default surface: 33 built-in tools,
+ *     the subagent tool among them. So the Agent tool already exists here;
+ *     there is nothing to switch on.
+ *   - The `{ type: 'preset', preset: 'claude_code' }` form is mapped by the
+ *     SDK to the literal CLI argument `--tools default`, and that produces a
+ *     tool list IDENTICAL to emitting no flag at all — same 33 names, same
+ *     order. Setting the preset would be a pure no-op.
+ *   - An explicit `string[]` NARROWS, hard: `--tools Read,Agent` yields
+ *     exactly two tools. Enumerating a list here would silently strip `Grep`,
+ *     `Glob`, `Write`, `WebFetch`, `Skill`, and every built-in a future
+ *     Claude Code release adds, leaving `standalone` quietly less capable
+ *     than the three modes that shell out to the CLI.
+ *
+ * So the only two options are "no-op" and "regression", and this module takes
+ * neither. If a future caller ever does need a `tools` restriction, note that
+ * this constant CANNOT rescue it: pre-approving a tool that the base set
+ * excludes does not bring it back.
  */
-export const REQUIRED_TOOLS: readonly string[] = ['Agent'];
+export const PRE_APPROVED_TOOLS: readonly string[] = ['Agent'];
 
 export interface SdkExecutorOptions {
   /**
@@ -276,7 +336,14 @@ export interface SdkExecutorOptions {
   permissionMode?: SdkPermissionMode;
   /** Plugins to load. There is no auto-discovery — 02 K-3. */
   plugins?: SdkPluginConfig[];
-  /** Tools to allow IN ADDITION TO {@link REQUIRED_TOOLS}. */
+  /**
+   * Tools to PRE-APPROVE in addition to {@link PRE_APPROVED_TOOLS}.
+   *
+   * This is a permission list, not a tool set: naming a tool here stops it
+   * prompting, it does not conjure it into existence, and omitting a tool
+   * does not hide it. There is deliberately no `tools` passthrough alongside
+   * this one — see {@link PRE_APPROVED_TOOLS} for the measurement behind that.
+   */
   allowedTools?: string[];
   /** Directories to grant beyond the record drop dir. */
   additionalDirectories?: string[];
@@ -337,10 +404,13 @@ export function buildSdkOptions(req: ExecutorRequest, opts: SdkExecutorOptions =
   }
   if (grants.length > 0) options.additionalDirectories = grants;
 
-  // The Agent tool first, then the caller's additions, de-duplicated.
-  const tools = [...REQUIRED_TOOLS];
-  for (const t of opts.allowedTools ?? []) if (!tools.includes(t)) tools.push(t);
-  options.allowedTools = tools;
+  // Pre-approval only — the Agent tool first, then the caller's additions,
+  // de-duplicated. `options.tools` is deliberately never assigned: that is the
+  // option governing which tools EXIST, and its default is already the full
+  // built-in set. See PRE_APPROVED_TOOLS.
+  const preApproved = [...PRE_APPROVED_TOOLS];
+  for (const t of opts.allowedTools ?? []) if (!preApproved.includes(t)) preApproved.push(t);
+  options.allowedTools = preApproved;
 
   if (opts.schema) options.outputFormat = { type: 'json_schema', schema: opts.schema };
 
