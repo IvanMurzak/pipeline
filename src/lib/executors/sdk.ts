@@ -234,6 +234,15 @@ export function asPermissionMode(v: string | null | undefined): SdkPermissionMod
  * are auto-allowed without prompting for permission... To restrict which
  * tools are available, use the `tools` option instead."*
  *
+ * (One documented edge, stated so this comment does not overreach: the SDK's
+ * `tools` docstring notes that on NATIVE builds, which may serve search via
+ * Bash `find`/`grep` rather than dedicated tools, naming `Grep`/`Glob` in
+ * either `tools` OR `allowedTools` is what gets them. That is a
+ * build-specific availability quirk for those two tools; it was not
+ * reproducible on the build measured here, where both are already in the
+ * default set, and it does not extend to the Agent tool, which was measured
+ * directly.)
+ *
  * That distinction is load-bearing, because an earlier version of this
  * comment asserted the opposite — that the Agent tool *"MUST be allowed or
  * intra-step helpers cannot exist"*. Measured against a real
