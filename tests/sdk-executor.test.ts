@@ -14,15 +14,17 @@
 //     this runner injected and a `success` result carrying NO structured
 //     output, and proves the run still completes — i.e. that the recovery
 //     ladder genuinely narrowed rather than collapsed;
-//   - the intra-step helper one, which proves `Agent` is allowed AND that a
-//     helper's nested tool calls are attributed at depth 1.
+//   - the intra-step helper one, which proves `Agent` is PRE-APPROVED (not
+//     that it exists — a separate option governs that, and this module leaves
+//     it at its default; see `PRE_APPROVED_TOOLS`) AND that a helper's nested
+//     tool calls are attributed at depth 1.
 
 import { describe, expect, test, afterEach } from 'bun:test';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import {
-  REQUIRED_TOOLS,
+  PRE_APPROVED_TOOLS,
   SDK_EXIT,
   SDK_MODULE_ID,
   VERIFIED_SDK_VERSION,
@@ -317,13 +319,22 @@ describe('E9 — configuration is set by location, and the local default is the 
 });
 
 // ---------------------------------------------------------------------------
-// DoD 6 — the Agent tool
+// DoD 6 — the Agent tool: pre-approval, and the lever that is NOT this one
+//
+// These tests used to be framed as "allowedTools includes Agent, therefore
+// intra-step helpers can exist". The premise was false, and the assertions
+// passed anyway because they only ever checked the option that is not the one
+// in question. Measured against a real @anthropic-ai/claude-agent-sdk@0.3.228:
+// `allowedTools` is a permission pre-approval list with NO effect on which
+// tools exist, and `tools` — which this module deliberately never sets — is
+// what governs existence. So the suite now asserts two separable things:
+// that the pre-approval is set, and that the existence lever is left alone.
 // ---------------------------------------------------------------------------
 
-describe('the Agent tool is allowed, so intra-step helpers can exist', () => {
+describe('the Agent tool is PRE-APPROVED, which is not the same as made to exist', () => {
   test('allowedTools always contains Agent', () => {
     expect(optionsFor(request()).allowedTools).toContain('Agent');
-    expect(REQUIRED_TOOLS).toContain('Agent');
+    expect(PRE_APPROVED_TOOLS).toContain('Agent');
   });
 
   test('caller tools are ADDED to it, never substituted for it', () => {
@@ -331,6 +342,23 @@ describe('the Agent tool is allowed, so intra-step helpers can exist', () => {
     expect(o.allowedTools).toEqual(['Agent', 'Bash', 'Read']);
     // A caller that names Agent itself does not get it twice.
     expect(optionsFor(request(), { allowedTools: ['Agent', 'Bash'] }).allowedTools).toEqual(['Agent', 'Bash']);
+  });
+
+  test('`tools` — the option that DOES govern existence — is never set', () => {
+    // The regression this guards is a narrowing dressed as a fix. Measured on
+    // the Claude Code binary bundled with that SDK release: omitting `tools`
+    // yields all 33 built-in tools (subagent tool included), the `claude_code`
+    // preset maps to `--tools default` and yields that same list, and explicit
+    // array yields ONLY what it names — `--tools Read,Agent` returns two
+    // tools. Assigning `tools` here is therefore either a no-op or a silent
+    // capability cut, and pre-approving a tool the base set excluded would
+    // not bring it back.
+    expect('tools' in optionsFor(request())).toBe(false);
+    expect('tools' in optionsFor(request(), { allowedTools: ['Bash', 'Read'] })).toBe(false);
+    expect('tools' in optionsFor(request(), { allowedTools: [], settingSources: [] })).toBe(false);
+    // Not merely absent from the mapping — absent from the module's whole
+    // vocabulary, so a caller cannot reach it by accident either.
+    expect(Object.keys(optionsFor(request(), { allowedTools: ['Agent'] }))).not.toContain('tools');
   });
 
   test('a spawned intra-step helper is observed and attributed at depth 1', async () => {
@@ -349,9 +377,15 @@ describe('the Agent tool is allowed, so intra-step helpers can exist', () => {
       onToolCall: (_req, call) => calls.push({ tool: call.tool, depth: call.depth }),
     })(request());
 
-    // The permission that makes the helper possible…
+    // The pre-approval that keeps a headless helper spawn from stalling on a
+    // permission prompt — NOT what makes the tool exist, which is the default
+    // base tool set this runner leaves untouched…
     expect(seen.options?.allowedTools).toContain('Agent');
-    // …and the evidence that one actually ran inside the step.
+    expect('tools' in seen.options!).toBe(false);
+    // …and the evidence that a helper's nested calls are attributed at depth.
+    // This is parser coverage over injected frames, not proof that a live
+    // model turn can spawn one; `docs/sdk-delta-measurement.md` records that
+    // gap explicitly rather than rounding it off.
     expect(calls).toEqual([
       { tool: 'Agent', depth: 0 },
       { tool: 'Bash', depth: 1 },
