@@ -46,6 +46,49 @@ bun run build          # → dist/cli.mjs (Node-compatible ESM)
 - [Connecting to the cloud](https://github.com/IvanMurzak/pipeline-claude/blob/main/docs/cloud-connect.md)
   — `pipeline cloud connect`, history upload, retention and deletion.
 
+## The four `runner` modes
+
+A pipeline's `runner:` — the top-level key in `pipeline.yml`, or the same key
+in a v1 `PIPELINE.md`'s frontmatter — picks two things at once: **who turns
+the crank** (the loop) and **what executes each step**. Only four
+combinations are supported:
+
+| `runner:` | Loop | Step executor | For |
+| --- | --- | --- | --- |
+| `session` | the main Claude Code session | the Agent tool (a subagent) | short pipelines — fewest layers |
+| `manager` *(default)* | a `pipeline-manager` subagent | the Agent tool (a subagent) | long chains — keeps the main session's context clean |
+| `driver` | `pipeline drive`, a process we own | a `claude -p` / `codex exec` subprocess (`--executor claude-cli` / `codex-cli`) | CI and scripts — zero LLM in the loop |
+| `standalone` | `pipeline drive`, the **same** process | the Agent SDK, with your own API key (`--executor claude-sdk`) | no Claude Code install required; first-class per-step metrics |
+
+**`driver` and `standalone` are the same command and the same loop** —
+`pipeline drive` (below) — and differ in exactly one thing: which
+`--executor` runs a step. A manifest's `runner: standalone` is what selects
+`--executor claude-sdk` by default; passing `--executor` explicitly on the
+command line always wins.
+
+**The guarantee, stated once because it holds in every one of the four:** what
+runs next is decided by `pipeline next` — always, in every mode. `session` and
+`manager` call it from inside a live Claude Code session; `driver` and
+`standalone` call the identical engine directly from `pipeline drive`'s own
+process. No mode ever has a model decide control flow — only how faithfully a
+model *calls into* the engine differs between modes, which is exactly why the
+mode you pick is a reliability decision, not a behavioural one.
+
+**Hosting is a location, not a mode.** All four modes above are things you can
+run locally. On a machine we host, only `standalone` is possible: there is no
+user subscription and no local Claude Code install for `session`, `manager` or
+`driver`'s subprocess to run against.
+
+**`type: script` steps sit outside this table entirely.** The command layer
+executes them in-process, identically, in all four modes — the mode question
+does not apply to them.
+
+**v1 → v2 naming.** A v1 `PIPELINE.md`'s `runner:` frontmatter carried only
+two values, and the CLI still reads both: `manager` is unchanged, and
+**`runner: headless` is read as `driver`** — the same mode under its new name,
+not a different one. Both spellings still parse in a v1 pipeline; only
+`headless` as the *mode's name* is retired.
+
 ## Commands
 
 ### `clone` — scaffold a ready-made pipeline into your project
@@ -116,14 +159,21 @@ It refuses rather than guess:
 - an existing `pipeline.yml` is never overwritten (pass `--force`),
 - a v1 pipeline that does not plan cleanly is not translated,
 - anything a v2 manifest cannot express — a script step's inline `command:`, a
-  `(required)` variable, `runner: headless`, `finalize:`, `delete_branches:` —
-  is named, and aborts the write. `--dry-run` still shows what the rest becomes.
+  `(required)` variable, `finalize:`, `delete_branches:` — is named, and
+  aborts the write,
+- **`runner: driver`** (v1's `runner: headless` — see
+  [the four `runner` modes](#the-four-runner-modes)) is a line this migration
+  does not *emit* yet, even though the v2 manifest itself can say it: the
+  write still aborts, naming `runner: driver` as the line to add by hand
+  afterwards.
+
+`--dry-run` still shows what the rest becomes.
 
 `PIPELINE.md` is left in place: it is prose for humans afterwards and is no
 longer parsed. The `## Next` sections in the step files are dead too — the
 manifest decides the order.
 
-### `drive` — run an entire pipeline headless (EXPERIMENTAL)
+### `drive` — run the `driver` / `standalone` modes (EXPERIMENTAL)
 
 ```bash
 bun src/cli.ts drive --root <pipeline_root> --run-id <id> --start <step-name>
@@ -132,12 +182,35 @@ bun src/cli.ts drive --root <pipeline_root> --run-id <id> --start <step-name>
   [--var NAME=value ...] [--vars-file <path>]
   [--answer <text> | --answer-file <path>]
   [--task <text> | --task-file <path>]
-  [--executor-cmd <template>] [--json] [--resume]
+  [--executor <claude-cli|claude-sdk|codex-cli>] [--executor-cmd <template>]
+  [--json] [--resume]
 ```
 
-The **headless executor**: an EXPERIMENTAL single-process runner that replaces the
-pipeline-manager LLM. It executes an entire pipeline run using deterministic
-control flow (no agent spawns), ideal for automation and testing.
+An EXPERIMENTAL single-process runner that replaces the `pipeline-manager`
+LLM: it loops over the exact engine `pipeline next` uses, executing an entire
+pipeline run with deterministic control flow — no agent spawns for the loop
+itself — ideal for automation and testing.
+
+`pipeline drive` is the **one command** for two of
+[the four `runner` modes](#the-four-runner-modes) — `driver` and `standalone`
+share this exact loop end to end, and differ only in `--executor`, which picks
+what runs each step:
+
+| `--executor` | Mode | What runs each step |
+| --- | --- | --- |
+| `claude-cli` *(default)* | `driver` | a fresh `claude -p` subprocess |
+| `codex-cli` | `driver` | a fresh `codex exec` subprocess |
+| `claude-sdk` | `standalone` | the Agent SDK, your own API key |
+
+Omit `--executor` and the manifest decides: a `pipeline.yml` declaring
+`runner: standalone` implies `claude-sdk`; every other (or absent) `runner:`
+value keeps today's default, `claude-cli`. An explicit `--executor` always
+wins over the manifest, and a disagreement between the two is reported once,
+at selection time — never per step, never silently.
+
+`--executor-cmd <template>` (or `PIPELINE_DRIVE_EXECUTOR_CMD`) is a different
+axis: it overrides the exact subprocess command for whichever `--executor` you
+picked; it never changes which implementation runs.
 
 **Executor retry environment (08.4):**
 - Sets `CLAUDE_CODE_RETRY_WATCHDOG=1` (lifts retry cap for transient errors)
@@ -230,9 +303,13 @@ bun src/cli.ts next --root <pipeline_root> --run-id <id> [--start <step-name>] \
   [--default-model <m>] [--record '<json>'] [--resume]
 ```
 
-The orchestration engine the `pipeline-manager` drives. Each call returns the
-**next action** to perform, given the run's persisted state + the `--record` of
-the action just performed. The manager loop is just:
+The orchestration engine the `pipeline-manager` drives. Every
+[`runner` mode](#the-four-runner-modes) ultimately calls this same engine —
+`session`/`manager` from inside a live session, `driver`/`standalone` directly
+from `pipeline drive`'s own process — so what runs next is always decided
+here, never by a model. Each call returns the **next action** to perform,
+given the run's persisted state + the `--record` of the action just
+performed. The manager loop is just:
 
 ```
 action ← pipeline next --start <first-step>          # init (no --record)
