@@ -1,0 +1,19 @@
+docs/sdk-delta-measurement.md
+  s_36112841932a41::t_7c7b2daf36cff3 1-455
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "03313e8b04ad94bf1f7a1254efac2be90ae04875",
+  "prompts": {},
+  "sessions": {
+    "s_36112841932a41": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "503bc10d-c1d7-4fee-b100-776ee284ce9e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
