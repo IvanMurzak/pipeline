@@ -259,6 +259,21 @@ export interface SdkExecutorOptions {
   settingSources?: SdkSettingSource[];
   /** The main-thread agent, e.g. the plugin's step-executor. */
   agent?: string | null;
+  /**
+   * The permission mode to use when the REQUEST does not carry one (c4).
+   *
+   * `ExecutorRequest.permission_mode` is the step path's channel and it wins
+   * whenever it narrows. The fallback exists for the seams whose CLI template
+   * hardcodes the flag instead of spelling `{permissions}` — the improver and
+   * the script-creator both pass `--permission-mode acceptEdits` literally and
+   * build their request with `permission_mode: null`. Without this, that
+   * hardcoded flag would have no SDK-side equivalent and those sessions would
+   * silently run under the SDK's default mode.
+   *
+   * Absent ⇒ unchanged c3 behaviour: a null/unrecognised request value leaves
+   * the key off entirely and the SDK inherits machine settings.
+   */
+  permissionMode?: SdkPermissionMode;
   /** Plugins to load. There is no auto-discovery — 02 K-3. */
   plugins?: SdkPluginConfig[];
   /** Tools to allow IN ADDITION TO {@link REQUIRED_TOOLS}. */
@@ -307,7 +322,9 @@ export function buildSdkOptions(req: ExecutorRequest, opts: SdkExecutorOptions =
   const effort = asEffortLevel(req.effort);
   if (effort !== undefined) options.effort = effort;
 
-  const permissionMode = asPermissionMode(req.permission_mode);
+  // The request wins where it narrows; the caller's fallback covers the seams
+  // whose template hardcoded the flag (see SdkExecutorOptions.permissionMode).
+  const permissionMode = asPermissionMode(req.permission_mode) ?? opts.permissionMode;
   if (permissionMode !== undefined) options.permissionMode = permissionMode;
 
   if (req.session.resume) options.resume = req.session.id;
