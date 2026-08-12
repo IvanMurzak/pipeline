@@ -160,6 +160,13 @@ import type { Runner } from '../lib/manifest';
 // seam at a time (see the "no claude -p subprocess" tests in
 // tests/sdk-seams.test.ts, which this selection is what makes real).
 import { sdkDriveSeams } from '../lib/executors/sdk-seams';
+// c6 — the codex-cli sibling to subprocessExecutor's claude-shaped stream
+// reading: recovers a ClaudeEnvelope-shaped result from `codex exec --json`'s
+// OWN event shape (thread.started / item.completed / turn.completed), which
+// shares no frame `type` with claude's stream-json vocabulary. See
+// envelopeOf and lib/executors/codex-stream.ts's header for why this is safe
+// to try unconditionally, after the claude-shaped read comes up empty.
+import { parseCodexJsonl } from '../lib/executors/codex-stream';
 import {
   addUsage,
   emptyUsage,
@@ -336,10 +343,23 @@ export interface ExecutorExit {
  *  they arrived); falls back to replaying captured stdout through the SAME
  *  parser, which also absorbs a custom template's buffered
  *  `--output-format json` object. Never throws; null = no terminal `result`,
- *  which is not by itself an error (SIGTERM/exit 143). */
+ *  which is not by itself an error (SIGTERM/exit 143).
+ *
+ *  c6: when the claude-shaped read comes up empty, ALSO tries codex-cli's own
+ *  event shape (lib/executors/codex-stream.ts) before giving up. This is what
+ *  keeps rung 4 of the record-recovery ladder (final-response text parsed as
+ *  JSON) alive for codex-cli, exactly as it already is for claude — codex's
+ *  `--json` stream never carries a claude-shaped `type:"result"` frame
+ *  (verified live, codex-stream.ts's header), so the claude-shaped read is
+ *  ALWAYS null for a codex spawn and this fallback is what supplies one.
+ *  Safe to try unconditionally on every executor (see that module's header
+ *  for why the two shapes cannot collide): a claude/SDK run that already
+ *  resolved an envelope never reaches this line, and a genuinely foreign
+ *  stdout (a fake test executor, SIGTERM with no output) still yields null. */
 export function envelopeOf(exit: ExecutorExit): ClaudeEnvelope | null {
-  if (exit.stream !== undefined) return exit.stream.envelope;
-  return typeof exit.stdout === 'string' ? parseStream(exit.stdout).envelope : null;
+  const claudeShaped = exit.stream !== undefined ? exit.stream.envelope : typeof exit.stdout === 'string' ? parseStream(exit.stdout).envelope : null;
+  if (claudeShaped !== null) return claudeShaped;
+  return typeof exit.stdout === 'string' ? parseCodexJsonl(exit.stdout) : null;
 }
 
 /** The executor seam: spawn ONE step-executor and resolve when it exits. Tests
@@ -416,6 +436,273 @@ export type ExecutorKind = (typeof EXECUTOR_KINDS)[number];
 export const DEFAULT_EXECUTOR_TEMPLATE =
   'claude -p --agent pipeline:step-executor --model {model} --effort {effort} --permission-mode {permissions} --session-id {session} --add-dir {record_dir} --plugin-dir {plugin_dir} --output-format stream-json --verbose --json-schema {schema}';
 
+/**
+ * Default `codex-cli` executor command (c6, E14/E15) — the Codex sibling to
+ * {@link DEFAULT_EXECUTOR_TEMPLATE}, selected by `--executor=codex-cli`.
+ * EXPERIMENTAL, same as the claude template; override the whole thing with
+ * `--executor-cmd` or `PIPELINE_DRIVE_EXECUTOR_CMD` — both apply identically
+ * to whichever CLI implementation `--executor` selected (USAGE spells out the
+ * split). The prompt is always delivered on stdin, never as a positional
+ * PROMPT argument — verified live (codex-cli 0.147.0) that `codex exec` reads
+ * the whole piped stream as the prompt when no PROMPT arg is given, byte-for-
+ * byte the same contract `subprocessExecutor` already relies on for claude.
+ *
+ * `codex exec` (NOT the bare interactive `codex` command — a distinction this
+ * template's own construction got wrong once, see the `{permissions}`
+ * paragraph below) is Codex's headless/non-interactive front door, verified
+ * present via `codex exec --help` on a real, authenticated install.
+ *
+ * ── THE FULL PLACEHOLDER MAPPING (every token DEFAULT_EXECUTOR_TEMPLATE
+ * carries — model, effort, permission mode, session, record directory,
+ * structured schema — plus the two claude-only mechanisms that are not
+ * tokens at all: `--agent <name>` and `{plugin_dir}`) ─────────────────────
+ *
+ * `{model}` — VERIFIED: `-m, --model <MODEL>` (`codex exec --help`). Mapped
+ * to `--model {model}`, dropped together with the flag when null (same rule
+ * as every scalar token below) so an absent model lets codex use its own
+ * configured default, exactly as an absent claude `{model}` does today.
+ *
+ * `{effort}` — VERIFIED, but by a different route than a CLI flag: `codex
+ * exec --help` has no `--effort`/`--reasoning` option, but its `-c
+ * key=value` config-override mechanism does, and `model_reasoning_effort` is
+ * confirmed to exist as a live config key — read directly out of this
+ * machine's own `~/.codex/config.toml` (`model_reasoning_effort = "high"`),
+ * not merely inferred from documentation. Mapped to `-c
+ * model_reasoning_effort={effort}` — ONE whitespace-free token, so the
+ * existing scalar-substitution/drop-pair logic in buildExecutorArgv applies
+ * unchanged: an absent effort drops the whole `-c model_reasoning_effort=…`
+ * token AND the preceding `-c`.
+ *
+ * `{permissions}` — APPROXIMATED, not a verified 1:1: the two CLIs gate
+ * permission on different axes entirely. Claude's `--permission-mode` gates
+ * an INTERACTIVE PROMPT (acceptEdits/bypassPermissions/plan/default control
+ * what claude asks the human before doing); `codex exec` never prompts at
+ * all — it is non-interactive by construction — and instead gates
+ * FILESYSTEM/NETWORK ACCESS via `-s/--sandbox <read-only|workspace-write|
+ * danger-full-access>` (VERIFIED present on `codex exec --help`). A THIRD
+ * codex axis, `-a/--ask-for-approval`, looks like the obvious match for
+ * "permission mode" and is not: verified LIVE that it is REJECTED on `codex
+ * exec` ("error: unexpected argument '--ask-for-approval' found") — that flag
+ * exists only on the top-level interactive `codex` command, a real trap this
+ * template's own construction fell into once. So `{permissions}` maps to
+ * `--sandbox {permissions}` alone, through {@link codexSandboxFor}'s
+ * documented translation table (Claude vocabulary → the closest codex
+ * sandbox level for headless execution); an unrecognised value is warned
+ * about at runtime (once per distinct value) rather than silently passed
+ * through as a meaningless sandbox name. `null` (the `permission-mode:
+ * inherit` case) drops the flag on both templates, which means the same
+ * thing on both: "whatever this machine/profile already has set".
+ *
+ * `{session}` — NO EQUIVALENT for pre-minting a fresh session id, VERIFIED
+ * two ways: `codex exec --help` has no `--session-id`/`--resume` flag at all
+ * (unlike claude, which accepts a caller-chosen UUID before the first turn
+ * even starts), and a live probe confirms codex assigns its OWN id, visible
+ * only in the `--json` stream's FIRST event (`{"type":"thread.started",
+ * "thread_id":"…"}`) — i.e. only AFTER the turn has already begun, too late
+ * to have passed it in as an argument. `codex exec resume <SESSION_ID>` does
+ * exist as a genuine resume mechanism (verified via `codex exec resume
+ * --help`), but using it would mean capturing and persisting codex's own
+ * thread id — a SEPARATE id-space from this drive's own pinned
+ * `randomUUID()` session key — which nothing here does today. So this
+ * template carries NO `{session}` token at all (`appendSessionIfAbsent:
+ * false` on its buildExecutorArgv call — see subprocessExecutor — stops the
+ * generic "append `--session-id`/`--resume` when the template omits the
+ * token" convention from handing codex a flag pair it would reject).
+ * Surfaced at runtime once, at executor construction: EVERY delivery to a
+ * codex-cli step — the first spawn, an --answer delivery, a crash-resume —
+ * therefore runs a FRESH `codex exec` turn rather than resuming a codex
+ * thread; the drive-side prompts for those deliveries (buildAnswerPrompt,
+ * buildCrashResumePrompt) already re-hydrate full context from disk for
+ * exactly this reason, so a fresh turn is degraded, not broken.
+ *
+ * `{record_dir}` — VERIFIED, a clean 1:1: `--add-dir <DIR>` (`codex exec
+ * --help`), SAME flag name and SAME stated purpose ("additional directories
+ * that should be writable") as claude's. Confirmed live, twice: an
+ * instructed file write lands inside the granted directory under `--sandbox
+ * workspace-write` even when that directory sits OUTSIDE the process's
+ * working directory — the exact shape of drive's tmp-dir record DROP
+ * directory (`dropRecordsDirFor`). Mapped to `--add-dir {record_dir}`,
+ * identically to the claude template.
+ *
+ * `{schema}` — NO EQUIVALENT USED, and this is the one gap this template
+ * discovered by BREAKING something rather than by an absent flag: codex
+ * exec's structured-output flag, `--output-schema <FILE>` (VERIFIED present),
+ * requires an OpenAI-strict JSON Schema — `additionalProperties:false` on
+ * every object — and passing the shared, deliberately permissive step-record
+ * schema (lib/step-schema.ts) AS-IS was reproduced live failing outright:
+ * `{"type":"error","error":{"code":"invalid_json_schema","message":
+ * "'additionalProperties' is required to be supplied and to be false"}}`,
+ * immediately followed by `turn.failed` — not a degraded response, a failed
+ * turn. Forking a strict-mode variant of the shared schema was considered and
+ * rejected: it is a second schema that can silently drift from the one every
+ * other channel (the record file, claude's own structured_output) already
+ * agrees on, to buy a rung this template does not need — see the next
+ * paragraph. So `--output-schema` is not part of this template at all, and
+ * `{schema}` is never substituted for codex-cli.
+ *
+ * `--agent pipeline:step-executor` (a fixed flag, not a token) and its
+ * dependent `{plugin_dir}` — NO EQUIVALENT: verified that `codex exec --help`
+ * names no per-invocation persona/subagent-selection flag (`codex plugin` is
+ * a marketplace install/list mechanism, not a per-spawn selector — `codex
+ * plugin --help` confirms its subcommands are `add`/`list`/`marketplace`/
+ * `remove`), so there is nothing for `{plugin_dir}` — which exists ONLY to
+ * make `--agent <name>` resolvable once claude defaults to `--bare` — to
+ * plug into either. Neither appears in this template; the step-executor
+ * protocol reaches codex through the spawn prompt text alone
+ * (buildStepPrompt), which is already vendor-neutral.
+ *
+ * ── WHY THE RETAINED FALLBACK LADDER STILL APPLIES DESPITE {schema} BEING
+ * UNUSED ─────────────────────────────────────────────────────────────────
+ *
+ * `{schema}`'s absence removes rung 1 (harness-validated `structured_output`)
+ * only. Rungs 2 and 3 — the tmp-dir DROP record file this template's
+ * `--add-dir {record_dir}` grants, and the legacy canonical path — are
+ * PROMPT-level contracts (the spawn prompt instructs the executor to write
+ * `step_record_file`, independent of any CLI vendor) and were verified live
+ * to work for codex exactly as documented: an instructed write lands exactly
+ * where asked. Rung 4 (the final-response text, parsed as JSON) is ALSO kept
+ * alive for codex-cli — `envelopeOf` (this file) falls back to
+ * `lib/executors/codex-stream.ts`'s codex-shaped stream reader whenever the
+ * claude-shaped one comes up empty, recovering the LAST `agent_message`
+ * item's text as the envelope's `result`, the same field `parseResultObject`
+ * already reads for claude. So three of the four rungs — the three that do
+ * not depend on `--json-schema`/`--output-schema` succeeding — are retained
+ * for codex-cli exactly as claude already relies on them.
+ *
+ * ── WHAT THIS TEMPLATE DOES NOT ATTEMPT ─────────────────────────────────────
+ *
+ * Live per-tool-call progress (`step.tool` events): `ClaudeStreamParser`
+ * discriminates claude's OWN frame shapes (`assistant`/`user` messages
+ * carrying `tool_use` blocks) and is not extended here to also recognise
+ * codex's `item.started`/`item.completed` shapes — a codex-cli run therefore
+ * emits no `step.tool` progress lines. Not a DoD requirement and not
+ * attempted; recorded here so it reads as a scoped omission, not an oversight.
+ *
+ * `--skip-git-repo-check` is included unconditionally: verified live that
+ * `codex exec` otherwise refuses to run outside a git repository, a
+ * requirement claude has never had — included so a pipeline root that is not
+ * itself a git repo behaves the same under either executor.
+ */
+export const DEFAULT_CODEX_EXECUTOR_TEMPLATE =
+  'codex exec --json --skip-git-repo-check --model {model} -c model_reasoning_effort={effort} --sandbox {permissions} --add-dir {record_dir}';
+
+/** Claude `--permission-mode` values this repo's own templates/docs name
+ *  (agents/step-executor.md, PIPELINE.md frontmatter) — used only to decide
+ *  whether {@link codexSandboxFor} is translating a KNOWN value or guessing at
+ *  an unrecognised one; not a validation gate (an unlisted value still maps,
+ *  just with a runtime warning — see codexPermissionModeMapper below). */
+const KNOWN_CLAUDE_PERMISSION_MODES: ReadonlySet<string> = new Set([
+  'acceptEdits',
+  'bypassPermissions',
+  'plan',
+  'default',
+]);
+
+/**
+ * Translate a resolved claude `--permission-mode` value into the closest
+ * codex-cli `--sandbox` value (see DEFAULT_CODEX_EXECUTOR_TEMPLATE's
+ * `{permissions}` paragraph for why this is an APPROXIMATION, not a verified
+ * equivalence — the two CLIs gate different things). `null` (the
+ * `permission-mode: inherit` case) passes through as `null`, dropping the
+ * `--sandbox` flag exactly as an inherited claude permission mode drops
+ * `--permission-mode` — "use whatever this machine/profile already has set"
+ * means the same thing on both templates.
+ *
+ * `'acceptEdits'` → `'workspace-write'`: the headless default on both sides —
+ * a session that cannot prompt still needs to write its own workspace.
+ * `'bypassPermissions'` → `'danger-full-access'`: the no-gate-at-all case on
+ * both sides. `'plan'` → `'read-only'`: claude's plan mode never edits;
+ * codex's read-only sandbox cannot either. `'default'` → `'workspace-write'`:
+ * claude's interactive default normally prompts per action, which `codex
+ * exec` cannot do at all (it never prompts, full stop — see the
+ * `{permissions}` paragraph's `--ask-for-approval` finding), so the
+ * non-degenerate headless choice is the same one `acceptEdits` gets. Any
+ * OTHER value (a custom `permission-mode:` string this repo does not itself
+ * define) also falls back to `'workspace-write'` — never `'read-only'`, which
+ * would silently turn a step that expects to edit into one that cannot.
+ */
+export function codexSandboxFor(claudeMode: string | null): string | null {
+  if (claudeMode === null) return null;
+  switch (claudeMode) {
+    case 'acceptEdits':
+      return 'workspace-write';
+    case 'bypassPermissions':
+      return 'danger-full-access';
+    case 'plan':
+      return 'read-only';
+    case 'default':
+    default:
+      return 'workspace-write';
+  }
+}
+
+/**
+ * Build a `permissionModeFor` mapper for `subprocessExecutor`'s codex-cli
+ * branch: applies {@link codexSandboxFor}, and — the "degrade loudly" half of
+ * that translation — warns ONCE PER DISTINCT unrecognised claude
+ * permission-mode value it is ever asked to translate, never once per spawn
+ * (a pipeline whose every step shares one custom `permission-mode:` string
+ * would otherwise repeat the identical warning on every single step).
+ * Recognised values ({@link KNOWN_CLAUDE_PERMISSION_MODES}) and `null`
+ * (inherit) translate silently — codexSandboxFor's own doc already explains
+ * those, so there is nothing this closure needs to add.
+ */
+function codexPermissionModeMapper(err: (s: string) => void): (mode: string | null) => string | null {
+  const warned = new Set<string>();
+  return (mode) => {
+    const mapped = codexSandboxFor(mode);
+    if (mode !== null && !KNOWN_CLAUDE_PERMISSION_MODES.has(mode) && !warned.has(mode)) {
+      warned.add(mode);
+      err(
+        `pipeline drive: codex-cli has no --sandbox mapping for permission-mode '${mode}' ` +
+          `(recognised: ${[...KNOWN_CLAUDE_PERMISSION_MODES].join(', ')}) — falling back to ` +
+          `'${mapped}', the same headless default 'acceptEdits' gets.\n`,
+      );
+    }
+    return mapped;
+  };
+}
+
+/**
+ * One warning line per codex-cli template mechanism that has NO direct
+ * claude-template equivalent — the c6 counterpart to sdk-seams.ts's
+ * `sdkSeamOverrideWarnings`: emitted ONCE per run, at executor construction
+ * (see runDrive's executor-selection block), never per spawn, following the
+ * SAME "state the gap once, in the run's own output, rather than emit a
+ * command that quietly means something else" rule c4 established for the SDK
+ * executor's inapplicable template overrides.
+ *
+ * Each line names WHAT has no equivalent, WHY (the verified evidence, not an
+ * assumption), and WHAT the template does instead — the three things a reader
+ * who set `--executor=codex-cli` needs, same bar sdkSeamOverrideWarnings
+ * holds itself to.
+ */
+export function codexTemplateGapWarnings(): string[] {
+  return [
+    "pipeline drive: codex-cli has no equivalent to claude's --agent <name> (and " +
+      'therefore none to the {plugin_dir} token, which exists only to make --agent ' +
+      'resolvable once claude defaults to --bare) — verified: `codex exec --help` names ' +
+      'no per-invocation persona/subagent flag, and `codex plugin` is a marketplace ' +
+      'install/list mechanism, not a per-spawn selector. The step-executor protocol ' +
+      'reaches codex through the spawn prompt text alone.',
+    'pipeline drive: codex-cli does not use --output-schema for the step record — ' +
+      "verified: codex exec's structured-output mode requires a STRICT JSON Schema " +
+      '(additionalProperties:false on every object) and the shared step-record schema ' +
+      '(lib/step-schema.ts) is deliberately permissive; passing it as-is was reproduced ' +
+      'live failing with an invalid_json_schema error and a failed turn. The record is ' +
+      'recovered from the record file and the final-response text instead — the SAME ' +
+      "fallback channels the claude template already relies on for claude's own " +
+      '-p --agent structured_output gap (claude-code#20625).',
+    'pipeline drive: codex-cli never resumes a codex thread — verified: `codex exec` has ' +
+      'no --session-id flag to pre-mint a session id (codex assigns its own, visible only ' +
+      "in the --json stream's thread.started event AFTER a turn starts); `codex exec " +
+      'resume <id>` exists but needs that id captured and persisted first, which this ' +
+      'template does not do. Every delivery to a codex-cli step — the first spawn, an ' +
+      '--answer delivery, a crash-resume — runs a NEW codex exec turn, with full context ' +
+      're-supplied via the prompt text.',
+  ];
+}
+
 export interface ExecutorArgvOpts {
   session?: { id: string; resume: boolean };
   permissionMode?: string | null;
@@ -437,6 +724,16 @@ export interface ExecutorArgvOpts {
    *  NOT appended to a template that omits the token, so a user's
    *  `--executor-cmd` override is unaffected by this flag's existence. */
   pluginDir?: string | null;
+  /** c6: when `false`, a template WITHOUT a `{session}` token does NOT get
+   *  `--session-id`/`--resume <id>` appended. Default `true` (the original
+   *  claude behaviour — see the {session} handling below) so every existing
+   *  caller and template is unaffected. codex-cli's default template passes
+   *  `false`: `codex exec` has no `--session-id`/`--resume` flags at all
+   *  (verified: absent from `codex exec --help`; `--resume` is a top-level
+   *  claude-only flag), so appending them would hand codex an argument it
+   *  rejects outright rather than a value it ignores. See
+   *  DEFAULT_CODEX_EXECUTOR_TEMPLATE's comment for the fuller session gap. */
+  appendSessionIfAbsent?: boolean;
 }
 
 /**
@@ -451,7 +748,9 @@ export interface ExecutorArgvOpts {
  * special cases: when resuming, the flag token immediately preceding
  * `{session}` is REPLACED with `--resume`; a template WITHOUT a `{session}`
  * token gets the session pair appended (custom claude wrappers must forward
- * unknown flags; fakes ignore argv entirely).
+ * unknown flags; fakes ignore argv entirely) — UNLESS
+ * `opts.appendSessionIfAbsent === false` (c6: codex-cli, whose `codex exec`
+ * has no `--session-id`/`--resume` flags to append at all).
  */
 export function buildExecutorArgv(
   template: string,
@@ -498,7 +797,7 @@ export function buildExecutorArgv(
       argv.push(t);
     }
   }
-  if (!sawSession && opts.session) {
+  if (!sawSession && opts.session && opts.appendSessionIfAbsent !== false) {
     argv.push(opts.session.resume ? '--resume' : '--session-id', opts.session.id);
   }
   if (!sawRecordDir && opts.recordDir) {
@@ -548,18 +847,33 @@ const MAX_CAPTURED_STDOUT = 1024 * 1024;
  *  through untouched. The child's stderr is relayed verbatim as before.
  *
  *  Never throws — spawn failures resolve as {code:null, error}. */
+/** c6: the two ways the codex-cli flavour of `subprocessExecutor` differs
+ *  from the claude-cli/default one — both explained at length on
+ *  DEFAULT_CODEX_EXECUTOR_TEMPLATE and codexSandboxFor. Omitted (undefined)
+ *  for claude-cli and every custom `--executor-cmd` template, which keeps
+ *  their behaviour byte-identical to before this option existed. */
+interface SubprocessExecutorOptions {
+  /** Translate a resolved permission_mode value before it reaches
+   *  buildExecutorArgv's {permissions} substitution. Identity when absent. */
+  permissionModeFor?: (mode: string | null) => string | null;
+  /** Forwarded to buildExecutorArgv's ExecutorArgvOpts — see its doc for why
+   *  codex-cli needs `false` here. */
+  appendSessionIfAbsent?: boolean;
+}
+
 function subprocessExecutor(
   template: string,
   schema: string | null,
   err: (s: string) => void,
   onToolCall?: (req: ExecutorRequest, call: StreamToolCall) => void,
+  options: SubprocessExecutorOptions = {},
 ): ExecutorRunner {
   const pluginDir = pluginDirToken();
   return (req) =>
     new Promise<ExecutorExit>((done) => {
       const argv = buildExecutorArgv(template, req.model, schema, {
         session: req.session,
-        permissionMode: req.permission_mode,
+        permissionMode: options.permissionModeFor ? options.permissionModeFor(req.permission_mode) : req.permission_mode,
         effort: req.effort,
         pluginDir,
         // The --add-dir record grant applies to STEP executors only — their
@@ -567,6 +881,7 @@ function subprocessExecutor(
         // improver/script-creator record files are drive-written observability
         // copies; those sessions never write them, so no grant is needed.
         recordDir: (req.kind ?? 'step') === 'step' ? dirname(req.record_file) : null,
+        appendSessionIfAbsent: options.appendSessionIfAbsent,
       });
       if (argv.length === 0) {
         done({ code: null, error: 'executor command template expanded to an empty argv' });
@@ -1398,7 +1713,13 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     });
   }
 
-  const template = a.executorCmd ?? process.env.PIPELINE_DRIVE_EXECUTOR_CMD ?? DEFAULT_EXECUTOR_TEMPLATE;
+  // c6: the DEFAULT template a bare `--executor=codex-cli` resolves to is
+  // codex's own sibling, never DEFAULT_EXECUTOR_TEMPLATE — --executor-cmd /
+  // PIPELINE_DRIVE_EXECUTOR_CMD still override whichever default this picks,
+  // unchanged (DoD: "--executor-cmd still overrides this template, as it does
+  // the others").
+  const defaultTemplate = executorKind === 'codex-cli' ? DEFAULT_CODEX_EXECUTOR_TEMPLATE : DEFAULT_EXECUTOR_TEMPLATE;
+  const template = a.executorCmd ?? process.env.PIPELINE_DRIVE_EXECUTOR_CMD ?? defaultTemplate;
   // c4's seams cover all three DriveDeps runner members TOGETHER (step +
   // improver + script-creator, below) — built ONCE here, so the inapplicable-
   // template warnings sdkDriveSeams already emits for PIPELINE_DRIVE_EXECUTOR_CMD
@@ -1413,7 +1734,23 @@ export async function runDrive(args: string[], deps: DriveDeps = {}): Promise<nu
     executorKind === 'claude-sdk'
       ? sdkDriveSeams({ err, onToolCall: noteToolCall, pluginDir: pluginDirToken() })
       : null;
-  const executor = deps.executor ?? sdkSeams?.executor ?? subprocessExecutor(template, stepRecordSchemaJson(), err, noteToolCall);
+  // c6 — codex-cli's own "this has no equivalent" report
+  // (DEFAULT_CODEX_EXECUTOR_TEMPLATE's header + codexTemplateGapWarnings),
+  // emitted ONCE at construction, the same c4 pattern sdkSeamOverrideWarnings
+  // follows above. Fires whether the default codex template or a user's own
+  // --executor-cmd is in play — see codexTemplateGapWarnings' own doc for why
+  // these three gaps are properties of the EXECUTOR, not of one template
+  // string, and codexOpts below for the same reasoning applied to
+  // {permissions}/{session} handling.
+  if (executorKind === 'codex-cli') {
+    for (const line of codexTemplateGapWarnings()) err(line + '\n');
+  }
+  const codexOpts: SubprocessExecutorOptions | undefined =
+    executorKind === 'codex-cli' ? { permissionModeFor: codexPermissionModeMapper(err), appendSessionIfAbsent: false } : undefined;
+  const executor =
+    deps.executor ??
+    sdkSeams?.executor ??
+    subprocessExecutor(template, stepRecordSchemaJson(), err, noteToolCall, codexOpts);
   const git = deps.git ?? realGit;
 
   // Track provider-limit errors for the final JSON (06.7 / D11). Any step may
