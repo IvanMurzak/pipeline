@@ -22,6 +22,19 @@
 //   total_cost_usd num_turns structured_output
 //   usage:{input_tokens output_tokens cache_read_input_tokens
 //          cache_creation_input_tokens}
+//
+// `modelUsage` (d1, E16) is NOT part of that verified-2.1.205 set above — it is
+// extracted defensively (missing/malformed → []) and NOT independently
+// reconfirmed against a live capture by this change; no live call was made.
+// It is the per-model usage map the Agent SDK's result message and the CLI's
+// `-p --output-format json` result documented for `02`'s K-2/E16: keys are the
+// model id(s) actually used for the turn. `models_used` below keeps only those
+// keys — never the per-model token/cost breakdown, which nothing here consumes
+// yet — because a run's REQUESTED model (`ExecutorRequest.model`) and its USED
+// model are different facts, and only this one is evidence. See
+// `tests/_model-conformance.ts`, beside the conformance harness that reads it
+// back, for why that distinction exists and the four things that can make them
+// diverge.
 
 import { readFileSync } from 'node:fs';
 
@@ -55,6 +68,12 @@ export interface ClaudeEnvelope {
    *  prompting). Empty when the envelope carries none. `file_path` is the
    *  denied call's file_path input when present (Write/Edit denials). */
   permission_denials: PermissionDenial[];
+  /** The model id(s) the turn's `modelUsage` map actually charged usage
+   *  against — d1/E16's read-back evidence. Empty when the envelope carries no
+   *  `modelUsage` (older Claude Code, or a fixture that never set it), which is
+   *  NOT the same as "the pinned model was used" — see
+   *  `tests/_model-conformance.ts`. */
+  models_used: string[];
 }
 
 export interface PermissionDenial {
@@ -83,6 +102,15 @@ function obj(v: unknown): Record<string, unknown> | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 }
 
+/** Defensive extraction of `modelUsage`'s keys — the model id(s) actually
+ *  used. Anything malformed (absent, not an object, an empty object) yields
+ *  `[]`, never throws. Never returns duplicate keys — `Object.keys` on one
+ *  object cannot produce them. */
+function modelsUsedFrom(v: unknown): string[] {
+  const m = obj(v);
+  return m === null ? [] : Object.keys(m);
+}
+
 function toEnvelope(o: Record<string, unknown>): ClaudeEnvelope {
   const u = obj(o.usage);
   return {
@@ -103,6 +131,7 @@ function toEnvelope(o: Record<string, unknown>): ClaudeEnvelope {
           },
     num_turns: num(o.num_turns),
     permission_denials: toDenials(o.permission_denials),
+    models_used: modelsUsedFrom(o.modelUsage),
   };
 }
 
