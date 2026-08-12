@@ -711,6 +711,14 @@ Two things worth knowing if you are debugging a slot's ports:
 
 ### The standalone hook context
 
+⚠ **"Standalone" here means "no pipeline run is attached"** — `pipeline
+worktree` provisioning a slot with no `--root`/`--run-id` in play. That is a
+different sense of the word from the `standalone` **`runner` mode**
+(`pipeline.yml`'s `runner: standalone`, described in the package
+[`README`](../README.md#the-four-runner-modes)), which is about which engine
+executes a pipeline step. The two are unrelated features that happen to share
+an English word.
+
 The `PIPELINE_WT_*` contract is **frozen** — every consumer hook, whether
 invoked by a pipeline run or by this standalone command, sees the same
 variable names. Two of them have no natural value outside a run, and getting
