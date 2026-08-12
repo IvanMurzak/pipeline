@@ -1,11 +1,13 @@
 # `--bare` and the Max/Pro subscriber: the owner's decision
 
-**Status:** decision document (task `j3-bare-auth-answer`). **This document does
-not decide anything.** It lays out the options with their real costs, recommends
-one, and states plainly that the recommendation is not a decision — the choice
-belongs to the owner and has **not** been made by this document's author. It also
-does not decide `driver`'s fate as a mode; that question is named in Option D
-below and left open, per this task's own scope boundary.
+**Status:** DECIDED, 2026-08-12. Task `j3-bare-auth-answer` originally laid out
+the options below with their real costs, recommended one, and stated plainly —
+in three places — that the recommendation was not a decision: the choice
+belonged to the owner and had **not** been made by this document's author.
+**The owner has since made it** — see §5. `driver`'s fate as a mode is still
+**not** decided by this document; that question is named in Option D below and
+remains open, per this task's own scope boundary, and §5 confirms it is
+unaffected by today's decision.
 
 Builds on two documents already merged on this branch:
 
@@ -266,18 +268,141 @@ unattended-machine property loses that property. Nothing in this document
 makes that cost smaller than it is; Option A trades the property away in full,
 in exchange for reaching every affected user rather than a subset.
 
-**This is a recommendation, not a decision.** The choice among these four
-options — including whether to combine A with documenting B/C as secondary
-paths, whether to accept D outright, or something this document did not
-consider — belongs to the owner. Nothing in this document commits the product
-to Option A; it states the case for it and stops there.
+**This was written as a recommendation, not a decision — the choice among
+these four options belonged to the owner.** See §5: the owner has since
+accepted this recommendation (Option A, with B and C recorded as secondary
+paths for the sub-populations they serve) and additionally decided the cost
+explicitly, rather than leaving it implicit.
 
-## 5. What this document does not decide
+## 5. The owner's decision (2026-08-12)
+
+**The owner accepts this document's recommendation: Option A (`manager`/
+`session` as the migration path) for the Max/Pro-subscriber-with-no-key
+population.** Beyond accepting the recommendation, the owner additionally
+decided the cost explicitly — closing the question `ux-v2` risk R9 delegated
+to this task and that `E12` deliberately left open:
+
+> When Claude Code flips `-p` to bare by default, `driver` stops supporting
+> subscription authentication altogether. Its only remaining auth surfaces are
+> an API key or an auth token. Max/Pro subscribers holding neither lose
+> `driver` outright — knowingly, with no mitigation planned — and their
+> documented path is `manager` or `session`, both of which run inside the
+> user's own interactive Claude Code session and are therefore unaffected.
+
+**What this decides, precisely:**
+
+- **The migration path is `manager`/`session` (Option A) — not a hybrid, and
+  not Option D by default.** The reasoning in §4 for Option A — it is the only
+  option that reaches the entire affected population without asking anything
+  new of the user — is now the accepted basis for this product's guidance to
+  these users, not a recommendation still awaiting a choice.
+- **The subscriber loss is deliberate and accepted, not an open risk.**
+  `driver`'s "for CI and scripts… resumable, scriptable, machine-readable"
+  property (§2 Option A, quoting `01-modes.md`) is knowingly given up for this
+  population, with no mitigation planned beyond documenting the migration
+  path. §1 already quoted `02-standalone-executor.md`'s framing of asking
+  these same users for a key as *"not friction, it is a refusal at the
+  door"* — the owner has read that framing and accepted the cost in those
+  terms. It is recorded here plainly: neither softened into a smaller loss
+  than what was decided, nor sharpened into more than was decided.
+- **`driver` as a mode is not retired by this decision.** It continues to
+  exist for the population that does hold an API key or an auth token —
+  Option B's population, unaffected by this decision. Whether `driver` should
+  continue to exist as a fourth mode *at all* remains the separate, still-open
+  question named in §6's first bullet (formerly this section, before today's
+  decision); this decision does not touch it.
+
+### Verifying the auth-token lever
+
+The owner's decision names two auth surfaces: "an API key or an auth token."
+§2 Option B and §3 already establish `ANTHROPIC_API_KEY` and `apiKeyHelper`
+via `--settings` as confirmed, `--bare`-surviving mechanisms. The installed
+CLI's own `--bare` help text, however, names only those two — *"Anthropic auth
+is strictly ANTHROPIC_API_KEY or apiKeyHelper via --settings"* (`claude -p
+--help`, 2.1.228, quoted already in §1) — it does not name a distinct
+auth-token variable by itself. Rather than write a variable name into this
+document on the strength of the owner's phrasing alone, it was confirmed
+directly, in two steps:
+
+**1. Confirmed to exist, and distinct from `ANTHROPIC_API_KEY`.**
+`ANTHROPIC_AUTH_TOKEN` is a real, first-party environment variable recognized
+by the installed binary (2.1.228, `C:\Users\IvanD\.local\bin\claude.exe`) —
+found by searching the binary's own strings directly (`strings claude.exe |
+grep -o "ANTHROPIC_[A-Z_]*" | sort -u`), which lists `ANTHROPIC_AUTH_TOKEN`
+alongside `ANTHROPIC_API_KEY` among the binary's other recognized `ANTHROPIC_*`
+variables. Context around the hits shows it used as a distinct auth source: an
+internal error message enumerates `"ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN,
+CLAUDE_CODE_…"` as alternative auth sources, and it is sent as a different HTTP
+header from an API key — one string hit spells this out directly: *"Both
+`ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` set — the SDK sends both headers
+and the API rejects the request."*
+
+**2. Confirmed to survive `--bare` — by direct probe, the same method §2
+Option B used, not by reading `--help` alone** (whose `--bare` sentence does
+not name this variable):
+
+```
+ANTHROPIC_AUTH_TOKEN=fake-auth-token-for-harness-probe-000 claude -p "This is a
+harness measurement probe, not a real task. Reply with exactly the single word
+OK and take no other action." --output-format stream-json --verbose
+```
+Result (no `--bare`): terminal `"Failed to authenticate. API Error: 401 Invalid
+bearer token"`, `api_error_status: 401`, `duration_ms: 1445`.
+
+```
+ANTHROPIC_AUTH_TOKEN=fake-auth-token-for-harness-probe-000 claude -p "This is a
+harness measurement probe, not a real task. Reply with exactly the single word
+OK and take no other action." --bare --output-format stream-json --verbose
+```
+Result (`--bare`): **identical** terminal message, `"Failed to authenticate.
+API Error: 401 Invalid bearer token"`, `api_error_status: 401`, `duration_ms:
+8721` (the gap from the control is ordinary run-to-run latency — both are
+low-single-digit seconds — not a behavioral difference). Both runs from
+`C:\tmp\ai-pipeline-worktrees\record-bare-auth-decision--pipeline`, Claude Code
+2.1.228, no other `ANTHROPIC_*`/`CLAUDE_CODE_OAUTH_TOKEN*` variable set, no
+project `.claude/` or `CLAUDE.md` present (checked before running).
+
+The two runs are symmetric — same distinctive "Invalid bearer token" 401 in
+both — the same shape of evidence §2 Option B used for `apiKeyHelper`, and it
+differs categorically from the no-auth-at-all failure mode `bare-baseline.md`
+(`j1`) measured under `--bare` (`"Not logged in · Please run /login"`). A
+silently-ignored variable would fail the same way the no-auth case does; it
+did not — both runs attempted bearer authentication and failed on the
+placeholder token's validity, not its absence. (`system/init.apiKeySource`
+reported `"none"` in both runs rather than naming the source; that field
+appears not to classify a bearer token the way it classifies an API key or
+`apiKeyHelper` — the terminal error message is the reliable signal here, and
+it is unambiguous and identical across both runs.)
+
+**What is and is not confirmed, stated precisely:**
+
+- **Confirmed by direct measurement:** `ANTHROPIC_AUTH_TOKEN` exists in the
+  installed 2.1.228 binary as a distinct, first-party auth lever from
+  `ANTHROPIC_API_KEY`, and it survives `--bare` — read and used identically
+  with and without the flag.
+- **Not confirmed by the installed CLI's own `--help` text specifically:** the
+  `--bare` flag's own help sentence names only `ANTHROPIC_API_KEY` and
+  `apiKeyHelper`; it does not name `ANTHROPIC_AUTH_TOKEN`. This is a gap
+  between that sentence and measured behavior, not a contradiction resolved in
+  either direction — flagged here rather than silently resolved, per this
+  task's own instruction to separate measured fact from inference.
+- **Not established by this task:** whether Anthropic documents
+  `ANTHROPIC_AUTH_TOKEN` as a stable, user-facing lever versus treating it as
+  an internal implementation detail (its typical use, visible in the string
+  evidence, reads as SDK/gateway credential-passing rather than end-user
+  setup) — no public Anthropic documentation was consulted for this task, only
+  the installed binary's own strings and measured behavior. The decision above
+  is recorded in the owner's own terms ("an API key or an auth token") for
+  exactly this reason: the concrete lever is confirmed to exist and to work
+  under `--bare`, but its publication status upstream is not established here.
+
+## 6. What this document does not decide
 
 - **`driver`'s continued existence as a fourth mode**, which Option D's cost
-  section surfaces but does not resolve. Named explicitly here so it is not
-  mistaken for settled: it is a separate question this task was scoped not to
-  answer.
+  section surfaces but does not resolve, and which §5 explicitly declines to
+  touch. Named explicitly here so it is not mistaken for settled: it is a
+  separate question this task was scoped not to answer, and today's decision
+  does not answer it either.
 - **When the flip lands.** No date is published upstream (confirmed absent
   from the installed `--help`, same as `j1`/`j2`'s "no opt-out flag"/"no date"
   observations); `01-modes.md` E12 already commits to "we use the feature for
@@ -304,10 +429,13 @@ to Option A; it states the case for it and stops there.
   `j1` did not test this (stated explicitly, not glossed over); the installed
   CLI's own `--help` was checked directly (`claude -p --help`, Claude Code
   2.1.228) and confirms no such flag exists today.
-- **One option is recommended, and the document is explicit that the choice
-  is the owner's and has not been made by its author.** §4 recommends Option
-  A and states this in the document's opening paragraph, in §4's closing
-  paragraph, and here again.
+- **One option is recommended, and the document originally stated the choice
+  was the owner's and had not been made by its author** in its opening
+  paragraph, in §4's closing paragraph, and in this list — **and now records
+  that the owner has made it.** §5: Option A accepted, with the cost of the
+  Max/Pro-subscriber loss decided explicitly (deliberate, accepted, no
+  mitigation planned) rather than left implicit.
 - **No source file is modified and no mode's fate is decided unilaterally.**
-  The only file in this change is `docs/bare-auth.md`; `driver`'s fate is
-  explicitly left open in §5, first bullet.
+  The only file in this change is `docs/bare-auth.md`; `driver`'s continued
+  existence as a fourth mode is explicitly left open in §6, first bullet, and
+  §5 confirms today's decision does not touch it.
