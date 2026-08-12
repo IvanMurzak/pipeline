@@ -1,0 +1,24 @@
+docs/cli.md
+  s_36112841932a41::t_1ee48e04772767 714-721
+README.md
+  s_36112841932a41::t_7909cdf1692e0a 162-170
+  s_36112841932a41::t_cfec4aec7e7be9 176,185-186,189-213
+  s_36112841932a41::t_ecccb4aed86028 49-91
+  s_36112841932a41::t_8c7dbceaa68e4b 306-312
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "ca57c65338f403d89248d1e1db6b36da535fb391",
+  "prompts": {},
+  "sessions": {
+    "s_36112841932a41": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "503bc10d-c1d7-4fee-b100-776ee284ce9e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
