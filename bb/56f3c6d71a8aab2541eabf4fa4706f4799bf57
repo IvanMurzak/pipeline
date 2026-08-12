@@ -1,0 +1,25 @@
+src/commands/drive.ts
+  s_0999cfe4e46b73::t_db4dbadac92bf9 163-169,346-358,360-362,439-705,727-736,751-753,800,850-863,869,876,884,1716-1722,1737-1753
+src/lib/executors/codex-stream.ts
+  s_0999cfe4e46b73::t_939bd10777c132 1-173
+tests/codex-stream.test.ts
+  s_0999cfe4e46b73::t_0c18995c57d64d 1-135
+tests/drive-executor-codex-template.test.ts
+  s_0999cfe4e46b73::t_d5bef3909763a9 1-428
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "bb56f3c6d71a8aab2541eabf4fa4706f4799bf57",
+  "prompts": {},
+  "sessions": {
+    "s_0999cfe4e46b73": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_0999cfe4e46b73",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
