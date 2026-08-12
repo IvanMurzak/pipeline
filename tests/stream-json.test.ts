@@ -333,6 +333,9 @@ describe('terminal result frame', () => {
       usage: { input: 11, output: 97, cache_read: 14203, cache_creation: 1902 },
       num_turns: 2,
       permission_denials: [],
+      // The fixture below carries no modelUsage map (b5's real capture predates
+      // d1) — [] is the documented "no evidence" case, not a mismatch.
+      models_used: [],
     });
   });
 
