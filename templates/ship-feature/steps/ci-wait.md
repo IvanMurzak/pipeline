@@ -34,8 +34,6 @@ red → back to `implement` (bounded to 3) to fix and re-push.
 1. Run the bundled gate in ONE Bash call (set the Bash timeout at or above the
    gate's `--timeout`, default 1800s):
    `pipeline ci-wait --pr <pr_number> --json`
-   If `pipeline` is not on PATH, use the plugin copy:
-   `bun "${CLAUDE_PLUGIN_ROOT}/apps/pipeline-cli/src/cli.ts" ci-wait --pr <pr_number> --json`.
 2. Branch on the exit code (do not re-parse the wait yourself):
    - `0` → all checks passed. Report `ci_green: true`.
    - `1` (a check failed), `3` (timeout), or `4` (no checks appeared) → report
