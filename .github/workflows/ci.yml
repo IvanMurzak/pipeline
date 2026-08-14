@@ -39,17 +39,21 @@
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - ".gitignore"
-      - ".gitattributes"
-      - "LICENSE"
+    paths:
+      - "**"
+      - "!**/*.md"
+      - "!.gitignore"
+      - "!.gitattributes"
+      - "!LICENSE"
+      - "templates/**"
   pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - ".gitignore"
-      - ".gitattributes"
-      - "LICENSE"
+    paths:
+      - "**"
+      - "!**/*.md"
+      - "!.gitignore"
+      - "!.gitattributes"
+      - "!LICENSE"
+      - "templates/**"
 
 jobs:
   test:
