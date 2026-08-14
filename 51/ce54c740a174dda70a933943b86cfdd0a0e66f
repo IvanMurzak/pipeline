@@ -1,0 +1,21 @@
+.github/workflows/ci.yml
+  s_303d0d7286eb57::t_9b4d5bde1d6775 42-48,50-56
+tests/templates-contract.test.ts
+  s_303d0d7286eb57::t_64a4dad7aac179 10-15,21-22,26-33,49-52,56-60,66-67,71-72,77,80,85-86,90-91,96
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "51ce54c740a174dda70a933943b86cfdd0a0e66f",
+  "prompts": {},
+  "sessions": {
+    "s_303d0d7286eb57": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ccf91804-9560-4674-84cf-ff47468a24e8",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
