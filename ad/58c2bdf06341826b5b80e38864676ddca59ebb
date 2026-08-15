@@ -1,0 +1,27 @@
+package.json
+  s_ed1b4ae4e5d986::t_c5a3b15982ccdc 32
+tests/step-schema.test.ts
+  s_ed1b4ae4e5d986::t_1254c544a1ba4d 5
+  s_ed1b4ae4e5d986::t_c0f394dfa18456 63-69
+src/lib/step-schema.ts
+  s_ed1b4ae4e5d986::t_855fe68bb7a5ab 21-22
+  s_ed1b4ae4e5d986::t_2ee9c4027d73b0 19
+bun.lock
+  s_ed1b4ae4e5d986::t_11e9fa55b6c465 8,19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "ad58c2bdf06341826b5b80e38864676ddca59ebb",
+  "prompts": {},
+  "sessions": {
+    "s_ed1b4ae4e5d986": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d065bda2-94f7-45db-b8f4-2da50c81020b",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
