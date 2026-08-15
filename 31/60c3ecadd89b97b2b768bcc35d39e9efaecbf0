@@ -1,0 +1,21 @@
+src/lib/transcript-walk.ts
+  s_303d0d7286eb57::t_cfb97ab1a69989 26-35
+tests/ids.test.ts
+  s_303d0d7286eb57::t_8433c8241e4d98 344-345,347-348,353,355-364,366-382,389-391,399-407
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "3160c3ecadd89b97b2b768bcc35d39e9efaecbf0",
+  "prompts": {},
+  "sessions": {
+    "s_303d0d7286eb57": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ccf91804-9560-4674-84cf-ff47468a24e8",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
