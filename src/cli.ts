@@ -556,7 +556,7 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'telemetry-daemon': {
       // Lazy import (mirrors `cloud`/`department`): pulls in the outbox/upload
-      // machinery (and, through it, vendor/privacy.ts) — keep the hot `next`
+      // machinery (and, through it, `@baizor/pipeline-protocol`) — keep the hot `next`
       // loop's per-spawn startup cost unchanged. This command is normally
       // spawned detached by src/hooks/analytics-relay.ts, never run inline.
       const { runTelemetryDaemon } = await import('./commands/telemetry-daemon');

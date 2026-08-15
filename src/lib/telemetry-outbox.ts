@@ -26,15 +26,20 @@
 //    that means anything — by planting secrets, draining the real queue, and
 //    scanning the queue file's BYTES off disk.
 //
-//    The filter used is the VENDORED copy (`src/lib/vendor/privacy.ts`),
-//    byte-identical to `pipeline-runner/src/shipper/privacy.ts` and guarded in
-//    the parent monorepo's CI by `scripts/check-privacy-filter-drift.mjs`
-//    (wired by `a1`). Not the published `@baizor/pipeline-protocol`: this
-//    package is invoked straight out of the plugin's cached git checkout,
-//    which has no `package.json` and no install step, so any external import
-//    reachable from `cli.ts` throws at import time for every plugin user (see
-//    the vendored file's own header). The tier resolution is FAIL-CLOSED — an
-//    unrecognized `PIPELINE_PRIVACY_TIER` degrades to `metadata`, never up.
+//    The filter used is the published `@baizor/pipeline-protocol` — the
+//    canonical copy, imported as an ordinary dependency. It used to be a
+//    VENDORED file (`src/lib/vendor/privacy.ts`) because this package was
+//    invoked straight out of the plugin's cached git checkout, which had no
+//    `package.json` and no install step, so any external import reachable from
+//    `cli.ts` threw at import time for every plugin user. That path died with
+//    plugin-thin `p9` (the plugin's embedded CLI is gone; the CLI is now
+//    reached as an installed binary), which is what let `k2` swap the vendored
+//    copy for the real dependency. The swap was import-path-only: the two were
+//    byte-identical at the time, proven by the parent monorepo's
+//    `scripts/check-privacy-filter-drift.mjs`, which still guards the
+//    protocol copy against `pipeline-runner/src/shipper/privacy.ts`.
+//    The tier resolution is FAIL-CLOSED — an unrecognized
+//    `PIPELINE_PRIVACY_TIER` degrades to `metadata`, never up.
 //
 // 2. THE CURSOR BINDS (FILE IDENTITY, OFFSET) — AND THE IDENTITY IS CONTENT,
 //    NOT AN INODE. The journal rotates at 50 MB (`event.ts:364`
@@ -145,7 +150,7 @@ import {
   resolvePrivacyTier,
   stripStatsFailureExcerpts,
   type PrivacyTier,
-} from './vendor/privacy';
+} from '@baizor/pipeline-protocol';
 // c2 — the outbox is what LEAVES THIS MACHINE. The privacy filter above is a
 // positive allowlist, but it is bypassed above the `metadata` tier and its
 // allowed free-text fields carry 256 characters, which is ample room for a

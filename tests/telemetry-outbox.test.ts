@@ -19,7 +19,7 @@
 // tool arguments, error excerpts, an API-key-shaped string — drives them
 // through the REAL queue, then reads every file in the telemetry directory back
 // off disk AS BYTES and scans for each planted value. Modelled on `e1`'s
-// conformance test (tests/vendor-privacy.test.ts), which does the same for the
+// conformance test (tests/privacy-filter.test.ts), which does the same for the
 // filter itself.
 //
 // ⚠ (5) WAS VACUOUS FOR THE `keep`-CLASSIFIED PATH FIELDS UNTIL ux-v2 `b22`.

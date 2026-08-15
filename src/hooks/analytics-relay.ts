@@ -1257,7 +1257,7 @@ function bypassRunIdFromToolUseId(toolUseId: string | null): string {
 //
 // WHY THIS WHOLE BLOCK IS DUPLICATED HERE RATHER THAN IMPORTED FROM
 // `commands/telemetry-daemon.ts`: that module pulls in the outbox/upload/
-// vendor-privacy chain at top level, real (if small) parse-and-eval cost a
+// privacy-filter chain at top level, real (if small) parse-and-eval cost a
 // HOT hook — this file runs on every Agent/Task spawn — should not pay just
 // to decide whether a daemon is already running. Same reasoning
 // `submoduleWorktreeOf`'s own doc comment above gives for copying rather than

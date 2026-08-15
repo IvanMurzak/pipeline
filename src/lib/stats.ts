@@ -15,7 +15,7 @@
 // invokeNext) appends timeline lines in-process as actions/records flow
 // through, and finalizes on the terminal action. The SubagentStop stats relay
 // hook (src/hooks/stats-relay.ts) later enriches finished runs with token counts
-// folded from the manager transcript (lib/vendor/transcript-walk.ts —
+// folded from the manager transcript (lib/transcript-walk.ts —
 // the only complete token source; hook-emitted turn.usage undercounts).
 //
 // Master switch: PIPELINE_STATS_ENABLED — ON by default; set 0/false/off/no

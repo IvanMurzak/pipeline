@@ -18,7 +18,7 @@ import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { findRunRecord, runLogsChat, parseLogsArgs, type LogsArgs } from '../src/commands/logs';
-import { encodeClaudeProjectDir } from '../src/lib/vendor/transcript-walk';
+import { encodeClaudeProjectDir } from '../src/lib/transcript-walk';
 import type { RunRecord } from '../src/lib/stats';
 
 let sandbox: string;

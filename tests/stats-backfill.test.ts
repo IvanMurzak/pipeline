@@ -14,7 +14,7 @@ import {
   resetCorrelationProbe,
 } from '../src/lib/stats-backfill';
 import { newId } from '../src/lib/ids';
-import { encodeClaudeProjectDir } from '../src/lib/vendor/transcript-walk';
+import { encodeClaudeProjectDir } from '../src/lib/transcript-walk';
 import type { RunRecord } from '../src/lib/stats';
 
 let sandbox: string;

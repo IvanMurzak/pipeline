@@ -20,7 +20,7 @@
 //
 //   - The hook fires on a HOT path (every Agent/Task spawn Claude Code makes)
 //     and must add no measurable latency. THIS module pulls in the full
-//     outbox/upload/`vendor/privacy.ts` chain at top level — fine for a
+//     outbox/upload/`@baizor/pipeline-protocol` chain at top level — fine for a
 //     process whose entire job is to poll and flush, but real (if small)
 //     parse-and-eval cost a hot hook should not pay just to decide "is a
 //     daemon already running". So the hook does NOT import this file at all.
@@ -141,7 +141,7 @@ export function releaseDaemonLock(lockPath: string): void {
 // which `commands/drive.ts` already imports for those — is the natural home:
 // unlike the hook, `drive.ts` is not a hot per-tool-call path (this function
 // runs at most twice per run: start and exit), so paying this module's own
-// outbox/upload/vendor-privacy import cost is not a concern here — drive.ts
+// outbox/upload/privacy-filter import cost is not a concern here — drive.ts
 // pays it anyway, for its own in-process journal tail (`lib/telemetry-tail.ts`).
 //
 // The acquire/reclaim/spawn SHAPE below is the SAME argument as the hook's

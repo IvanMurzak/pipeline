@@ -403,7 +403,7 @@ function normEnvelope(v: KvValue | undefined): string | null {
 // Transcript-path encoding (mirror binding)
 // ---------------------------------------------------------------------------
 
-/** Mirror of vendor/transcript-walk.ts:encodeClaudeProjectDir and
+/** Mirror of transcript-walk.ts:encodeClaudeProjectDir and
  *  writer.py:_encode_claude_project_dir — replace each `:`, `/`, `\` with `-`. */
 function encodeClaudeProjectDir(absPath: string): string {
   let out = '';
