@@ -1,0 +1,111 @@
+src/lib/transcript-walk.ts
+  s_303d0d7286eb57::t_171c4d331ddaa5 59
+  s_303d0d7286eb57::t_c5e2b492691b51 41
+  s_303d0d7286eb57::t_1809177b41e748 104
+  s_303d0d7286eb57::t_19759ed746a8af 262-275
+  s_303d0d7286eb57::t_f4d096132d0f46 386
+  s_303d0d7286eb57::t_1ea2f7a3112ea4 72
+  s_303d0d7286eb57::t_76de7f5027c609 1-34
+src/lib/telemetry-outbox.ts
+  s_303d0d7286eb57::t_b6cfe1f7da3775 29-42
+  s_303d0d7286eb57::t_8e80c0c49c44c7 153
+tests/path-privacy.test.ts
+  s_303d0d7286eb57::t_b38ca1e9571d14 18-19
+  s_303d0d7286eb57::t_345b85c9b73c0c 105
+  s_303d0d7286eb57::t_61b5a7b0194b6f 55
+src/lib/output-scrubber.ts
+  s_303d0d7286eb57::t_53b6af6e6ea38c 17-18
+src/lib/telemetry-upload.ts
+  s_303d0d7286eb57::t_1b7a695c80687f 376
+  s_303d0d7286eb57::t_b0bda4a751642b 463
+  s_303d0d7286eb57::t_74b64a42c6b133 148
+  s_303d0d7286eb57::t_36a023582637f4 4
+  s_303d0d7286eb57::t_587cbafea5b267 72-81
+  s_303d0d7286eb57::t_7e70827f3bb0f8 212
+src/lib/ids.ts
+  s_303d0d7286eb57::t_226d57c0a8a9c3 36-46
+tests/stats-run-exit-ship.test.ts
+  s_303d0d7286eb57::t_a1af1d7b4e3f7c 202-212
+src/hooks/analytics-relay.ts
+  s_303d0d7286eb57::t_33b45bebcb92ef 1260
+tests/packed-artifact.test.ts
+  s_303d0d7286eb57::t_e5a30619708433 4-8,16-17,23-48
+  s_303d0d7286eb57::t_c3238d3cf3cbb8 87-100
+  s_303d0d7286eb57::t_a59be0a78e0c7b 157-183
+  s_303d0d7286eb57::t_af1e7e0f3ea737 227-230,232-234
+  s_303d0d7286eb57::t_4f728c09683b69 215
+package.json
+  s_303d0d7286eb57::t_18134e2088d49a 31-33
+src/lib/stats-backfill.ts
+  s_303d0d7286eb57::t_e1bfc1c0823a93 69-75
+  s_2acdbfc989508f::t_233f2d74da32cc 37,81
+tests/fixtures/stats-relay.pre-refactor.ts
+  s_303d0d7286eb57::t_f12d79eac144ae 27-29
+  s_2acdbfc989508f::t_2a81c3ecc62b44 53
+tests/telemetry-outbox.test.ts
+  s_303d0d7286eb57::t_9365934754fbd2 22
+tests/sg4-production-repro.test.ts
+  s_303d0d7286eb57::t_b69eb30122bf32 40-42
+  s_303d0d7286eb57::t_5c887a95340ac1 60
+tests/privacy-filter.test.ts
+  s_303d0d7286eb57::t_0c7becc540f667 120,304,322,343,448,727
+  s_303d0d7286eb57::t_a062b607a720c7 1-4,6-17,19-20,65
+src/cli.ts
+  s_303d0d7286eb57::t_bc8c37557a5766 559
+tests/telemetry-tail.test.ts
+  s_303d0d7286eb57::t_e383753163790f 53
+src/commands/telemetry-daemon.ts
+  s_303d0d7286eb57::t_11766c2f5ee16d 144
+  s_303d0d7286eb57::t_a8d763324f3b67 23
+src/lib/step-transcripts.ts
+  s_303d0d7286eb57::t_2d7d39a92848d9 17-26
+  s_2acdbfc989508f::t_baabad3af62d40 36
+src/commands/logs.ts
+  s_303d0d7286eb57::t_5cfe568a2ce942 292
+  s_303d0d7286eb57::t_971fe29c3d2673 293
+  s_2acdbfc989508f::t_c00fb18fb91459 29,367
+bun.lock
+  s_303d0d7286eb57::t_2f2207554d7c16 1-23
+src/hooks/stats-relay.ts
+  s_303d0d7286eb57::t_24ac21a0ac5a74 20
+src/lib/event.ts
+  s_303d0d7286eb57::t_b95690840feecb 406
+src/lib/stats.ts
+  s_303d0d7286eb57::t_795ec9c836af74 18
+tests/logs-chat.test.ts
+  s_303d0d7286eb57::t_7e1b6b078d434f 21
+tests/next-stats-run-init-kick.test.ts
+  s_303d0d7286eb57::t_dc551625895855 15
+tests/stats-backfill-verb.test.ts
+  s_303d0d7286eb57::t_9b3bb29553f6c6 13
+tests/stats-backfill.test.ts
+  s_303d0d7286eb57::t_1057e01fc41339 17
+tests/step-transcripts.test.ts
+  s_303d0d7286eb57::t_97af10addbc4fa 10
+tests/stream-json.test.ts
+  s_303d0d7286eb57::t_a3aed258cc6853 30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "7901b040800fcfdf668012db35efcd1e912a10ae",
+  "prompts": {},
+  "sessions": {
+    "s_2acdbfc989508f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-aa7e96526b8e1d783",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_303d0d7286eb57": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ccf91804-9560-4674-84cf-ff47468a24e8",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
