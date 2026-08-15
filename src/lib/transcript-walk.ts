@@ -23,10 +23,16 @@
 // records that trap; this paragraph is the guard against re-reading the same
 // sentence the same wrong way.
 //
-// COVERAGE: the fold's behaviour is pinned by tests/step-transcripts.test.ts,
-// tests/stats-backfill.test.ts, tests/stream-json.test.ts and
-// tests/logs-chat.test.ts. Those are the only cross-check there is now that
-// the pre/post comparison against pipeline-ui's own suite is gone.
+// COVERAGE: the fold reaches its callers through lib/step-transcripts.ts and
+// lib/stats-backfill.ts, and its behaviour is pinned by six suites —
+// tests/step-transcripts.test.ts, tests/stats-backfill.test.ts,
+// tests/stats-backfill-verb.test.ts, tests/stats-worktree-anchor.test.ts,
+// tests/stream-json.test.ts, and tests/hook-stats-relay.test.ts (through the
+// frozen tests/fixtures/stats-relay.pre-refactor.ts). tests/logs-chat.test.ts
+// additionally covers encodeClaudeProjectDir. Those are the only cross-check
+// there is now that the pre/post comparison against the deleted app's own
+// suite is gone. (ROADMAP B.9 says "four suites"; that count was taken at `p3`
+// and the set has since grown — counted again in `k2`.)
 //
 // SCOPE: only the functions lib/step-transcripts.ts and lib/stats-backfill.ts
 // actually consume were carried over, not the whole of the original files.

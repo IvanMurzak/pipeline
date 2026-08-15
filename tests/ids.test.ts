@@ -341,32 +341,54 @@ describe('dependency and runtime-branch constraints', () => {
     expect(code).not.toContain('typeof Bun');
   });
 
-  test('installing the CLI package still pulls NOTHING down', () => {
-    // WHY THIS ASSERTION CHANGED SHAPE (execution-modes c3).
+  test('installing the CLI package pulls down only the reviewed dependency set', () => {
+    // WHY THIS ASSERTION CHANGED SHAPE, TWICE.
     //
-    // It used to require all three dependency fields to be empty. The
-    // `standalone` executor (`src/lib/executors/sdk.ts`) needs
+    // (1) execution-modes `c3`. It used to require all three dependency fields
+    // to be empty. The `standalone` executor (`src/lib/executors/sdk.ts`) needs
     // `@anthropic-ai/claude-agent-sdk`, which is not a small thing to hand
     // every user: measured at 0.3.228 it resolves to ~101 packages and ~315 MB,
     // because it declares three REQUIRED peers of its own and a per-platform
     // optional dependency that is the Claude Code binary (283 MB on
-    // win32-x64).
+    // win32-x64). It became an OPTIONAL PEER so it is never auto-installed.
     //
-    // So the GUARANTEE this test exists to protect — a plain `bun install` of
-    // this package downloads nothing, and there is no install step — is now
-    // kept by a different mechanism, and the assertion pins the mechanism
-    // rather than the old shape:
+    // (2) plugin-thin `k2`. "Zero dependencies" was never the goal in itself —
+    // it was forced. The plugin's skills invoked this CLI straight out of the
+    // plugin's cached git checkout, a tree with no `package.json` and no
+    // install step, so ANY external import reachable from `cli.ts` threw at
+    // import time for every plugin user. That is why the privacy filter and
+    // the transcript walk travelled as vendored copies. `p9` deleted that
+    // checkout path — the CLI is now reached as an installed binary — and `k2`
+    // replaced the vendored privacy filter with the real
+    // `@baizor/pipeline-protocol`, which is the canonical copy of that filter
+    // and the thing the runner and the control plane already agree on.
     //
-    //   - `dependencies` must still be empty; those are always installed.
-    //   - `optionalDependencies` must ALSO still be empty. This is the trap:
+    // SO THIS TEST NO LONGER PINS "EMPTY". It pins an ALLOWLIST, which is the
+    // same guard with the same teeth: a SECOND plain dependency, or a swap of
+    // this one, still turns it red and still has to be argued in review. What
+    // it protects is unchanged in substance — that installing this CLI stays
+    // cheap and that nothing heavy sneaks in through a field that looks
+    // optional but is not:
+    //
+    //   - `dependencies` must equal EXPECTED_DEPENDENCIES exactly. Those are
+    //     always installed, for everyone. Today that is one small, pure
+    //     package (it brings only `zod`): `npm i` of the packed tarball
+    //     resolves 3 packages total, against ~101 for the SDK.
+    //   - each one must be EXACT-PINNED, no range. The protocol package ships
+    //     the privacy filter — a trust boundary — so a range would let a
+    //     future republish change what the filter does underneath a build
+    //     nobody re-reviewed. `cloud/apps/api` and `pipeline-runner` pin it
+    //     exact for the same reason.
+    //   - `optionalDependencies` must STILL be empty. This is the trap:
     //     "optional" there means "tolerate an install FAILURE", not "skip", so
     //     an entry would cost the full download while looking like an opt-out.
     //   - `peerDependencies` may name a package ONLY if it is marked optional
     //     in `peerDependenciesMeta`. That is the one form neither npm nor bun
     //     auto-installs, which is what keeps `standalone` genuinely opt-in.
     //
-    // Loosening any of the three re-imposes the install this package has never
-    // had. Adding a plain dependency is not a lint failure to silence.
+    // Widening the allowlist is not a lint failure to silence.
+    const EXPECTED_DEPENDENCIES = ['@baizor/pipeline-protocol'];
+
     const pkg = JSON.parse(readFileSync(join(CLI_ROOT, 'package.json'), 'utf-8')) as {
       dependencies?: Record<string, string>;
       peerDependencies?: Record<string, string>;
@@ -374,8 +396,15 @@ describe('dependency and runtime-branch constraints', () => {
       peerDependenciesMeta?: Record<string, { optional?: boolean }>;
     };
 
-    // Auto-installed, both of them — these stay empty.
-    expect(Object.keys(pkg.dependencies ?? {})).toEqual([]);
+    const deps = pkg.dependencies ?? {};
+    expect(Object.keys(deps).sort()).toEqual([...EXPECTED_DEPENDENCIES].sort());
+
+    // Exact pins only — a bare `x.y.z`, never `^`, `~`, `*`, a range or a tag.
+    for (const [name, range] of Object.entries(deps)) {
+      expect([name, range]).toEqual([name, expect.stringMatching(/^\d+\.\d+\.\d+$/)]);
+    }
+
+    // Still auto-installed, and still must be empty.
     expect(Object.keys(pkg.optionalDependencies ?? {})).toEqual([]);
 
     // Every declared peer must be explicitly optional, or it is auto-installed
