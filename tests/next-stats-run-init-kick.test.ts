@@ -12,7 +12,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { encodeClaudeProjectDir } from '../src/lib/vendor/transcript-walk';
+import { encodeClaudeProjectDir } from '../src/lib/transcript-walk';
 
 const CLI = join(import.meta.dir, '..', 'src', 'cli.ts');
 

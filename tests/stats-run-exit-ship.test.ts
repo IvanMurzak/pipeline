@@ -199,10 +199,17 @@ async function shipAndReadWire(root: string): Promise<WireEvent[]> {
 /**
  * The base-envelope gate the control plane actually applies, transcribed from
  * `@baizor/pipeline-protocol` `src/events/envelope.ts` (`eventEnvelopeBaseShape`
- * at :49, `AnyEventEnvelope` at :96). This package deliberately has NO
- * dependencies — it is executed straight out of a git checkout with no install
- * step (`01` §5) — so the schema is transcribed here rather than imported,
- * exactly as `lib/vendor/privacy.ts` is vendored rather than imported.
+ * at :49, `AnyEventEnvelope` at :96). The schema is TRANSCRIBED here rather
+ * than imported. The original reason for that is now void: it was that this
+ * package deliberately had NO dependencies, being executed straight out of a
+ * git checkout with no install step (`01` §5) — the same reason the privacy
+ * filter was vendored. plugin-thin `p9` deleted that checkout path and `k2`
+ * made `@baizor/pipeline-protocol` a real dependency, so this transcription
+ * COULD now become a real import of `AnyEventEnvelope`. It deliberately was
+ * not changed in `k2`, whose swap was import-path-only for a byte-identical
+ * file; converting a hand-transcribed gate into an imported one changes what
+ * this test asserts and wants its own review. Until then, the transcription
+ * below must be kept in step with the package by hand.
  *
  * `ingest.ts:523-524` does `AnyEventEnvelope.safeParse(payload)` and
  * `continue`s on failure, so ANY violation below means the record derives

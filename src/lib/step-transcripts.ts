@@ -14,17 +14,16 @@
 // file's `previous_session_ids` so the fold covers every execution, not just
 // the last.
 //
-// Uses the SAME validated fold the dashboard's FAIL tile and stats relay run
-// on (lib/vendor/transcript-walk.ts — each walks the session file + its
-// in-window subagents), but via a VENDORED copy (lib/vendor/transcript-walk.ts)
-// rather than a relative import into the sibling pipeline-ui app: this module
-// is reachable from `pipeline drive`, which ships standalone as the published
-// npm package @baizor/pipeline — a package that contains only apps/pipeline-cli,
-// so an import reaching out to `../../../pipeline-ui/*` resolves in this
-// monorepo checkout but 404s (crashing the whole CLI at import time) for every
-// npm-installed user. See lib/vendor/transcript-walk.ts's header for the full
-// lockstep note. Best-effort like all stats code: every entry point swallows
-// failures and returns what it could read.
+// Uses the SAME validated fold the stats relay runs on — `lib/transcript-walk.ts`,
+// which walks the session file plus its in-window subagents. That module is
+// ordinary in-package source and the SOLE implementation of the fold; it was a
+// vendored copy of a sibling app's code until that app was deleted, and
+// plugin-thin `k2` promoted it. The reason it is in-package has not changed:
+// this module is reachable from `pipeline drive`, which ships as the published
+// npm package @baizor/pipeline, so an import reaching outside the package root
+// resolves in this checkout but 404s — crashing the whole CLI at import time —
+// for every npm-installed user. Best-effort like all stats code: every entry
+// point swallows failures and returns what it could read.
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -34,7 +33,7 @@ import {
   foldRunStatsFromTranscript,
   claudeProjectsDir,
   encodeClaudeProjectDir,
-} from './vendor/transcript-walk';
+} from './transcript-walk';
 import type { RunFailureDetail } from './stats';
 import type { StepQuestion } from './step-schema';
 

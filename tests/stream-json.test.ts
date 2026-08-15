@@ -27,7 +27,7 @@ import {
 } from '../src/lib/stream-json';
 import { addUsage, emptyUsage } from '../src/lib/envelope';
 import { foldStepSessionTranscripts, readStepSessionRefs } from '../src/lib/step-transcripts';
-import { encodeClaudeProjectDir } from '../src/lib/vendor/transcript-walk';
+import { encodeClaudeProjectDir } from '../src/lib/transcript-walk';
 
 const line = (o: unknown): string => JSON.stringify(o) + '\n';
 

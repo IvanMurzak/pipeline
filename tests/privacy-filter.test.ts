@@ -1,18 +1,23 @@
-// Tests for the VENDORED privacy filter (src/lib/vendor/privacy.ts) — see
-// that file's header for what it is and why it exists (ux-v2 interim: the
-// CLI ships with zero dependencies and no install step reachable from a
-// plugin skill, so the filter travels as a commented copy of
-// pipeline-runner's shipper/privacy.ts rather than an import).
+// Tests for the privacy filter this package imports from
+// `@baizor/pipeline-protocol` — the canonical copy of the agent-side trust
+// boundary. This suite runs against the PUBLISHED package, so it is also the
+// check that the dependency actually delivers the filter this CLI expects.
 //
-// This is THE privacy contract for anything that later ships journal events
-// or stats records off this machine: nothing in this package currently CALLS
-// this filter (it is vendored, not wired in — see the source header), but
-// the filter itself must already be trustworthy before any caller is added.
+// It was, until plugin-thin `k2`, a test of a VENDORED file
+// (`src/lib/vendor/privacy.ts`): the CLI had zero dependencies and was invoked
+// out of the plugin's cached git checkout, which had no install step, so the
+// filter travelled as a commented copy of pipeline-runner's
+// shipper/privacy.ts rather than an import. `p9` deleted that checkout path
+// and `k2` swapped the copy for the real dependency. The two were
+// byte-identical at swap time, which is why this suite's expectations did not
+// have to move with it.
+//
+// This is THE privacy contract for anything that ships journal events or stats
+// records off this machine: `lib/telemetry-outbox.ts` filters before anything
+// touches disk and `lib/telemetry-upload.ts` filters again at the wire.
 // Deliberately self-contained (no cross-repo import of pipeline-runner's own
-// tests/_shipper-helpers.ts — the whole point of vendoring is that this
-// package cannot reach outside itself at runtime, and its tests shouldn't
-// either) — mirrors the SHAPE of pipeline-runner's tests/shipper-privacy.test.ts
-// without depending on it.
+// tests/_shipper-helpers.ts) — mirrors the SHAPE of pipeline-runner's
+// tests/shipper-privacy.test.ts without depending on it.
 //
 // ── WHAT ux-v2 `b23` CHANGED HERE, AND WHY ─────────────────────────────────
 //
@@ -57,7 +62,7 @@ import {
   stepShapedAllowlistViolations,
   stripStatsFailureExcerpts,
   SUMMARY_MAX_CHARS,
-} from '../src/lib/vendor/privacy';
+} from '@baizor/pipeline-protocol';
 
 /** A real CLI-minted step identity (`b4`): UUIDv7, version nibble `7`. */
 const STEP_UUID = '019fded9-3a7c-7c31-9f0e-2b5a1d4e8c60';
@@ -112,7 +117,7 @@ const SECRETS = {
   keepFieldPathOffRoot: 'C:/Users/ivan/Documents/another-client/hand-off.md',
 } as const;
 
-describe('vendored privacy filter — metadata tier is the trust boundary', () => {
+describe('privacy filter — metadata tier is the trust boundary', () => {
   test('a record stuffed with prompt-like text, absolute paths, tool arguments and error excerpts carries NONE of them at metadata tier', () => {
     const events: Record<string, unknown>[] = [
       // Prompt-like text: the needs-input question (text/context/options).
@@ -296,7 +301,7 @@ describe('vendored privacy filter — metadata tier is the trust boundary', () =
   });
 });
 
-describe('vendored privacy filter — tier ordering', () => {
+describe('privacy filter — tier ordering', () => {
   test('events/full pass the event verbatim (including content); metadata is a strict subset', () => {
     const event = journalEvent('awaiting_input', 'r1', {
       run_id: 'r1',
@@ -314,7 +319,7 @@ describe('vendored privacy filter — tier ordering', () => {
   });
 });
 
-describe('vendored privacy filter — tier resolution (fail-closed)', () => {
+describe('privacy filter — tier resolution (fail-closed)', () => {
   test('defaults to metadata', () => {
     expect(resolvePrivacyTier(undefined, {})).toEqual({ tier: 'metadata', warning: null });
     expect(DEFAULT_PRIVACY_TIER).toBe('metadata');
@@ -335,7 +340,7 @@ describe('vendored privacy filter — tier resolution (fail-closed)', () => {
   });
 });
 
-describe('vendored privacy filter — v5 step-key rename', () => {
+describe('privacy filter — v5 step-key rename', () => {
   // `step_name` (v5) replaced `step_id` (v4) as the iteration events' step
   // identity. Both must survive the metadata tier: step identity is metadata
   // the product's per-step dashboards are built on. Allowlisting only the new
@@ -440,7 +445,7 @@ function sg4Envelope(type: string, data: Record<string, unknown>): Record<string
   };
 }
 
-describe('vendored privacy filter — SG4: an absolute path never survives, whatever field carries it', () => {
+describe('privacy filter — SG4: an absolute path never survives, whatever field carries it', () => {
   test('EVERY `keep`-classified path field is scrubbed — not just the two i1 saw', () => {
     // The full set of fields DATA_ALLOWLISTS maps to `keep` and whose value is
     // a path. Enumerated from the allowlist tables, not from the defect report:
@@ -719,7 +724,7 @@ describe('vendored privacy filter — SG4: an absolute path never survives, what
 // The section above is where this SHOULD have been caught: it asserted the two
 // NAME fields survive and never asked about the identity.
 
-describe('vendored privacy filter — the step-identity rule (b24)', () => {
+describe('privacy filter — the step-identity rule (b24)', () => {
   test('THE SWEEP: no step-shaped allowlist is missing step identity', () => {
     // Computed over the LIVE tables, so a new step-shaped allowlist that
     // forgets the identity fails here instead of stripping it in production.

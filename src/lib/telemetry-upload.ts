@@ -1,7 +1,7 @@
 // telemetry-upload.ts — the flush half of the telemetry subsystem (ux-v2 `b10`).
 //
 // WHAT THIS IS. `b9` (`telemetry-outbox.ts`) tails the project journal, filters
-// every payload through the vendored privacy allowlist, tags each record with
+// every payload through the privacy allowlist, tags each record with
 // the org it was queued under, and appends it to a bounded on-disk queue. This
 // module is the other half: it takes batches OFF that queue, refuses anything
 // that does not belong to the current org, filters again at the wire, and POSTs
@@ -69,13 +69,16 @@
 // ── THE WIRE FILTER, AND WHY IT RUNS A SECOND TIME ──────────────────────────
 //
 // `b9` already filtered every payload before it touched disk. This module
-// filters AGAIN, immediately before serialization, with the VENDORED copy
-// (`vendor/privacy.ts`) — byte-identical to the runner source and guarded in
-// CI by `a1`'s drift check. Not `@baizor/pipeline-protocol`: this package is
-// invoked straight out of the plugin's cached git checkout, which has no
-// `package.json` and no install step, so any external import reachable from
-// `cli.ts` throws at import time for every plugin user (`01` §5). `b9` reached
-// the same conclusion for the same reason.
+// filters AGAIN, immediately before serialization, with the canonical filter
+// from `@baizor/pipeline-protocol` — an ordinary dependency since plugin-thin
+// `k2`. It was a VENDORED copy (`vendor/privacy.ts`) for as long as this
+// package was invoked straight out of the plugin's cached git checkout, which
+// had no `package.json` and no install step, so any external import reachable
+// from `cli.ts` threw at import time for every plugin user (`01` §5). `p9`
+// deleted that checkout path, so the vendored copy became a real import; it
+// was byte-identical to the protocol copy at swap time, so behaviour is
+// unchanged. The protocol copy is still guarded against the runner source by
+// the parent monorepo's drift check (`a1`).
 //
 // The second application is not belt-and-braces theatre. `outbox.jsonl` is a
 // plain file inside the user's repository: it can be hand-edited, restored from
@@ -142,7 +145,7 @@ import {
   fingerprintString,
   stripStatsFailureExcerpts,
   type PrivacyTier,
-} from './vendor/privacy';
+} from '@baizor/pipeline-protocol';
 // c2 — see lib/output-scrubber.ts; the uploader persists its own state and
 // error text, both of which pass through third-party code.
 import { scrub } from './output-scrubber';
@@ -206,7 +209,7 @@ export const KEEP_NOT_QUARANTINE_STATUSES: ReadonlySet<number> = new Set([401, 4
 export const UPLOAD_STATE_SCHEMA = 1;
 const UPLOAD_STATE_FILE = 'upload.json';
 
-/** A well-formed fingerprint produced by the vendored filter. */
+/** A well-formed fingerprint produced by the privacy filter. */
 const FINGERPRINT_RE = /^fp:[0-9a-f]{16}$/;
 
 /** The synthetic event type the control plane derives stats records from
@@ -370,7 +373,7 @@ export interface TelemetryUploaderOptions {
 // ---------------------------------------------------------------------------
 
 /**
- * Apply the vendored allowlist to a payload that is ABOUT to be serialized,
+ * Apply the privacy allowlist to a payload that is ABOUT to be serialized,
  * without double-fingerprinting.
  *
  * See this module's header for why it runs a second time. The restoration rule
@@ -457,7 +460,7 @@ function undoDoubleFingerprint(before: unknown, after: unknown, salt: string): u
  * reintroduce the omission by accident.
  *
  * It is not an SG4 leak. `project_root` is a `fingerprint`-rule field in the
- * ENVELOPE_ALLOWLIST (`vendor/privacy.ts`), so at the DEFAULT `metadata` tier
+ * ENVELOPE_ALLOWLIST (`@baizor/pipeline-protocol`), so at the DEFAULT `metadata` tier
  * `filterForWire` (called on the result of this function) turns it into
  * `fp:<16 hex>` — the same fingerprint the run's own `iteration.*` /
  * `tool.called` / `turn.usage` events already carry, which is what restores

@@ -34,7 +34,7 @@
 //   - everything else (`runner === 'manager'`, or unset/legacy) → locate the
 //     manager transcript by run_id (`findTranscriptByRunId`) and fold it +
 //     its in-window subagents (`foldRunStatsFromTranscript`,
-//     lib/vendor/transcript-walk.ts) — the exact walk the pre-refactor
+//     lib/transcript-walk.ts) — the exact walk the pre-refactor
 //     stats-relay hook used inline.
 //   - `transcriptHint` + `hintMode:'always'` overrides BOTH branches: every
 //     in-window tokens-null record is folded against the hint, regardless of
@@ -66,18 +66,19 @@ import {
 import { loadUsageTotals } from './envelope';
 import { resolveProjectRoot } from './event';
 import { readStepSessionRefs, foldStepSessionTranscripts } from './step-transcripts';
-// VENDORED walkers, never the sibling app: apps/pipeline-cli publishes
-// standalone to npm and the tarball contained no sibling app, so a
-// `../../../pipeline-ui/…` import resolves in this checkout but crashes at
-// import time for every npm-installed user (the shipped 0.2.0 regression that
-// created lib/vendor/transcript-walk.ts in the first place). Keep the vendor
-// file in lockstep with its source per that file's header.
+// In-package walkers, never a sibling app: this CLI publishes standalone to
+// npm and the tarball contains only this package, so a `../../../pipeline-ui/…`
+// import resolved in this checkout but crashed at import time for every
+// npm-installed user (the shipped 0.2.0 regression that created
+// lib/transcript-walk.ts in the first place). That file is now ordinary source
+// and the only implementation of these walkers — there is no upstream left to
+// keep it in lockstep with; see its header.
 import {
   RUN_FAILURES_COLLECT_MAX,
   collectRunToolFailures,
   foldRunStatsFromTranscript,
   findTranscriptByRunId,
-} from './vendor/transcript-walk';
+} from './transcript-walk';
 
 /** D10: default reconciliation window — how far back a record's `ended_at`
  *  may be and still be considered for backfill. The relay keeps its own

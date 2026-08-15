@@ -50,7 +50,7 @@ function bound(root: string, org = 'acme'): void {
 /** Shape mirrors telemetry-daemon.test.ts's own `journalEvent()` — the
  *  minimum a real journal line needs to survive `drainJournal`'s parse and
  *  privacy filter and be enqueued under a real `run_id`. `project_root` is a
- *  `fingerprint`-rule envelope field (`vendor/privacy.ts`'s
+ *  `fingerprint`-rule envelope field (`@baizor/pipeline-protocol`'s
  *  `ENVELOPE_ALLOWLIST`), which is what makes it the right probe for salt
  *  wiring. */
 function journalEvent(runId: string, type = 'tool.called'): Record<string, unknown> {

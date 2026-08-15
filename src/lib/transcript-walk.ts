@@ -1,41 +1,44 @@
-// VENDORED from apps/pipeline-ui/{transcript-stats.ts,transcripts.ts,lib.ts}.
+// The transcript walk: fold per-run analytics out of a Claude Code session
+// transcript, locate a run's transcript, and collect its tool failures.
 //
-// Source of truth: apps/pipeline-ui/transcript-stats.ts (foldRunStatsFromTranscript,
-// collectRunToolFailures + their private helpers), apps/pipeline-ui/transcripts.ts
-// (claudeProjectsDir, encodeClaudeProjectDir), apps/pipeline-ui/lib.ts
-// (emptyToolTokenCounters, isAgentSpawnTool, toEpochOrNull, ToolTokenCounters).
+// THIS IS ORDINARY SOURCE, AND IT IS THE ONLY IMPLEMENTATION. There is no
+// upstream, no lockstep obligation, and nothing to sync against. Edit it here.
 //
-// WHY a vendored copy instead of a relative import: apps/pipeline-cli is
-// published standalone to npm as @baizor/pipeline (bin points directly at
-// `src/cli.ts`, no bundling), and the published tarball contains ONLY
-// apps/pipeline-cli — apps/pipeline-ui is a sibling app that never ships.
-// A relative import reaching out of the package root (`../../../pipeline-ui/…`)
-// resolves fine in this monorepo checkout but crashes at import time for every
-// npm-installed user the moment `pipeline drive` (which pulls in
-// lib/step-transcripts.ts) is invoked. This is the SAME constraint that
-// already forced hooks/*.ts and lib/event.ts to keep their own byte-identical
-// copy of encodeClaudeProjectDir (see lib/event.ts's "Mirror of
-// apps/pipeline-ui/transcripts.ts" comment) — hooks and the published CLI
-// can't import a sibling app at runtime, so the function travels as a
-// deliberate, commented copy instead.
+// PROVENANCE: originally lifted from apps/pipeline-ui/{transcript-stats.ts,
+// transcripts.ts,lib.ts}, since deleted (plugin-thin `p3` removed that app).
+// It lived under `src/lib/vendor/` for as long as that upstream existed —
+// `vendor/` meaning "do not edit, sync upstream". Both halves of that
+// arrangement are now void: the upstream is gone, so this file became the
+// sole definition of `foldRunStatsFromTranscript` and `collectRunToolFailures`,
+// and plugin-thin `k2` promoted it out of `vendor/` to say so. (Same shape as
+// commands/fix.ts's "ported from apps/pipeline-ui/aifix.ts, since deleted"
+// note — history, not a pointer to follow.)
 //
-// LOCKSTEP: this file must stay behaviorally identical to the functions it
-// mirrors. If you change the fold/window/failure-collection logic in
-// pipeline-ui's transcript-stats.ts/transcripts.ts/lib.ts, port the same
-// change here (and vice versa) — apps/pipeline-cli/tests/step-transcripts.test.ts
-// and apps/pipeline-ui/tests/transcript-stats.test.ts both exercise this
-// contract from opposite sides of the copy.
+// ⚠ DO NOT DELETE THIS FILE in the belief that it duplicates something. The
+// wording that retired the other vendored file — plugin-thin phase 6, "delete
+// the vendored copies in favour of real imports" — does NOT apply here, and
+// applying it literally deletes live code. `vendor/privacy.ts` had a real
+// upstream to become a dependency on (`@baizor/pipeline-protocol`, now a
+// declared dependency of this package). This file has none. ROADMAP B.9
+// records that trap; this paragraph is the guard against re-reading the same
+// sentence the same wrong way.
 //
-// Only the functions lib/step-transcripts.ts actually needs are vendored
-// (not the full source files) — see CLAUDE.md/docs for the full pipeline-ui
-// per-run analytics fold this is a subset of.
+// COVERAGE: the fold's behaviour is pinned by tests/step-transcripts.test.ts,
+// tests/stats-backfill.test.ts, tests/stream-json.test.ts and
+// tests/logs-chat.test.ts. Those are the only cross-check there is now that
+// the pre/post comparison against pipeline-ui's own suite is gone.
+//
+// SCOPE: only the functions lib/step-transcripts.ts and lib/stats-backfill.ts
+// actually consume were carried over, not the whole of the original files.
+// That is why the per-run analytics fold here is a subset of what the deleted
+// app computed — a deliberate narrowing, not an incomplete port.
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
 // ---------------------------------------------------------------------------
-// From apps/pipeline-ui/transcripts.ts
+// Originally from apps/pipeline-ui/transcripts.ts (deleted)
 // ---------------------------------------------------------------------------
 
 /** `~/.claude/projects` — where Claude Code keeps session transcripts. The
@@ -53,7 +56,7 @@ export function encodeClaudeProjectDir(absPath: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// From apps/pipeline-ui/lib.ts
+// Originally from apps/pipeline-ui/lib.ts (deleted)
 // ---------------------------------------------------------------------------
 
 /** The subagent-spawning tool names. */
@@ -66,7 +69,7 @@ function isAgentSpawnTool(name: unknown): boolean {
  *  nothing outside this file needs the shape by name, only step-transcripts.ts's
  *  5 actually-imported symbols (RUN_FAILURES_COLLECT_MAX, collectRunToolFailures,
  *  foldRunStatsFromTranscript, claudeProjectsDir, encodeClaudeProjectDir) are
- *  public here — keep it that way; this file vendors only what's consumed. */
+ *  public here — keep it that way; this file carries only what's consumed. */
 interface ToolTokenCounters {
   tools_called: number;
   tools_failed: number;
@@ -98,7 +101,7 @@ function toEpochOrNull(iso: string | null): number | null {
 }
 
 // ---------------------------------------------------------------------------
-// From apps/pipeline-ui/transcript-stats.ts
+// Originally from apps/pipeline-ui/transcript-stats.ts (deleted)
 // ---------------------------------------------------------------------------
 
 /** Small slack (ms) on the window so an entry written a beat before/after the
@@ -256,18 +259,20 @@ interface ToolFailure {
 const FAILURE_INPUT_EXCERPT_MAX = 400;
 const FAILURE_ERROR_EXCERPT_MAX = 1000;
 
-/** Hard per-run collection bound — mirrors pipeline-ui's RUN_FAILURES_COLLECT_MAX
- *  (the cap every per-file `collectFailuresFromFile` call below uses). */
+/** Hard per-run collection bound — the cap every per-file
+ *  `collectFailuresFromFile` call below uses. (Carried over unchanged from the
+ *  deleted app's RUN_FAILURES_COLLECT_MAX.) */
 export const RUN_FAILURES_COLLECT_MAX = 5000;
 
-/** Display-cap default for collectRunToolFailures's `cap` param — mirrors
- *  pipeline-ui's RUN_FAILURES_CAP exactly (do NOT default to
- *  RUN_FAILURES_COLLECT_MAX here: that constant bounds the internal collection
- *  walk, not the caller-facing result size, and the two must stay distinct to
- *  match the source of truth's behavior byte-for-byte). The current call site
- *  in step-transcripts.ts always passes an explicit cap, so this default is
- *  presently inert — but it's still a real behavioral bug if anyone ever
- *  calls this without one, so it must match the original. */
+/** Display-cap default for collectRunToolFailures's `cap` param. Do NOT
+ *  "simplify" this to RUN_FAILURES_COLLECT_MAX: that constant bounds the
+ *  internal collection walk, this one bounds the caller-facing result size,
+ *  and collapsing the two changes behaviour. They are deliberately distinct.
+ *  The current call site in step-transcripts.ts always passes an explicit cap,
+ *  so this default is presently inert — but it is still a real behavioural bug
+ *  if anyone ever calls this without one. (Carried over unchanged from the
+ *  deleted app's RUN_FAILURES_CAP; the value is now defined here and nowhere
+ *  else, so there is no other copy to reconcile it against.) */
 const RUN_FAILURES_CAP = 200;
 
 /** Flatten a tool_result / message content value to plain text. */
@@ -378,7 +383,7 @@ export function collectRunToolFailures(
 }
 
 // ---------------------------------------------------------------------------
-// From apps/pipeline-ui/transcript-stats.ts — run→transcript locator
+// Originally from apps/pipeline-ui/transcript-stats.ts (deleted) — run→transcript locator
 // ---------------------------------------------------------------------------
 
 /** Per-(file, run_id) occurrence-count memo. The negative-result path retries

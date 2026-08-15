@@ -37,9 +37,9 @@
 // the filter, and DELETED that module. Nothing about the machinery under test
 // changed — same outbox, same uploader, same production bytes — but the scrub is
 // now the FILTER'S OWN, which is why `SG4_PATH_RE` is imported from
-// `vendor/privacy` below and why the control block at the bottom was rewritten:
-// it used to reproduce the leak by calling the vendored filter directly, and
-// calling the vendored filter directly IS the fix now.
+// `@baizor/pipeline-protocol` below and why the control block at the bottom was
+// rewritten: it used to reproduce the leak by calling the filter directly, and
+// calling the filter directly IS the fix now.
 
 import { afterAll, describe, expect, test } from 'bun:test';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
@@ -57,7 +57,7 @@ import {
   type UploadRequest,
   type UploadTarget,
 } from '../src/lib/telemetry-upload';
-import { SG4_PATH_RE, filterEventForTier } from '../src/lib/vendor/privacy';
+import { SG4_PATH_RE, filterEventForTier } from '@baizor/pipeline-protocol';
 
 // ---------------------------------------------------------------------------
 // The production bytes

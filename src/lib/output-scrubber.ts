@@ -14,7 +14,8 @@
 //
 // ── WHY THIS IS THE ONLY DEFENCE ON THE TELEMETRY PATH ────────────────────
 //
-// `lib/vendor/privacy.ts` is a genuine positive allowlist, but it is BYPASSED
+// The privacy allowlist (`@baizor/pipeline-protocol`) is a genuine positive
+// allowlist, but it is BYPASSED
 // above the `metadata` tier, and the fields it does allow carry free text up
 // to 256 characters — `halt_reason` on `iteration.completed`, `pipeline.halted`
 // and `run.halted`, `department.failed.reason`. A key quoted inside a halt

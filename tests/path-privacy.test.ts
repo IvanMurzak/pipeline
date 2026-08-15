@@ -15,7 +15,8 @@
 // construction (`lib/plan.ts`). Nothing relativized anything; the "good"
 // production value was the raw `--start 01-prepare.md` argv token, not a
 // filtered one. Since `b23` the SHAPE of the value is the rule, and it lives in
-// `src/lib/vendor/privacy.ts` — read that file's header for the derivation.
+// `@baizor/pipeline-protocol` — read that package's `src/privacy/index.ts`
+// header for the derivation.
 //
 // ── WHY THIS FILE STILL EXISTS, AND WHAT CHANGED IN IT ──────────────────────
 //
@@ -51,7 +52,7 @@ import {
   filterStatsRecordMetadata,
   looksAbsolutePath,
   scrubPathString,
-} from '../src/lib/vendor/privacy';
+} from '@baizor/pipeline-protocol';
 
 const SALT = 'test-salt-b22';
 
@@ -101,7 +102,7 @@ function envelope(type: string, data: Record<string, unknown>, root = WIN_ROOT):
 
 describe('b22 §1 — the RULE: an absolute path never survives, whatever field carries it', () => {
   test('every `keep`-classified path field in the allowlist is scrubbed, not just the two i1 saw', () => {
-    // The full set of fields `vendor/privacy.ts` maps to `keep` and whose value
+    // The full set of fields the filter maps to `keep` and whose value
     // is a path. Enumerated from DATA_ALLOWLISTS, not from the defect report:
     // fixing only `iteration_path`/`next_iteration_path` would leave the rest.
     const cases: Array<[string, Record<string, unknown>]> = [

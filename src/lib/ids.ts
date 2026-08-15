@@ -33,12 +33,17 @@
 //     two mint points wearing one name. So there is exactly one code path, and
 //     every runtime takes it.
 //
-// ZERO DEPENDENCIES: `node:crypto` and nothing else. The plugin's skills invoke
-// this CLI straight out of the plugin's cached git checkout — a tree with no
-// root `package.json` and no install step (`skills/run/SKILL.md`) — so ANY
-// import of an external package reachable from `cli.ts` throws at import time
-// for every plugin user on that path. Same constraint that forced
-// `lib/vendor/privacy.ts` and `lib/vendor/transcript-walk.ts` to exist.
+// ZERO DEPENDENCIES IN THIS MODULE: `node:crypto` and nothing else. That is now
+// a local property of this file, not a whole-package constraint. It used to be
+// the latter: the plugin's skills invoked this CLI straight out of the plugin's
+// cached git checkout — a tree with no root `package.json` and no install step
+// — so ANY import of an external package reachable from `cli.ts` threw at
+// import time for every plugin user on that path. That is what forced
+// `lib/vendor/privacy.ts` and `lib/transcript-walk.ts` to be vendored copies.
+// plugin-thin `p9` deleted the no-install checkout path and `k2` gave this
+// package real dependencies (`@baizor/pipeline-protocol`), so the package-wide
+// ban is lifted. Keeping THIS module dependency-free is still deliberate — it
+// is imported on hot paths where parse-and-eval cost is paid per spawn.
 //
 // ── INTRA-MILLISECOND ORDERING: IN SCOPE ─────────────────────────────────────
 //

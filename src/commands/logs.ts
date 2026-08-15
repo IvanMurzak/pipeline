@@ -26,7 +26,7 @@ import { join, resolve, basename } from 'node:path';
 import { resolveProjectRoot } from '../lib/event';
 import { findRunsFiles, parseRunRecords, type RunRecord } from '../lib/stats';
 import { readStepSessionRefs, listStepSessionTranscriptFiles } from '../lib/step-transcripts';
-import { findTranscriptByRunId } from '../lib/vendor/transcript-walk';
+import { findTranscriptByRunId } from '../lib/transcript-walk';
 
 export type ColorMode = 'auto' | 'on' | 'off';
 
@@ -289,8 +289,8 @@ export function formatEvent(evt: unknown, color: boolean): string {
 // uploaded (asserted, not just intended, by tests/logs.test.ts).
 //
 // Reuses the existing walkers to LOCATE files (lib/step-transcripts.ts's
-// readStepSessionRefs/listStepSessionTranscriptFiles, the vendored
-// lib/vendor/transcript-walk.ts's findTranscriptByRunId/claudeProjectsDir/
+// readStepSessionRefs/listStepSessionTranscriptFiles, and
+// lib/transcript-walk.ts's findTranscriptByRunId/claudeProjectsDir/
 // encodeClaudeProjectDir) rather than re-deriving the `~/.claude/projects`
 // layout; only the CONTENT rendering below is new, since the walkers only
 // ever counted tokens/tools, never printed a message.
@@ -364,7 +364,7 @@ const CHAT_TOOL_RESULT_MAX = 1200;
 // run — unlike a headless step's pinned session, which belongs to exactly
 // one execution. Only the manager path needs this window; slack absorbs
 // clock skew / fs-timestamp granularity around the boundary, same idea as
-// (but not imported from) vendor/transcript-walk.ts's private WINDOW_SLACK_MS.
+// (but not imported from) transcript-walk.ts's private WINDOW_SLACK_MS.
 const CHAT_WINDOW_SLACK_MS = 2000;
 const CHAT_SKIP_TYPES = new Set(['attachment', 'file-history-snapshot', 'permission-mode', 'summary']);
 
