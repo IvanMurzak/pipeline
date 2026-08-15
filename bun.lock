@@ -5,7 +5,7 @@
     "": {
       "name": "@baizor/pipeline",
       "dependencies": {
-        "@baizor/pipeline-protocol": "0.7.0",
+        "@baizor/pipeline-protocol": "0.8.0",
       },
       "peerDependencies": {
         "@anthropic-ai/claude-agent-sdk": ">=0.3.228",
@@ -16,7 +16,7 @@
     },
   },
   "packages": {
-    "@baizor/pipeline-protocol": ["@baizor/pipeline-protocol@0.7.0", "", { "dependencies": { "zod": "^3.25.76" } }, "sha512-rrJiJh9BcLlI/MO6vS0/EhYjHzdRNQZLZEATaBFE0zgygvq44b8Zvo8dUy68cFF/oOaxS8PNuFFKQvabNq8HTw=="],
+    "@baizor/pipeline-protocol": ["@baizor/pipeline-protocol@0.8.0", "", { "dependencies": { "zod": "^3.25.76" } }, "sha512-+hwTJtQ4IrwS0FzzWbAVMgvfNo7/yyKSnp8vb12M9YOwj5Lel+DjijefD6lz1JOQ8e7rUJt3IKh61FCbhlcFJQ=="],
 
     "zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
   }

@@ -2,6 +2,7 @@
 
 import { test, expect } from 'bun:test';
 import { ENGINE_OUTCOMES, RECORD_OUTCOMES, STEP_RECORD_SCHEMA, stepRecordSchemaJson } from '../src/lib/step-schema';
+import * as ProtocolOutcomes from '@baizor/pipeline-protocol';
 
 test('stepRecordSchemaJson: WHITESPACE-FREE (travels as one whitespace-split template token)', () => {
   const json = stepRecordSchemaJson();
@@ -58,4 +59,11 @@ test('schema: output is OPTIONAL (records with and without it are both valid)', 
     }
   }
   expect(typeof withOutput.output).toBe('object');
+});
+
+test('drift: ENGINE_OUTCOMES and RECORD_OUTCOMES are imported from protocol (not redefined)', () => {
+  // Verify the outcomes are identical to the protocol's exports — proving
+  // step-schema imports them rather than value-duplicating them.
+  expect([...ENGINE_OUTCOMES]).toEqual([...ProtocolOutcomes.ENGINE_OUTCOMES]);
+  expect([...RECORD_OUTCOMES]).toEqual([...ProtocolOutcomes.RECORD_OUTCOMES]);
 });

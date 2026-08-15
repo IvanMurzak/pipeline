@@ -16,14 +16,10 @@
 // test asserts the invariant; never add a space to a property name, enum
 // value, or description inside this schema.
 
-/** Outcomes the `pipeline next` engine accepts on a step record. */
-export const ENGINE_OUTCOMES = ['completed', 'halted', 'blocked-delegating', 'depth-exhausted'] as const;
+import { ENGINE_OUTCOMES, RECORD_OUTCOMES } from '@baizor/pipeline-protocol';
 
-/** Everything a headless executor may report: the engine outcomes plus
- *  'needs-input' — intercepted by `pipeline drive` BEFORE the engine (the run
- *  parks awaiting an answer and the session is resumed with it; the engine
- *  never sees a needs-input record). */
-export const RECORD_OUTCOMES = [...ENGINE_OUTCOMES, 'needs-input'] as const;
+// Re-export the outcomes so existing imports from step-schema continue to work.
+export { ENGINE_OUTCOMES, RECORD_OUTCOMES };
 
 export const STEP_RECORD_SCHEMA = {
   type: 'object',
