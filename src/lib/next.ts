@@ -23,7 +23,7 @@ import { ENGINE_OUTCOMES } from './step-schema';
 import type { ScriptCreatorOutcome } from './improver-schema';
 import type { StepType } from './script-types';
 import { newId } from './ids';
-import { resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 
 export type RunMode = 'sequential' | 'graph' | 'parallel';
 
@@ -671,6 +671,24 @@ export interface NextOpts {
   /** Absolute path to the pipeline folder (`--root`). */
   pipelineRoot?: string;
   /**
+   * Absolute root the PLAN was computed from — the anchor for a RELATIVE path
+   * in `start` / a reported `next_iteration` (g1). Usually identical to
+   * {@link pipelineRoot}; on a worktree-scoped run it is the WORKTREE pipeline
+   * root, because that is the tree whose plan is being dispatched.
+   *
+   * Why it has to be threaded rather than assumed: `samePath` resolves a
+   * relative path against `process.cwd()`, and a dispatched runner's cwd is the
+   * CHECKOUT root while `--start` arrives pipeline-root-relative
+   * (`steps/<rel>`, pipeline-runner `jobs/workspace.ts`) — so a root-relative
+   * path could never equal an absolute plan path and EVERY dispatched run fell
+   * through to {@link synthesizeStep}. Invisible for an agent step (same
+   * filename stem, body still resolves); an approval-bypass for a gate, whose
+   * `type`/`gate_spec` the synthesis erases (07 §P0, D4-1/D4-3).
+   *
+   * Absent ⇒ only the exact/cwd comparison runs, i.e. the pre-g1 behavior.
+   */
+  planRoot?: string;
+  /**
    * Finalize opt-in resolved by the COMMAND (external only): true when a
    * `worktree-finalize.*` hook exists in the resolved hook dir OR `finalize: true`
    * frontmatter is set. Threaded in because hook-presence needs the project root
@@ -741,12 +759,126 @@ export function samePath(a: string, b: string): boolean {
 
 /** Resolve a PATH to a plan step.
  *
- *  Not an identity lookup — {@link stepByName} is. The only remaining caller is
- *  the v1 sequential hand-off, where a step reports its successor as a file
- *  path (`next_iteration`) and the engine has to work out which step that names
- *  before dispatching it BY NAME. */
-function findStepByPath(plan: Plan, path: string): PlanStep | undefined {
-  return plan.steps.find((s) => samePath(s.path, path));
+ *  Not an identity lookup — {@link stepByName} is. Its callers are the
+ *  deprecated `--start` path form and the v1 sequential hand-off, where a step
+ *  reports its successor as a file path (`next_iteration`) and the engine has
+ *  to work out which step that names before dispatching it BY NAME.
+ *
+ *  TWO comparisons, in order (g1):
+ *
+ *   1. `samePath` — an absolute candidate, or a relative one that happens to be
+ *      correct against `process.cwd()`. The only rule before g1.
+ *   2. the candidate anchored at {@link NextOpts.planRoot} — because a
+ *      pipeline-root-RELATIVE path (`steps/<rel>`, what a dispatched runner
+ *      passes) is not relative to the cwd it is compared under. Rule 1 could
+ *      never match one, so every dispatched run synthesized instead of
+ *      resolving; for a gate that is the D4-1 approval bypass.
+ *
+ *  Rule 2 is deliberately narrow: relative candidates only, an exact join, and
+ *  only when a plan root was threaded. It resolves paths that were already
+ *  MEANT to name a plan step — it never widens matching to stems or suffixes,
+ *  so a genuinely off-plan hand-off is unaffected and still synthesizes. */
+function findStepByPath(plan: Plan, path: string, planRoot?: string): PlanStep | undefined {
+  const direct = plan.steps.find((s) => samePath(s.path, path));
+  if (direct !== undefined) return direct;
+  if (planRoot === undefined || planRoot === '' || isAbsolute(path)) return undefined;
+  const anchored = join(planRoot, path);
+  return plan.steps.find((s) => samePath(s.path, anchored));
+}
+
+/**
+ * THE FAIL-CLOSED BACKSTOP (g1): the enumerated NON-AGENT step that
+ * synthesizing `path` would shadow — undefined when synthesis is safe.
+ *
+ * {@link synthesizeStep} hard-pins `type:'agent'` with every spec null, which
+ * is right for a genuine off-plan hand-off and catastrophic for an enumerated
+ * `gate`/`script`/`pipeline` step: it erases the step's identity, and the
+ * deterministic arms downstream (`commands/next.ts` gate/script dispatch) key
+ * on `type`, so an approval gate silently becomes a real agent session with no
+ * `approval` marker anywhere on the wire (07 §P0, prod run cad229a1…).
+ *
+ * The anchored lookup above is what makes the legitimate case RESOLVE. This is
+ * the backstop for everything else: any future route that reaches synthesis
+ * with a path naming an enumerated non-agent step halts the run loudly instead
+ * of executing it. It deliberately does NOT try to resolve anything — a shadow
+ * means the two are indistinguishable downstream, and guessing which was meant
+ * is never safer than stopping.
+ *
+ * Agent steps are NOT guarded: a synthetic agent step shadowing an enumerated
+ * agent step dispatches the same kind of work with the same id, which is the
+ * pre-existing (and harmless) v1 behavior — narrowing the backstop to the
+ * cases where identity loss changes what EXECUTES keeps it fail-closed without
+ * breaking hand-offs.
+ *
+ * TWO identities are checked, because a synthetic step claims both:
+ *
+ *   1. the `step_id` it would take — the filename stem. Under a v2 manifest a
+ *      gate's path is `steps/<name>.md`, so its stem IS its name and this rule
+ *      alone makes a manifest gate structurally unsynthesizable.
+ *   2. the BODY FILE it would claim to be — the path's basename. Rule 1 has a
+ *      hole without it: nothing in `manifest.ts` forbids `body:` on a gate, and
+ *      a single body makes `dispatchPath` return that FILE instead of the
+ *      synthetic `steps/<name>.md` — so the stem becomes the file's name and
+ *      stops matching the step's. A gate declared that way would have slipped
+ *      through rule 1 exactly as the original defect did.
+ *
+ * Rule 2 can in principle fire on a genuine off-plan hand-off whose basename
+ * collides with a non-agent step's body file. That is a deliberate trade: the
+ * outcome is a halt naming the collision (fixable with `--start <name>`), and
+ * the alternative outcome on the other side of the trade is an unapproved
+ * production deploy.
+ */
+function shadowedEnumeratedStep(plan: Plan, path: string): PlanStep | undefined {
+  const isGuarded = (s: PlanStep): boolean => s.type !== undefined && s.type !== 'agent';
+  const stem = fold(stemOf(path));
+  const named = plan.steps.find((s) => fold(s.step_id) === stem);
+  if (named !== undefined && isGuarded(named)) return named;
+  const base = fold(baseOf(path));
+  return plan.steps.find((s) => isGuarded(s) && fold(baseOf(s.path)) === base);
+}
+
+/** Case-fold on the platforms whose default filesystem is case-INSENSITIVE.
+ *
+ *  `samePath` folds on win32 only, which was enough while it was the only
+ *  comparison. It is not enough for the backstop: on macOS (APFS,
+ *  case-insensitive by default) `--start steps/APPROVE-BODY.md` misses
+ *  `samePath`, misses the anchored join, and — folding on win32 only — would
+ *  miss the stem and basename rules too, then synthesize an agent step whose
+ *  path resolves ON THAT FILESYSTEM to the gate's own body. Folding here
+ *  widens only the FAIL-CLOSED check, so the worst case is a loud halt on a
+ *  case-colliding off-plan hand-off, never a dispatch.
+ *
+ *  Both sides of every comparison are folded — including `step_id`, which is
+ *  why the backstop does its own name lookup instead of calling
+ *  {@link stepByName}, whose exact-match identity semantics stay unchanged. */
+function fold(value: string): string {
+  return process.platform === 'win32' || process.platform === 'darwin' ? value.toLowerCase() : value;
+}
+
+/** A path's final segment, separator-agnostic. Case folding is {@link fold}'s
+ *  job, applied by the caller so both sides are treated identically. */
+function baseOf(path: string): string {
+  return path.replace(/\\/g, '/').split('/').pop() ?? path;
+}
+
+/** The halt reason a shadowed dispatch produces — deliberately loud, and it
+ *  names the step, its real type and the path that failed to resolve, because
+ *  the fix is always either a correct `--start` or a `--start` by NAME. Mirrors
+ *  the missing-`gate_spec` halt in `commands/next.ts`. */
+function shadowHaltReason(shadowed: PlanStep, path: string): string {
+  return (
+    `refusing to execute '${path}' as an agent step: it resolves to no enumerated step, but its ` +
+    `identity '${shadowed.step_id}' is a \`type: ${shadowed.type}\` step in this pipeline. ` +
+    `Dispatching it would erase that step's type (an approval gate would run as an agent session, ` +
+    `unapproved) — halting instead. Pass \`--start ${shadowed.step_id}\` (the step NAME) to run it.`
+  );
+}
+
+/** The filename stem a path collapses to — the id rule {@link synthesizeStep}
+ *  and plan.ts both use. One definition so the backstop and the synthesis it
+ *  guards can never disagree about what identity a path claims. */
+function stemOf(path: string): string {
+  return path.replace(/\\/g, '/').split('/').pop()?.replace(/\.md$/i, '') ?? path;
 }
 
 /** The run mode for a plan: graph wins over parallel, parallel over sequential.
@@ -827,7 +959,14 @@ function resolveStart(
   const named = stepByName(plan, start);
   if (named) return named;
   if (!looksLikePath(start)) return undefined;
-  return findStepByPath(plan, start) ?? synthesizeStep(start, state, plan, opts);
+  const byPath = findStepByPath(plan, start, opts.planRoot);
+  if (byPath) return byPath;
+  // g1 backstop: never synthesize an agent step over an enumerated gate/script/
+  // pipeline step. Returning undefined halts every caller (selectStep's three
+  // call sites all fail closed); `noStepReason` turns it into the loud,
+  // specific reason.
+  if (shadowedEnumeratedStep(plan, start)) return undefined;
+  return synthesizeStep(start, state, plan, opts);
 }
 
 /** Whether a `--start` value is the deprecated path form rather than a step
@@ -840,9 +979,9 @@ function looksLikePath(value: string): boolean {
 /** The step a `--start` value resolved to ONLY via the deprecated path form —
  *  null when it named a step outright (or matched nothing). The command layer
  *  uses it to print the name the caller should be passing instead. */
-export function startResolvedByPath(plan: Plan, start: string | undefined): PlanStep | null {
+export function startResolvedByPath(plan: Plan, start: string | undefined, planRoot?: string): PlanStep | null {
   if (!start || stepByName(plan, start)) return null;
-  return findStepByPath(plan, start) ?? null;
+  return findStepByPath(plan, start, planRoot) ?? null;
 }
 
 /** The step the persisted cursor points at. Almost always a plan step; for a
@@ -853,7 +992,15 @@ function currentStep(plan: Plan, state: NextState, opts: NextOpts): PlanStep | u
   const named = state.current_step_id === null ? undefined : stepByName(plan, state.current_step_id);
   if (named) return named;
   const offPlan = state.current_off_plan_path;
-  return offPlan ? synthesizeStep(offPlan, state, plan, opts) : undefined;
+  if (!offPlan) return undefined;
+  // The persisted cursor is a second route to synthesis (a resume), so it gets
+  // the same two rules: resolve it against the plan root first — a state
+  // written before g1 can carry a root-relative path here — and refuse to
+  // synthesize over an enumerated non-agent step (g1 backstop).
+  const byPath = findStepByPath(plan, offPlan, opts.planRoot);
+  if (byPath) return byPath;
+  if (shadowedEnumeratedStep(plan, offPlan)) return undefined;
+  return synthesizeStep(offPlan, state, plan, opts);
 }
 
 /** Pin `--start` onto the cursor so a later onProvisionPhase dispatches it
@@ -974,8 +1121,15 @@ function onProvisionPhase(plan: Plan, state: NextState, record: NextRecord | nul
     // No steps to run after a clean provision (shouldn't happen — initRun only
     // provisions when plan.steps.length > 0). Fall through to terminal; teardown
     // will fire because worktree_provisioned is now true.
+    //
+    // Routed through noStepReason since g1 for the `--manual-hooks` route,
+    // where the caller re-passes `--start` on the post-provision call and the
+    // backstop can therefore fire HERE. On the in-process hook route it cannot:
+    // initRun now refuses an unresolvable `--start` before provisioning at all
+    // (see the g1 guard there), which is what keeps that route from silently
+    // falling through to plan.steps[0].
     state.status = 'halted';
-    state.halt_reason = 'external: provisioned but no iteration to run';
+    state.halt_reason = noStepReason(plan, state, opts, 'external: provisioned but no iteration to run');
     return retroOrTerminal(plan, state, opts);
   }
   return dispatchStep(plan, state, step);
@@ -1204,6 +1358,19 @@ function initRun(plan: Plan, opts: NextOpts): NextResult {
   // record lands (onProvisionPhase). No steps yet ⇒ a plan-error/no-files halt
   // below keeps worktree_provisioned=false so teardown is correctly skipped.
   if (isExternal(state) && plan.steps.length > 0) {
+    // g1: a `--start` that resolves to NOTHING must halt here, before any
+    // worktree is provisioned. `pinStart` leaves the cursor null when
+    // resolveStart refuses — a typo'd NAME, or the backstop firing — and
+    // onProvisionPhase would then fall through to `plan.steps[0]`, silently
+    // starting the run somewhere the operator did not ask for AND after
+    // provisioning a worktree for it. Halting before emitProvision keeps
+    // worktree_provisioned false, so no teardown is owed (same shape as the
+    // plan-error/no-files halt below).
+    if (opts.start !== undefined && resolveStart(plan, opts.start, state, opts) === undefined) {
+      state.status = 'halted';
+      state.halt_reason = noStepReason(plan, state, opts, 'no iteration files to run');
+      return retroOrTerminal(plan, state, opts);
+    }
     // Pin the start step NOW so onProvisionPhase dispatches it after the
     // provisioned record (the --start arrives only on this init call). Absent
     // --start, the cursor stays null and onProvisionPhase falls to steps[0].
@@ -1215,7 +1382,7 @@ function initRun(plan: Plan, opts: NextOpts): NextResult {
   const step = selectStep(plan, state, opts);
   if (!step) {
     state.status = 'halted';
-    state.halt_reason = noStepReason(plan, opts, 'no iteration files to run');
+    state.halt_reason = noStepReason(plan, state, opts, 'no iteration files to run');
     return retroOrTerminal(plan, state, opts);
   }
   return dispatchStep(plan, state, step);
@@ -1224,8 +1391,20 @@ function initRun(plan: Plan, opts: NextOpts): NextResult {
 /** Why nothing could be dispatched. A bad `--start` and an empty pipeline are
  *  different mistakes, and only one of them is fixed by editing the command —
  *  so the message names the steps that DO exist instead of reporting the
- *  pipeline as empty when it plainly is not. */
-function noStepReason(plan: Plan, opts: NextOpts, whenNoSteps: string): string {
+ *  pipeline as empty when it plainly is not.
+ *
+ *  A THIRD mistake since g1, and the loudest: the path DID name a step, an
+ *  enumerated non-agent one, but only by the identity a synthetic step would
+ *  have claimed. That is the fail-closed backstop firing, and reporting it as
+ *  "matches no step" would hide an approval bypass behind a typo message — so
+ *  it is checked first, on both routes into synthesis (`--start` and the
+ *  persisted off-plan cursor). */
+function noStepReason(plan: Plan, state: NextState, opts: NextOpts, whenNoSteps: string): string {
+  for (const candidate of [opts.start, state.current_off_plan_path]) {
+    if (!candidate) continue;
+    const shadowed = shadowedEnumeratedStep(plan, candidate);
+    if (shadowed) return shadowHaltReason(shadowed, candidate);
+  }
   if (!opts.start) return whenNoSteps;
   const names = plan.steps.map((s) => s.step_id);
   if (!names.length) return whenNoSteps;
@@ -1272,7 +1451,7 @@ function resumeRun(plan: Plan, state: NextState, opts: NextOpts): NextResult {
   const step = selectStep(plan, state, opts);
   if (!step) {
     state.status = 'halted';
-    state.halt_reason = noStepReason(plan, opts, 'resume: no iteration to re-enter');
+    state.halt_reason = noStepReason(plan, state, opts, 'resume: no iteration to re-enter');
     return retroOrTerminal(plan, state, opts);
   }
   // §8 crash re-entry for a pending SCRIPT dispatch: the command layer parks
@@ -1604,9 +1783,17 @@ function redispatchPending(plan: Plan, state: NextState, opts: NextOpts): NextRe
   }
   const step = currentStep(plan, state, opts);
   if (!step) {
-    // Defensive: await-step with no pending dispatch is a corrupt state.
+    // Defensive: await-step with no pending dispatch is a corrupt state —
+    // UNLESS the g1 backstop is what emptied it, in which case the cursor is
+    // perfectly well-formed and the run is being stopped on purpose. Report
+    // that, rather than telling the operator their state is corrupt.
+    const shadowed = state.current_off_plan_path
+      ? shadowedEnumeratedStep(plan, state.current_off_plan_path)
+      : undefined;
     state.status = 'halted';
-    state.halt_reason = 'continue record but no pending step (the cursor names none)';
+    state.halt_reason = shadowed
+      ? shadowHaltReason(shadowed, state.current_off_plan_path!)
+      : 'continue record but no pending step (the cursor names none)';
     return retroOrTerminal(plan, state, opts);
   }
   state.phase = 'await-step';
@@ -2012,8 +2199,18 @@ function advance(plan: Plan, state: NextState, opts: NextOpts): NextResult {
   }
   // A planned path resolves to its PlanStep; an off-plan path (an unusual nested
   // next_iteration) gets a synthetic one — either way through the single dispatch.
-  const step = findStepByPath(plan, next) ?? synthesizeStep(next, state, plan, opts);
-  return dispatchStep(plan, state, step);
+  const planned = findStepByPath(plan, next, opts.planRoot);
+  if (planned) return dispatchStep(plan, state, planned);
+  // g1 backstop, third route: a v1 step's reported `## Next` can name a gate
+  // too. This one can halt directly (it already returns a NextResult), so it
+  // says exactly why rather than going through noStepReason.
+  const shadowed = shadowedEnumeratedStep(plan, next);
+  if (shadowed) {
+    state.status = 'halted';
+    state.halt_reason = shadowHaltReason(shadowed, next);
+    return retroOrTerminal(plan, state, opts);
+  }
+  return dispatchStep(plan, state, synthesizeStep(next, state, plan, opts));
 }
 
 /** The step the MANIFEST puts after `fromName` in a sequential run: the next one
