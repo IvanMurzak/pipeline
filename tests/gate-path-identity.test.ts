@@ -42,6 +42,7 @@ import { test, expect, afterEach, describe } from 'bun:test';
 import { runDrive, type ExecutorRunner } from '../src/commands/drive';
 import { invokeNext } from '../src/commands/next';
 import { computePlan } from '../src/lib/plan';
+import { computeNext } from '../src/lib/next';
 import type { GitRunner } from '../src/lib/git';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -640,5 +641,215 @@ steps:
     const r = await drive(w, 'backstopagent', ['--start', stray], { ship: DONE });
     expect(r.code).toBe(0);
     expect(r.calls).toEqual(['ship']);
+  }, 30000);
+});
+
+// ============================================================================
+// Review round 1 — cases the high-depth review found uncovered.
+// ============================================================================
+
+describe('external / worktree-provisioning route (review A1)', () => {
+  /** An `isolation: run` manifest — the engine's `external` scope, where the
+   *  first dispatch happens AFTER a worktree is provisioned rather than at
+   *  init. That deferral is what made the backstop reachable-but-not-reached. */
+  const EXTERNAL_GATE_FIRST = `
+schema: 2
+name: demo
+isolation: run
+steps:
+  - name: approve-deploy
+    type: gate
+    required_role: admin
+    message: Deploy?
+  - name: ship
+    body: steps/02-ship.md
+`;
+
+  test('an unresolvable --start HALTS before provisioning, instead of silently starting at steps[0]', () => {
+    const w = mkWorld(EXTERNAL_GATE_FIRST);
+    writeFileSync(join(w.steps, '02-ship.md'), agentBody('ship'));
+    mkdirSync(join(w.project, 'stray'), { recursive: true });
+    const stray = join(w.project, 'stray', 'approve-deploy.md');
+    writeFileSync(stray, agentBody('stray'));
+
+    const plan = computePlan(w.root);
+    expect(plan.isolation).toBe('external');
+
+    const r = computeNext(plan, null, null, { feedbackCount: 0, start: stray, planRoot: w.root });
+    // NOT 'provision-worktree': halting before the hook keeps
+    // worktree_provisioned false, so no teardown is owed.
+    expect(r.action.action).toBe('halt');
+    if (r.action.action !== 'halt') throw 0;
+    expect(r.action.reason).toContain('refusing to execute');
+    expect(r.state.worktree_provisioned ?? false).toBe(false);
+  });
+
+  test('a typo-d --start NAME on an external run halts too, rather than running a step nobody asked for', () => {
+    // The same silent-discard hazard on the pre-existing path: `pinStart`
+    // leaves the cursor null for an unresolvable NAME as well.
+    const w = mkWorld(EXTERNAL_GATE_FIRST);
+    writeFileSync(join(w.steps, '02-ship.md'), agentBody('ship'));
+    const plan = computePlan(w.root);
+    const r = computeNext(plan, null, null, { feedbackCount: 0, start: 'approve-deploi', planRoot: w.root });
+    expect(r.action.action).toBe('halt');
+    if (r.action.action !== 'halt') throw 0;
+    expect(r.action.reason).toContain('matches no step');
+  });
+
+  test('a RESOLVABLE --start on an external run still provisions normally', () => {
+    // Fail-closed must not become fail-always: the guard fires only when the
+    // start resolves to nothing.
+    const w = mkWorld(EXTERNAL_GATE_FIRST);
+    writeFileSync(join(w.steps, '02-ship.md'), agentBody('ship'));
+    const plan = computePlan(w.root);
+    const r = computeNext(plan, null, null, {
+      feedbackCount: 0,
+      start: 'steps/approve-deploy.md',
+      planRoot: w.root,
+    });
+    expect(r.action.action).toBe('provision-worktree');
+    expect(r.state.current_step_id).toBe('approve-deploy'); // pinned by NAME
+  });
+});
+
+describe('planRoot selects the tree the plan came from (review A5)', () => {
+  test('the anchor resolves in the plan OWN tree and refuses to resolve in another', () => {
+    // Two identical trees. Anchoring is only meaningful if it distinguishes
+    // them — on a worktree-scoped run the dispatched plan is the WORKTREE's,
+    // and resolving a relative path against the MAIN root would silently
+    // select a step from the wrong tree.
+    const a = mkWorld(GATE_FIRST);
+    const b = mkWorld(GATE_FIRST);
+    writeFileSync(join(a.steps, '02-ship.md'), agentBody('ship'));
+    writeFileSync(join(b.steps, '02-ship.md'), agentBody('ship'));
+    const planA = computePlan(a.root);
+
+    // Right tree: resolves to the enumerated gate, with its type intact.
+    const right = computeNext(planA, null, null, {
+      feedbackCount: 0,
+      start: 'steps/approve-deploy.md',
+      planRoot: a.root,
+    });
+    expect(right.action.action).toBe('run-step');
+    if (right.action.action !== 'run-step') throw 0;
+    expect(right.action.steps[0].type).toBe('gate');
+    expect(right.action.steps[0].path).toBe(join(a.root, 'steps', 'approve-deploy.md'));
+
+    // Wrong tree: the join lands somewhere plan A does not contain, so nothing
+    // resolves — and the backstop then refuses to synthesize over the gate.
+    const wrong = computeNext(planA, null, null, {
+      feedbackCount: 0,
+      start: 'steps/approve-deploy.md',
+      planRoot: b.root,
+    });
+    expect(wrong.action.action).toBe('halt');
+    if (wrong.action.action !== 'halt') throw 0;
+    expect(wrong.action.reason).toContain('refusing to execute');
+  });
+
+  test('with NO planRoot the pre-g1 comparison is all that runs', () => {
+    // The opt-in property: an omitted anchor must not change old behaviour.
+    // Absolute paths still resolve exactly as they always did.
+    const w = mkWorld(GATE_FIRST);
+    writeFileSync(join(w.steps, '02-ship.md'), agentBody('ship'));
+    const plan = computePlan(w.root);
+    const r = computeNext(plan, null, null, {
+      feedbackCount: 0,
+      start: join(w.root, 'steps', 'approve-deploy.md'),
+    });
+    expect(r.action.action).toBe('run-step');
+    if (r.action.action !== 'run-step') throw 0;
+    expect(r.action.steps[0].type).toBe('gate');
+  });
+});
+
+describe('case-insensitive filesystems (review A3)', () => {
+  const caseInsensitive = process.platform === 'win32' || process.platform === 'darwin';
+
+  test.if(caseInsensitive)('a case-variant path cannot reach a gate body as an agent step', async () => {
+    // On win32/APFS `steps/APPROVE-BODY.md` IS the gate's body file. If the
+    // backstop folded case only on win32, macOS would synthesize an agent step
+    // whose path resolves, on that filesystem, to the gate's own prompt.
+    const w = mkWorld(`
+schema: 2
+name: demo
+steps:
+  - name: approve-deploy
+    type: gate
+    required_role: admin
+    message: Deploy?
+    body: steps/approve-body.md
+  - name: ship
+    body: steps/02-ship.md
+`);
+    writeFileSync(join(w.steps, 'approve-body.md'), agentBody('approve'));
+    writeFileSync(join(w.steps, '02-ship.md'), agentBody('ship'));
+
+    // A stray directory, so neither samePath nor the anchored join can resolve
+    // it — only the identity rules are left to catch it.
+    const stray = join(w.project, 'stray');
+    mkdirSync(stray, { recursive: true });
+    writeFileSync(join(stray, 'APPROVE-BODY.md'), agentBody('approve'));
+
+    const r = await drive(w, 'casefold', ['--start', join(stray, 'APPROVE-BODY.md')], {
+      ship: DONE,
+      'approve-deploy': DONE,
+      'APPROVE-BODY': DONE,
+    });
+    expect(r.calls).toEqual([]);
+    expect(r.code).not.toBe(0);
+    expect(r.json.reason).toContain('refusing to execute');
+  }, 30000);
+});
+
+describe('an approved gate keeps its PIPELINE_COMPLETE decision (review A2)', () => {
+  test('a manifest gate with a real body can still END the run on approval', async () => {
+    // `body:` on a gate is legal, and gives the gate a REAL file — so its
+    // `## Next` is readable and `PIPELINE_COMPLETE` is a decision `advance()`
+    // honours even under a manifest ("end early", not a routing instruction).
+    // Keying the parse on `advance !== 'manifest'` silently dropped it and let
+    // the run continue past a gate that said stop.
+    const w = mkWorld(`
+schema: 2
+name: demo
+steps:
+  - name: approve-deploy
+    type: gate
+    required_role: admin
+    message: Ship it?
+    body: steps/approve-body.md
+  - name: ship
+    body: steps/02-ship.md
+`);
+    writeFileSync(join(w.steps, 'approve-body.md'), '# Approve\n\n## Next\nPipeline complete.\n');
+    writeFileSync(join(w.steps, '02-ship.md'), agentBody('ship'));
+    const run = 'gatecomplete';
+
+    const parked = await drive(w, run, ['--start', runnerStartIteration(w.root)], { ship: DONE });
+    expect(parked.code).toBe(4);
+    expect(parked.json.step_id).toBe('approve-deploy');
+
+    const answered = await drive(w, run, ['--resume', '--start', parked.json.iteration_path, '--answer', APPROVE], {
+      ship: DONE,
+    });
+    expect(answered.code).toBe(0);
+    expect(answered.json.status).toBe('completed');
+    // THE assertion: the gate's own `## Next` ended the run — `ship` never ran.
+    expect(answered.calls).toEqual([]);
+  }, 30000);
+
+  test('a body-less manifest gate warns nothing about its synthetic path', async () => {
+    // The noise this rule actually exists to remove: a body-less gate has no
+    // file, so the ENOENT is the expected shape of a gate rather than a defect.
+    const w = mkWorld(GATE_FIRST);
+    writeFileSync(join(w.steps, '02-ship.md'), agentBody('ship'));
+    const run = 'gatequiet';
+    const parked = await drive(w, run, ['--start', runnerStartIteration(w.root)], { ship: DONE });
+    const answered = await drive(w, run, ['--resume', '--start', parked.json.iteration_path, '--answer', APPROVE], {
+      ship: DONE,
+    });
+    expect(answered.code).toBe(0);
+    expect(answered.stderr).not.toContain('not mechanically parseable');
+    expect(answered.calls).toEqual(['ship']); // and it still advances
   }, 30000);
 });

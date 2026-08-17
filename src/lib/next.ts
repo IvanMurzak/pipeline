@@ -830,17 +830,35 @@ function findStepByPath(plan: Plan, path: string, planRoot?: string): PlanStep |
  */
 function shadowedEnumeratedStep(plan: Plan, path: string): PlanStep | undefined {
   const isGuarded = (s: PlanStep): boolean => s.type !== undefined && s.type !== 'agent';
-  const named = stepByName(plan, stemOf(path));
+  const stem = fold(stemOf(path));
+  const named = plan.steps.find((s) => fold(s.step_id) === stem);
   if (named !== undefined && isGuarded(named)) return named;
-  const base = baseOf(path);
-  return plan.steps.find((s) => isGuarded(s) && baseOf(s.path) === base);
+  const base = fold(baseOf(path));
+  return plan.steps.find((s) => isGuarded(s) && fold(baseOf(s.path)) === base);
 }
 
-/** A path's final segment, normalized the way {@link samePath} normalizes:
- *  separator-agnostic, and case-insensitive on Windows. */
+/** Case-fold on the platforms whose default filesystem is case-INSENSITIVE.
+ *
+ *  `samePath` folds on win32 only, which was enough while it was the only
+ *  comparison. It is not enough for the backstop: on macOS (APFS,
+ *  case-insensitive by default) `--start steps/APPROVE-BODY.md` misses
+ *  `samePath`, misses the anchored join, and — folding on win32 only — would
+ *  miss the stem and basename rules too, then synthesize an agent step whose
+ *  path resolves ON THAT FILESYSTEM to the gate's own body. Folding here
+ *  widens only the FAIL-CLOSED check, so the worst case is a loud halt on a
+ *  case-colliding off-plan hand-off, never a dispatch.
+ *
+ *  Both sides of every comparison are folded — including `step_id`, which is
+ *  why the backstop does its own name lookup instead of calling
+ *  {@link stepByName}, whose exact-match identity semantics stay unchanged. */
+function fold(value: string): string {
+  return process.platform === 'win32' || process.platform === 'darwin' ? value.toLowerCase() : value;
+}
+
+/** A path's final segment, separator-agnostic. Case folding is {@link fold}'s
+ *  job, applied by the caller so both sides are treated identically. */
 function baseOf(path: string): string {
-  const base = path.replace(/\\/g, '/').split('/').pop() ?? path;
-  return process.platform === 'win32' ? base.toLowerCase() : base;
+  return path.replace(/\\/g, '/').split('/').pop() ?? path;
 }
 
 /** The halt reason a shadowed dispatch produces — deliberately loud, and it
@@ -1104,10 +1122,12 @@ function onProvisionPhase(plan: Plan, state: NextState, record: NextRecord | nul
     // provisions when plan.steps.length > 0). Fall through to terminal; teardown
     // will fire because worktree_provisioned is now true.
     //
-    // Routed through noStepReason since g1: an external run's first dispatch is
-    // ALSO a route to a gate (pinStart resolved the `--start`, this is where it
-    // dispatches), so the backstop's reason has to be reachable here too rather
-    // than being flattened into the generic provisioned-but-empty message.
+    // Routed through noStepReason since g1 for the `--manual-hooks` route,
+    // where the caller re-passes `--start` on the post-provision call and the
+    // backstop can therefore fire HERE. On the in-process hook route it cannot:
+    // initRun now refuses an unresolvable `--start` before provisioning at all
+    // (see the g1 guard there), which is what keeps that route from silently
+    // falling through to plan.steps[0].
     state.status = 'halted';
     state.halt_reason = noStepReason(plan, state, opts, 'external: provisioned but no iteration to run');
     return retroOrTerminal(plan, state, opts);
@@ -1338,6 +1358,19 @@ function initRun(plan: Plan, opts: NextOpts): NextResult {
   // record lands (onProvisionPhase). No steps yet ⇒ a plan-error/no-files halt
   // below keeps worktree_provisioned=false so teardown is correctly skipped.
   if (isExternal(state) && plan.steps.length > 0) {
+    // g1: a `--start` that resolves to NOTHING must halt here, before any
+    // worktree is provisioned. `pinStart` leaves the cursor null when
+    // resolveStart refuses — a typo'd NAME, or the backstop firing — and
+    // onProvisionPhase would then fall through to `plan.steps[0]`, silently
+    // starting the run somewhere the operator did not ask for AND after
+    // provisioning a worktree for it. Halting before emitProvision keeps
+    // worktree_provisioned false, so no teardown is owed (same shape as the
+    // plan-error/no-files halt below).
+    if (opts.start !== undefined && resolveStart(plan, opts.start, state, opts) === undefined) {
+      state.status = 'halted';
+      state.halt_reason = noStepReason(plan, state, opts, 'no iteration files to run');
+      return retroOrTerminal(plan, state, opts);
+    }
     // Pin the start step NOW so onProvisionPhase dispatches it after the
     // provisioned record (the --start arrives only on this init call). Absent
     // --start, the cursor stays null and onProvisionPhase falls to steps[0].
@@ -1750,9 +1783,17 @@ function redispatchPending(plan: Plan, state: NextState, opts: NextOpts): NextRe
   }
   const step = currentStep(plan, state, opts);
   if (!step) {
-    // Defensive: await-step with no pending dispatch is a corrupt state.
+    // Defensive: await-step with no pending dispatch is a corrupt state —
+    // UNLESS the g1 backstop is what emptied it, in which case the cursor is
+    // perfectly well-formed and the run is being stopped on purpose. Report
+    // that, rather than telling the operator their state is corrupt.
+    const shadowed = state.current_off_plan_path
+      ? shadowedEnumeratedStep(plan, state.current_off_plan_path)
+      : undefined;
     state.status = 'halted';
-    state.halt_reason = 'continue record but no pending step (the cursor names none)';
+    state.halt_reason = shadowed
+      ? shadowHaltReason(shadowed, state.current_off_plan_path!)
+      : 'continue record but no pending step (the cursor names none)';
     return retroOrTerminal(plan, state, opts);
   }
   state.phase = 'await-step';

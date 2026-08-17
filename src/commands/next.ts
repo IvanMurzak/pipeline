@@ -160,7 +160,7 @@ import {
   registerChildRun,
   taskFileFor,
 } from '../lib/compose-exec';
-import type { ActiveChildRun, RunMode } from '../lib/next';
+import type { ActiveChildRun } from '../lib/next';
 import { scrub } from '../lib/output-scrubber';
 
 // ---------------------------------------------------------------------------
@@ -1377,24 +1377,27 @@ function gateRecordFor(step: PlanStep, answer: unknown, sequential: boolean): St
   let nextIteration: string | null = null;
   if (sequential) {
     const p = parseNextSection(step.path);
-    if (p.error) warnNote(`gate step ${step.step_id}: ## Next not mechanically parseable: ${p.error}`);
+    // WARN only about a file that EXISTS and failed to parse. A gate's path can
+    // be SYNTHETIC — a body-less manifest gate dispatches on `steps/<name>.md`
+    // (`manifest-plan.ts` dispatchPath) and no such file is ever written — so
+    // the ENOENT there is the expected shape of a gate, not a defect in the
+    // pipeline, and it fired on EVERY approval.
+    //
+    // Suppressing the warning rather than skipping the parse is deliberate.
+    // `p.next` is null for an unreadable file either way, so behaviour is
+    // unchanged in every case; and a gate that DOES have a real body (a `body:`
+    // on a gate is legal — nothing in manifest.ts forbids it) keeps its
+    // `## Next`, including `PIPELINE_COMPLETE`, which `advance()` honours even
+    // under a manifest as "a decision (end early), not a routing instruction".
+    // An earlier version of this fix keyed on `plan.advance !== 'manifest'`
+    // instead and silently dropped that decision — the ENOENT is caused by the
+    // path not existing, not by the plan being a manifest.
+    if (p.error && existsSync(step.path)) {
+      warnNote(`gate step ${step.step_id}: ## Next not mechanically parseable: ${p.error}`);
+    }
     nextIteration = p.next;
   }
   return { kind: 'step', outcome: 'completed', flags: { approved: true }, next_iteration: nextIteration };
-}
-
-/** Whether an approved gate's `## Next` should be read off disk at all.
- *
- *  Only a v1 SEQUENTIAL plan advances off a reported `next_iteration`
- *  (`lib/next.ts` advance()); a manifest declares the order and ignores it, and
- *  graph/parallel route off flags/layers. The distinction is not cosmetic for a
- *  gate: a manifest gate's `path` is SYNTHETIC (`steps/<name>.md`,
- *  `manifest-plan.ts` dispatchPath) and there is no such file, so parsing it
- *  read a nonexistent path and warned `ENOENT` on every approval — noise on the
- *  approval path, and a filesystem read that could only ever fail. Mirrors the
- *  `parseNext: mode === 'sequential'` rule the script arm already applies. */
-function gateParsesNextSection(plan: Plan, mode: RunMode): boolean {
-  return mode === 'sequential' && plan.advance !== 'manifest';
 }
 
 // ---------------------------------------------------------------------------
@@ -1879,7 +1882,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
         ? planStepFor(plan, prevState.current_step_id)
         : undefined;
     if (pendingGate?.type === 'gate') {
-      record = gateRecordFor(pendingGate, record.answer, gateParsesNextSection(plan, mode));
+      record = gateRecordFor(pendingGate, record.answer, mode === 'sequential');
       gateTag = { stepType: 'gate', failureClass: null };
     }
   }
