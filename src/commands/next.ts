@@ -160,7 +160,7 @@ import {
   registerChildRun,
   taskFileFor,
 } from '../lib/compose-exec';
-import type { ActiveChildRun } from '../lib/next';
+import type { ActiveChildRun, RunMode } from '../lib/next';
 import { scrub } from '../lib/output-scrubber';
 
 // ---------------------------------------------------------------------------
@@ -1383,6 +1383,20 @@ function gateRecordFor(step: PlanStep, answer: unknown, sequential: boolean): St
   return { kind: 'step', outcome: 'completed', flags: { approved: true }, next_iteration: nextIteration };
 }
 
+/** Whether an approved gate's `## Next` should be read off disk at all.
+ *
+ *  Only a v1 SEQUENTIAL plan advances off a reported `next_iteration`
+ *  (`lib/next.ts` advance()); a manifest declares the order and ignores it, and
+ *  graph/parallel route off flags/layers. The distinction is not cosmetic for a
+ *  gate: a manifest gate's `path` is SYNTHETIC (`steps/<name>.md`,
+ *  `manifest-plan.ts` dispatchPath) and there is no such file, so parsing it
+ *  read a nonexistent path and warned `ENOENT` on every approval — noise on the
+ *  approval path, and a filesystem read that could only ever fail. Mirrors the
+ *  `parseNext: mode === 'sequential'` rule the script arm already applies. */
+function gateParsesNextSection(plan: Plan, mode: RunMode): boolean {
+  return mode === 'sequential' && plan.advance !== 'manifest';
+}
+
 // ---------------------------------------------------------------------------
 // Core invocation (shared by `pipeline next` and the EXPERIMENTAL `pipeline drive`)
 // ---------------------------------------------------------------------------
@@ -1560,7 +1574,16 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
    *  teardown — an invalid plan never silently leaks a worktree). */
   const preProvision = ():
     | { kind: 'halt'; result: InvokeNextResult }
-    | { kind: 'feed'; plan: Plan; parkedState: NextState; record: WorktreeRecord; provisioned: ProvisionedInfo | null }
+    | {
+        kind: 'feed';
+        plan: Plan;
+        /** The root `plan` was computed from — the anchor for a relative
+         *  `--start` (g1, NextOpts.planRoot). */
+        planRoot: string;
+        parkedState: NextState;
+        record: WorktreeRecord;
+        provisioned: ProvisionedInfo | null;
+      }
     | { kind: 'passthrough' } => {
     const projectRoot = process.cwd();
     const baseOpts: NextOpts = {
@@ -1570,6 +1593,9 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       runId: a.runId,
       projectRoot,
       pipelineRoot: a.root,
+      // Pre-provision runs against the MAIN plan, so the main root is the
+      // anchor for a relative `--start` here (g1).
+      planRoot: rootAbs,
       finalizeOptIn,
       resolveOffPlanModel,
       resolveOffPlanEffort,
@@ -1609,7 +1635,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       // the ok:false record against the main plan — the exact legacy halt
       // path (worktree_provisioned stays false ⇒ no teardown).
       execCreateFailedCleanup(provisionAction, hookDirAbs, projectRoot, rootAbs, res.failedWorktreePath);
-      return { kind: 'feed', plan: mainPlan, parkedState: parked, record: res.record, provisioned: null };
+      return { kind: 'feed', plan: mainPlan, planRoot: rootAbs, parkedState: parked, record: res.record, provisioned: null };
     }
     // The worktree mirrors the project tree, so the pipeline root keeps its
     // project-relative path — the `(worktree_prefix, main_prefix)` pair.
@@ -1658,12 +1684,17 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
       const swapped = swapPathPrefix(parked.current_off_plan_path, mainPipelineRoot, wtRoot);
       if (swapped !== null) parked.current_off_plan_path = swapped;
     }
-    return { kind: 'feed', plan: wtPlan!, parkedState: parked, record: res.record, provisioned: res.provisioned };
+    return { kind: 'feed', plan: wtPlan!, planRoot: wtRoot, parkedState: parked, record: res.record, provisioned: res.provisioned };
   };
 
   // Execution-plan selection: scoped runs plan against the worktree pipeline
   // copy; everything else keeps the main plan byte-identically.
   let plan = mainPlan;
+  /** The root `plan` was computed from — g1's anchor for a RELATIVE `--start`
+   *  or reported `next_iteration` (NextOpts.planRoot). It follows `plan` branch
+   *  for branch: on a scoped run the dispatched plan is the WORKTREE's, so
+   *  anchoring at the main root would resolve paths into the wrong tree. */
+  let planRootAbs = rootAbs;
   let feed: { state: NextState; record: WorktreeRecord } | null = null;
   let feedProvisioned: ProvisionedInfo | null = null;
   if (scoped && wtPipelineRoot !== null) {
@@ -1672,12 +1703,15 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
     if (a.start !== undefined) a.start = toWtPath(a.start);
     // A TERMINAL run needs no dispatch paths (and its worktree may already be
     // torn down) — answer terminal re-polls off the main plan.
-    plan = prevState !== null && prevState.phase === 'terminal' ? mainPlan : computePlan(wtPipelineRoot, planOpts);
+    const terminal = prevState !== null && prevState.phase === 'terminal';
+    plan = terminal ? mainPlan : computePlan(wtPipelineRoot, planOpts);
+    planRootAbs = terminal ? rootAbs : wtPipelineRoot;
   } else if (scoped && a.record == null && (prevState === null || prevState.phase === 'await-provision')) {
     const pre = preProvision();
     if (pre.kind === 'halt') return pre.result;
     if (pre.kind === 'feed') {
       plan = pre.plan;
+      planRootAbs = pre.planRoot;
       feed = { state: pre.parkedState, record: pre.record };
       feedProvisioned = pre.provisioned;
     }
@@ -1712,7 +1746,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
   // caller passes one — but say so, with the name to use instead: a step is an
   // entry in the manifest, and its body file is no longer its identity.
   {
-    const byPath = startResolvedByPath(plan, a.start);
+    const byPath = startResolvedByPath(plan, a.start, planRootAbs);
     if (byPath) {
       warnNote(
         `--start takes a step NAME — '${byPath.step_id}' here. The path form still works and will be removed.`,
@@ -1845,7 +1879,7 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
         ? planStepFor(plan, prevState.current_step_id)
         : undefined;
     if (pendingGate?.type === 'gate') {
-      record = gateRecordFor(pendingGate, record.answer, mode === 'sequential');
+      record = gateRecordFor(pendingGate, record.answer, gateParsesNextSection(plan, mode));
       gateTag = { stepType: 'gate', failureClass: null };
     }
   }
@@ -1884,6 +1918,10 @@ function invokeNextCore(a: InvokeNextArgs): InvokeNextResult {
     runId: a.runId,
     projectRoot: process.cwd(),
     pipelineRoot: a.root,
+    // g1: the anchor for a RELATIVE path-form `--start` / `next_iteration`.
+    // Distinct from pipelineRoot above, which stays the MAIN root because the
+    // provision/teardown actions it feeds are main-scoped.
+    planRoot: planRootAbs,
     finalizeOptIn,
     // Off-plan steps (family hand-offs, nested next_iteration paths) resolve
     // their model/effort from their OWN frontmatter / enclosing manifest on disk.
