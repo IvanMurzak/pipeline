@@ -46,6 +46,13 @@ import { DEFAULT_SERVER, SERVER_ENV } from '../lib/cloud-config';
 import { computePlan } from '../lib/plan';
 import { runDrive, type DriveDeps } from './drive';
 import { newId } from '../lib/ids';
+import {
+  detectGitBash,
+  gitBashWarningLines,
+  gitBashWarningSummary,
+  realGitBashProbe,
+  type GitBashDetection,
+} from '../lib/git-bash';
 
 // ---------------------------------------------------------------------------
 // Args
@@ -214,6 +221,13 @@ export interface InitDeps {
   err: (s: string) => void;
   bunAvailable: () => boolean;
   claudeAvailable: () => boolean;
+  /** Windows-only: is there a Git Bash that Claude Code would actually
+   *  select? Every hook the plugin registers is pinned to `"shell": "bash"`,
+   *  and on Windows that pin resolves to Git Bash — without one, all ten fail
+   *  with a `non_blocking_error` the user sees as noise rather than a stop.
+   *  Defaults to the real prefix-based probe (`lib/git-bash.ts`), which
+   *  answers `not-applicable` off Windows. */
+  gitBash: () => GitBashDetection;
   claudeCli: ClaudeCliRunner;
   /** Runs `pipeline cloud connect <args>` in-process. Defaults to the real
    *  `runCloud` — init COMPOSES the connect command rather than reproducing
@@ -290,6 +304,7 @@ export const realInitDeps: InitDeps = {
   },
   bunAvailable: realBunAvailable,
   claudeAvailable: realClaudeAvailable,
+  gitBash: () => detectGitBash(realGitBashProbe()),
   claudeCli: realClaudeCli,
   // Lazy import, mirroring `cli.ts`'s own reason for lazily importing `cloud`:
   // it pulls in the HTTP device-flow + loopback-server machinery, which a
@@ -502,6 +517,10 @@ interface JsonResult {
    *  grepping the warnings list to find out whether the cloud half happened. */
   cloud?: CloudConnectResult['status'];
   plugin?: PluginStatus;
+  /** Windows only — ABSENT on macOS/Linux, where the check does not run at
+   *  all. Present-and-'found' vs present-and-'missing' is how a script reads
+   *  the Git Bash preflight structurally instead of grepping `warnings`. */
+  gitBash?: 'found' | 'missing';
   template?: string;
   path?: string;
   ran?: boolean;
@@ -553,6 +572,19 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
     return 1;
   }
 
+  // --- Step 0.2: preflight — Git Bash, Windows only. UNLIKE bun this is a
+  // WARNING, not a stop: the CLI itself does not need it, only the plugin's
+  // Claude Code hooks do (all ten are pinned to `"shell": "bash"`, which
+  // Windows resolves to Git Bash). So this follows the precedent `init`
+  // already sets for a missing Claude Code — say so clearly, continue, exit 0
+  // — rather than bun's hard fail. Computed here, printed after the banner so
+  // the transcript still opens with the one-line "what this is doing" header.
+  //
+  // Detection is deliberately prefix-based, never a PATH lookup for `bash`;
+  // lib/git-bash.ts's header explains why the obvious version is worse than
+  // no check at all.
+  const gitBash = deps.gitBash();
+
   const cloudDecision = cloudStepDecision(parsed, deps.env);
 
   if (!parsed.json) {
@@ -561,6 +593,13 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
         ? '  Pipeline — connecting to ai-pipeline.dev. Your keys and your code stay here.\n\n'
         : '  Pipeline — local only. No account; nothing goes to ai-pipeline.dev.\n\n',
     );
+  }
+
+  if (gitBash.status === 'missing') {
+    warnings.push(gitBashWarningSummary(gitBash));
+    // Under --json this is carried by `warnings[]` + the `gitBash` field only:
+    // free text on stdout there would corrupt the one-JSON-document contract.
+    if (!parsed.json) for (const l of gitBashWarningLines(gitBash)) deps.out(`  ${l}\n`);
   }
 
   // --- Step 0.5: the cloud. FIRST, and by default (the browser consent is the
@@ -717,6 +756,9 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
       path: relPath,
       ran,
     };
+    // Windows only: absent means "the check did not apply here", which is a
+    // different fact from "it ran and found nothing".
+    if (gitBash.status !== 'not-applicable') result.gitBash = gitBash.status;
     if (ran) result.runOk = runOk;
     if (warnings.length > 0) result.warnings = warnings;
     deps.out(JSON.stringify(result) + '\n');
