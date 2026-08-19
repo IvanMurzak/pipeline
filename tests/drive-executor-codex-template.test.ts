@@ -246,9 +246,10 @@ describe('--executor=codex-cli drives a step through DEFAULT_CODEX_EXECUTOR_TEMP
       expect(argv).toContain('-c');
       expect(argv).toContain('model_reasoning_effort=medium');
 
-      // {permissions} — translated via codexSandboxFor: default permission
-      // mode (no frontmatter override) is 'acceptEdits' → 'workspace-write'.
-      expect(flagValue(argv, '--sandbox')).toBe('workspace-write');
+      // {permissions} — translated via codexSandboxFor: the default
+      // permission mode (no frontmatter override) is 'bypassPermissions',
+      // which maps to codex's own no-gate value.
+      expect(flagValue(argv, '--sandbox')).toBe('danger-full-access');
 
       // {record_dir} — the --add-dir grant, pointing at the DROP dir the
       // step_record_file line (below) lives inside.

@@ -18,6 +18,7 @@ import {
   extractQuestion,
   pluginDirToken,
   quoteForShell,
+  DEFAULT_STEP_PERMISSION_MODE,
   resolvePermissionMode,
   runDrive,
   type ExecutorRunner,
@@ -333,15 +334,18 @@ test('extractQuestion: defensive extraction from a step record', () => {
   expect(extractQuestion({ question: { text: '', options: [1, 'ok'] } }).options).toEqual(['ok']);
 }, 30000);
 
-test('resolvePermissionMode: step frontmatter beats manifest, manifest beats acceptEdits, inherit → null', () => {
+test('resolvePermissionMode: step frontmatter beats manifest, manifest beats the default, inherit → null', () => {
   const root = mkdtempSync(join(tmpdir(), 'drive-perm-'));
   created.push(root);
   mkdirSync(join(root, 'steps'), { recursive: true });
   const step = join(root, 'steps', '01-a.md');
-  // 1. Nothing anywhere → acceptEdits.
+  // 1. Nothing anywhere -> the default, which is bypassPermissions: a
+  //    headless step has no approver, so a narrower default does not ask
+  //    about the rest, it denies it.
   writeFileSync(join(root, 'PIPELINE.md'), '# P\n');
   writeFileSync(step, '# a\n');
-  expect(resolvePermissionMode(step, root)).toBe('acceptEdits');
+  expect(resolvePermissionMode(step, root)).toBe(DEFAULT_STEP_PERMISSION_MODE);
+  expect(DEFAULT_STEP_PERMISSION_MODE).toBe('bypassPermissions');
   // 2. Manifest default applies to steps without their own key.
   writeFileSync(join(root, 'PIPELINE.md'), '---\npermission-mode: dontAsk\n---\n# P\n');
   expect(resolvePermissionMode(step, root)).toBe('dontAsk');
@@ -383,11 +387,13 @@ test('bundled support-answer retrieve needs no Bash grant — it is a script ste
 
 // Scoping guard: the read-only support-answer steps (02-select, 03-answer)
 // never shell out, so they must NOT carry the grant — resolvePermissionMode
-// falls through to the manifest/default exactly as before the fix.
+// falls through to the manifest/default. What that default IS changed
+// (acceptEdits -> bypassPermissions); that these steps do not override it
+// did not, and that is what this pins.
 test('resolvePermissionMode: bundled support-answer read-only steps are untouched', () => {
   const root = templateDir('support-answer');
-  expect(resolvePermissionMode(join(root, 'steps', 'select.md'), root)).toBe('acceptEdits');
-  expect(resolvePermissionMode(join(root, 'steps', 'answer.md'), root)).toBe('acceptEdits');
+  expect(resolvePermissionMode(join(root, 'steps', 'select.md'), root)).toBe(DEFAULT_STEP_PERMISSION_MODE);
+  expect(resolvePermissionMode(join(root, 'steps', 'answer.md'), root)).toBe(DEFAULT_STEP_PERMISSION_MODE);
 });
 
 // Scoping guard: ship-feature's steps that shell out to git/gh/the CI gate
@@ -397,7 +403,11 @@ test('resolvePermissionMode: bundled support-answer read-only steps are untouche
 test('resolvePermissionMode: bundled ship-feature steps — grant only where the step shells out', () => {
   const root = templateDir('ship-feature');
   const mode = (rel: string) => resolvePermissionMode(join(root, 'steps', rel), root);
-  expect(mode('plan.md')).toBe('acceptEdits');
+  // plan.md declares nothing and takes the default; the rest declare the
+  // grant explicitly. The default IS bypassPermissions now, so the two
+  // coincide at runtime — what is pinned here is what the TEMPLATE says,
+  // which is what survives a future change of default.
+  expect(mode('plan.md')).toBe(DEFAULT_STEP_PERMISSION_MODE);
   expect(mode('implement.md')).toBe('bypassPermissions');
   expect(mode('review.md')).toBe('bypassPermissions');
   expect(mode('open-pr.md')).toBe('bypassPermissions');

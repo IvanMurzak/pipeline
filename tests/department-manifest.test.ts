@@ -537,6 +537,9 @@ runtime:
   command: ./bin/unity-department
   args: ["serve", "--stdio"]
   workingDirectory: /home/ivan/secret-project
+  permissions:
+    mode: plan
+    allowTools: [Bash]
   environment:
     allow: [PATH, HOME]
     values:
@@ -552,6 +555,11 @@ scheduling:
     const m = parseClean(WITH_LOCAL_FIELDS);
     // It IS parsed — `serve` needs it for the local runtime binding.
     expect(m.runtime.command).toBe('./bin/unity-department');
+    // The permission REQUEST is local too: how this machine runs a department
+    // is never the control plane's business, and the field is derived into
+    // LOCAL_ONLY_FIELD_NAMES from RUNTIME_KEYS so it cannot reach a request.
+    expect(m.runtime.permissions).toEqual({ mode: 'plan', allowTools: ['Bash'] });
+    expect(LOCAL_ONLY_FIELD_NAMES).toContain('permissions');
     expect(m.runtime.args).toEqual(['serve', '--stdio']);
     expect(m.runtime.environment?.values?.['API_KEY']).toBe('hunter2');
 

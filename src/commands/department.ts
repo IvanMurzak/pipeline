@@ -1183,6 +1183,8 @@ interface ServeArgs {
   server?: string;
   runnerName?: string;
   runtimeCommand?: string;
+  permissionMode?: string;
+  allowTools?: string[];
   machineToken?: string;
   device: boolean;
   reauth: boolean;
@@ -1196,7 +1198,8 @@ interface ServeArgs {
 const SERVE_USAGE =
   'Usage: pipeline department serve [--org <slug>] [--runner-name <n>] [--detach|--foreground] [--json]\n' +
   '                                 [--file <path>] [--server <url>] [--device] [--reauth]\n' +
-  '                                 [--machine-token <token>] [--runtime-command <cmd>]';
+  '                                 [--machine-token <token>] [--runtime-command <cmd>]\n' +
+  '                                 [--permission-mode <mode>] [--allow-tool <tool>]...';
 
 function parseServeArgs(args: string[]): ServeArgs {
   const out: ServeArgs = { device: false, reauth: false, foreground: false, json: false, help: false };
@@ -1223,6 +1226,10 @@ function parseServeArgs(args: string[]): ServeArgs {
     else if (eq('--runner-name') !== undefined) out.runnerName = eq('--runner-name');
     else if (a === '--runtime-command') out.runtimeCommand = take(i++);
     else if (eq('--runtime-command') !== undefined) out.runtimeCommand = eq('--runtime-command');
+    else if (a === '--permission-mode') out.permissionMode = take(i++);
+    else if (eq('--permission-mode') !== undefined) out.permissionMode = eq('--permission-mode');
+    else if (a === '--allow-tool') out.allowTools = [...(out.allowTools ?? []), take(i++) ?? ''];
+    else if (eq('--allow-tool') !== undefined) out.allowTools = [...(out.allowTools ?? []), eq('--allow-tool') ?? ''];
     else if (a === '--machine-token') out.machineToken = take(i++);
     else if (eq('--machine-token') !== undefined) out.machineToken = eq('--machine-token');
     else if (a === '--') continue;
@@ -1256,6 +1263,17 @@ function serveHelpText(): string {
     '  --runtime-command <c>  Executable this machine runs for engines whose\n' +
     "                         binary is not authored: 'pipeline' (engine:\n" +
     "                         pipeline) and 'claude' (engine: claude-code).\n" +
+    '  --permission-mode <m>  THIS MACHINE\'s permission posture for the\n' +
+    '                         department, overriding whatever runtime.permissions\n' +
+    '                         in department.yml asks for. Omitted on both sides,\n' +
+    "                         the runner's default applies (bypassPermissions) —\n" +
+    '                         which is why a department needs none of this to\n' +
+    '                         work on a machine nobody has configured. A\n' +
+    '                         department can REQUEST a posture; the operator\n' +
+    '                         decides.\n' +
+    '  --allow-tool <t>       Pre-approve one tool (repeatable), e.g. Bash. The\n' +
+    "                         narrow alternative to a wide mode. REPLACES the\n" +
+    "                         manifest's allowTools rather than extending it.\n" +
     '  --detach               Install the supervisor as a service (the default).\n' +
     '  --foreground           Do not install a service — you run the supervisor\n' +
     '                         yourself. One ALREADY running here (foreground or\n' +
@@ -1412,6 +1430,8 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
   const bindingResult = runtimeBindingFor(manifest, {
     manifestDir,
     ...(a.runtimeCommand !== undefined ? { runtimeCommand: a.runtimeCommand } : {}),
+    ...(a.permissionMode !== undefined ? { permissionMode: a.permissionMode } : {}),
+    ...(a.allowTools !== undefined ? { allowTools: a.allowTools } : {}),
   });
   if (!bindingResult.ok) {
     deps.err(`pipeline department serve: ${bindingResult.message}\n  Nothing was registered.\n`);
@@ -1583,6 +1603,13 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
   // it; it is read exactly here, where it was produced.
   const localDaemon = bound.daemon;
   say(`✓ Runtime bound   ${manifest.runtime.engine} → ${binding.command}\n`);
+  // Say the posture, always — including when it is the runner's default. A
+  // permission grant nobody prints is a permission grant nobody audits, and the
+  // default is the widest one there is.
+  say(
+    `✓ Permissions     ${binding.permissionMode ?? 'bypassPermissions (runner default)'}` +
+      `${binding.allowedTools !== undefined ? `, +tools: ${binding.allowedTools.join(', ')}` : ''}\n`,
+  );
 
   // ---- Step 7: ensure the supervisor (one per machine — D26) --------------
   if (a.foreground) {

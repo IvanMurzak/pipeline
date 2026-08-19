@@ -1025,11 +1025,34 @@ function writeStepSession(sessionsDir: string, stepId: string, s: StepSession): 
 // Per-step permission mode (frontmatter)
 // ---------------------------------------------------------------------------
 
+/**
+ * The permission mode a step runs under when neither it nor the manifest names
+ * one.
+ *
+ * It was `acceptEdits`, on the reasoning that "a headless run that cannot
+ * prompt aborts on the first un-allowed edit otherwise". That was right about
+ * the failure and wrong about its size: a run that cannot prompt does not
+ * abort only on edits — it is DENIED every single thing the mode does not
+ * pre-approve (`git`, the test command, a network fetch, the build), with no
+ * prompt shown to anyone, because there is nobody to show it to. Steps
+ * routinely need all four, and each one died silently.
+ *
+ * Nor could the project's own `.claude/settings.json` make up the difference:
+ * its `permissions.allow` entries are ignored WITH A WARNING in a workspace
+ * the operator has not trusted, and a pipeline is routinely driven on a fresh
+ * clone, a CI box or a VPS nobody has ever opened interactively. Only what
+ * travels on the SPAWN LINE survives that, which is what this constant is.
+ *
+ * A step that wants a narrower posture still says so and still wins:
+ * `permission-mode:` in its own frontmatter, or the manifest's, or `inherit`
+ * to pass no flag at all and take the machine's own settings.
+ */
+export const DEFAULT_STEP_PERMISSION_MODE = 'bypassPermissions';
+
 /** Resolve a step's --permission-mode: the step's `permission-mode:`
- *  frontmatter, else the manifest's, else 'acceptEdits' (a headless run that
- *  cannot prompt aborts on the first un-allowed edit otherwise). The value
- *  'inherit' resolves to null — no flag is passed and the machine's own
- *  settings apply. Read at spawn time (drive-only concern; the plan/engine
+ *  frontmatter, else the manifest's, else {@link DEFAULT_STEP_PERMISSION_MODE}.
+ *  The value 'inherit' resolves to null — no flag is passed and the machine's
+ *  own settings apply. Read at spawn time (drive-only concern; the plan/engine
  *  stay untouched). */
 export function resolvePermissionMode(stepPath: string, pipelineRootAbs: string): string | null {
   const fm = (p: string): string | null => {
@@ -1041,7 +1064,7 @@ export function resolvePermissionMode(stepPath: string, pipelineRootAbs: string)
     }
   };
   const stepAbs = isAbsolute(stepPath) ? stepPath : join(pipelineRootAbs, stepPath);
-  const mode = fm(stepAbs) ?? fm(join(pipelineRootAbs, 'PIPELINE.md')) ?? 'acceptEdits';
+  const mode = fm(stepAbs) ?? fm(join(pipelineRootAbs, 'PIPELINE.md')) ?? DEFAULT_STEP_PERMISSION_MODE;
   return mode === 'inherit' ? null : mode;
 }
 
@@ -1187,12 +1210,12 @@ export function selfImproveEnabled(env: NodeJS.ProcessEnv = process.env): boolea
  *  produce unstructured output — drive falls back to applied:false with a
  *  warning). */
 export const DEFAULT_IMPROVER_TEMPLATE =
-  'claude -p --agent pipeline:pipeline-improver --permission-mode acceptEdits --session-id {session} --plugin-dir {plugin_dir} --output-format stream-json --verbose --json-schema {schema}';
+  `claude -p --agent pipeline:pipeline-improver --permission-mode ${DEFAULT_STEP_PERMISSION_MODE} --session-id {session} --plugin-dir {plugin_dir} --output-format stream-json --verbose --json-schema {schema}`;
 
 /** Default script-creator command — the improver template's twin
  *  (PIPELINE_DRIVE_SCRIPT_CREATOR_CMD overrides). */
 export const DEFAULT_SCRIPT_CREATOR_TEMPLATE =
-  'claude -p --agent pipeline:pipeline-script-creator --permission-mode acceptEdits --session-id {session} --plugin-dir {plugin_dir} --output-format stream-json --verbose --json-schema {schema}';
+  `claude -p --agent pipeline:pipeline-script-creator --permission-mode ${DEFAULT_STEP_PERMISSION_MODE} --session-id {session} --plugin-dir {plugin_dir} --output-format stream-json --verbose --json-schema {schema}`;
 
 /** Feedback categories the retrospective feeds to the batch improver: the
  *  three general doc-actionable categories plus 'script-failure' (written only
