@@ -100,11 +100,17 @@ export const SDK_SCRIPT_CREATOR_AGENT = 'pipeline:pipeline-script-creator';
  * and a headless session that cannot answer a permission prompt stalls or
  * refuses the edits it exists to make.
  *
- * So the fallback is explicit. `acceptEdits` because a headless session cannot
- * answer prompts and the improver's blast radius is the pipeline tree — the
- * same reasoning DEFAULT_IMPROVER_TEMPLATE carries.
+ * So the fallback is explicit, and it MIRRORS the two CLI templates rather than
+ * reasoning independently — `tests/sdk-seams.test.ts` fails if the two ever
+ * disagree, which is the only thing keeping the SDK port honest.
+ *
+ * It was `acceptEdits`, "because a headless session cannot answer prompts".
+ * The premise was right and the conclusion too small: a session that cannot
+ * answer prompts is not merely at risk of stalling on an EDIT, it is denied
+ * everything the mode does not pre-approve — and the improver shells out. See
+ * DEFAULT_STEP_PERMISSION_MODE in `commands/drive.ts` for the full argument.
  */
-export const SDK_SELF_IMPROVE_PERMISSION_MODE: SdkPermissionMode = 'acceptEdits';
+export const SDK_SELF_IMPROVE_PERMISSION_MODE: SdkPermissionMode = 'bypassPermissions';
 
 // ---------------------------------------------------------------------------
 // Template environment overrides — the inapplicability report

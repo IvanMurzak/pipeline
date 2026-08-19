@@ -305,15 +305,15 @@ describe('kind discrimination is preserved', () => {
 // The permission mode the templates hardcoded
 // ---------------------------------------------------------------------------
 
-describe('the hardcoded acceptEdits of both self-improvement templates survives the port', () => {
-  test('a null request permission_mode falls back to acceptEdits for the two self-improvement seams', async () => {
+describe('the hardcoded permission mode of both self-improvement templates survives the port', () => {
+  test('a null request permission_mode falls back to the templates\' mode for the two self-improvement seams', async () => {
     const { query, calls } = recordingQuery(() => ({ applied: true, script_creation_briefs: [] }));
     const seams = sdkDriveSeams({ query });
     // This is the request runSelfImproveSession actually builds.
     await seams.improver(request({ permission_mode: null }));
     await seams.scriptCreator(request({ kind: 'script-creator', permission_mode: null }));
-    expect(calls[0].options.permissionMode).toBe('acceptEdits');
-    expect(calls[1].options.permissionMode).toBe('acceptEdits');
+    expect(calls[0].options.permissionMode).toBe('bypassPermissions');
+    expect(calls[1].options.permissionMode).toBe('bypassPermissions');
   });
 
   test('the step seam keeps null meaning "inherit machine settings" — no fallback invented', async () => {

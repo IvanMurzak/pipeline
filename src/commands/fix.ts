@@ -41,10 +41,24 @@
 //    `--root`. Deriving it from --root would make every directory "inside its
 //    own .pipeline" and reduce the check to a tautology.
 //
-// 3. IT RUNS WITH `--permission-mode acceptEdits` FROM THE PROJECT ROOT —
-//    the same trust level as `pipeline drive`, which also spawns `claude -p`
-//    against consumer files on user request. That precedent is what makes the
-//    trust level defensible. DO NOT EXCEED IT.
+// 3. IT RUNS WITH `--permission-mode acceptEdits` FROM THE PROJECT ROOT.
+//    This USED to be justified as "the same trust level as `pipeline drive`".
+//    It is not any more, deliberately: drive's steps now default to
+//    `bypassPermissions` (a headless step has no approver, so a narrower mode
+//    denies rather than asks — see DEFAULT_STEP_PERMISSION_MODE), and `fix`
+//    did NOT follow it there.
+//
+//    The reason is the shape of this command's guard. `fix` is pointed at
+//    CONSUMER files, and what keeps it honest is a PreToolUse hook that denies
+//    Edit/Write/MultiEdit/NotebookEdit outside <pipeline_root>. That hook says
+//    nothing about Bash. Under acceptEdits, Bash outside the pipeline folder
+//    is gated by the permission layer; under bypassPermissions it would not
+//    be, and the write-scope hook would not notice. So the two commands diverge on
+//    purpose: drive runs steps the operator authored and drove, `fix` runs a
+//    repair session over someone's project with one narrow guard.
+//
+//    DO NOT RAISE THIS to bypassPermissions without first extending the guard
+//    to cover Bash. The mode is doing load-bearing work the hook does not.
 //
 // 4. THE TRUST LEVEL IS STATED IN `--help`. In the deleted browser the
 //    Validate -> AI Fix button flow made it obvious an agent was about to edit

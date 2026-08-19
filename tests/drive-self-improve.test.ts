@@ -237,7 +237,7 @@ test('default improver/script-creator templates: session pinned, schema substitu
     expect(argv).toContain('--session-id');
     expect(argv[argv.indexOf('--session-id') + 1]).toBe('u-1');
     expect(argv[argv.indexOf('--json-schema') + 1]).toBe(schema);
-    expect(argv[argv.indexOf('--permission-mode') + 1]).toBe('acceptEdits');
+    expect(argv[argv.indexOf('--permission-mode') + 1]).toBe('bypassPermissions');
     expect(argv).not.toContain('--model');
     expect(argv).not.toContain('--effort');
     // Resume swaps the session flag — the crash-resume path.

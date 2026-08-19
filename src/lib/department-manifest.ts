@@ -486,6 +486,32 @@ export interface DepartmentSkill {
 }
 
 /** The LOCAL half in full. Not one field of this object is ever sent. */
+/**
+ * What a department's own repo ASKS to run under. A request, never a grant:
+ * the operator's `pipeline department serve --permission-mode/--allow-tool`
+ * overrides it, and the runner's binding is the only thing that actually
+ * decides. That ordering is the point — a checked-out repo that could widen
+ * its own posture would be a repo that grants itself rights on someone else's
+ * machine.
+ *
+ * Absent means "whatever the runner's default is" — today `bypassPermissions`,
+ * which is why the common department needs none of this to work anywhere.
+ * Declare it to run NARROWER than that.
+ *
+ * `mode` is not validated against a value set here: the vocabulary belongs to
+ * the engine's CLI, and `pipeline-runner bind` refuses an unknown one with the
+ * legal list. Validating it twice, in two packages, is how the two lists drift.
+ */
+export interface DepartmentRuntimePermissions {
+  /** Engine `--permission-mode` value (claude-code: acceptEdits, plan, … ). */
+  mode?: string;
+  /** Extra tools to pre-approve, e.g. `Bash`, `WebFetch`. The narrow
+   *  alternative to a wide `mode` — and unlike a project `permissions.allow`
+   *  block it survives an untrusted checkout, because it travels on the spawn
+   *  line rather than through the workspace's own settings. */
+  allowTools?: string[];
+}
+
 export interface DepartmentRuntime {
   engine: string;
   lifecycle: DepartmentLifecycle;
@@ -510,6 +536,11 @@ export interface DepartmentRuntime {
    * plane is told what a department does, never how.
    */
   agent?: string;
+  /** The department's REQUESTED permission posture — see
+   *  {@link DepartmentRuntimePermissions}. LOCAL, like every other `runtime:`
+   *  key: how this machine runs the department is never the control plane's
+   *  business. */
+  permissions?: DepartmentRuntimePermissions;
 }
 
 export interface DepartmentScheduling {
@@ -697,6 +728,7 @@ const RUNTIME_KEYS = [
   'args',
   'workingDirectory',
   'environment',
+  'permissions',
   'pipelineRoot',
   'startIteration',
   'agent',
@@ -1150,7 +1182,30 @@ function parseRuntime(doc: Record<string, unknown>, f: Findings): DepartmentRunt
     }
   }
 
+  const permissions = parsePermissions(block, f);
+  if (permissions !== undefined) runtime.permissions = permissions;
+
   return runtime;
+}
+
+/** `runtime.permissions:` — the department's REQUEST (see
+ *  {@link DepartmentRuntimePermissions}). An empty block yields `undefined`
+ *  rather than an empty object: "asked for nothing" and "did not ask" are the
+ *  same instruction to the binder, and one of them should not produce a
+ *  binding field. */
+function parsePermissions(
+  runtimeBlock: Record<string, unknown>,
+  f: Findings,
+): DepartmentRuntimePermissions | undefined {
+  const block = f.optionalBlock(runtimeBlock, 'permissions', 'runtime');
+  if (block === undefined) return undefined;
+  f.unknownKeys(block, ['mode', 'allowTools'], 'runtime.permissions');
+  const out: DepartmentRuntimePermissions = {};
+  const mode = f.optionalString(block, 'mode', MAX_LOCAL_STRING_LEN, 'runtime.permissions');
+  if (mode !== undefined) out.mode = mode;
+  const allowTools = f.optionalStringList(block, 'allowTools', MAX_LOCAL_STRING_LEN, 'runtime.permissions');
+  if (allowTools !== undefined && allowTools.length > 0) out.allowTools = allowTools;
+  return out.mode === undefined && out.allowTools === undefined ? undefined : out;
 }
 
 function parseEnvironment(

@@ -457,6 +457,12 @@ export interface RuntimeBinding {
   args: string[];
   cwd: string;
   lifecycle?: string;
+  /** The RESOLVED permission posture for this binding: the operator's flag if
+   *  they gave one, else the manifest's request, else absent — and absent
+   *  means the runner's own default applies. Never a merge of the two: an
+   *  override that merges is not an override. */
+  permissionMode?: string;
+  allowedTools?: string[];
   /** Nested spec fields no flag can carry (`pipelineDrive`, `container`) —
    *  handed to `bind --spec <json>`, which the flags then layer on top of. */
   spec: Record<string, unknown>;
@@ -484,6 +490,22 @@ export interface RuntimeBindingOptions {
    * from the command line would run something the manifest never named.
    */
   runtimeCommand?: string;
+  /**
+   * The OPERATOR's permission posture for this department, overriding whatever
+   * `runtime.permissions` in the manifest asked for.
+   *
+   * The ordering — operator flag, then manifest request, then the runner's
+   * default — is the security property, not a convenience. A department is
+   * frequently a repository someone else wrote, checked out on this machine;
+   * it may DESCRIBE what it needs, and the person who binds it decides. Absent
+   * on both sides is not a gap: the runner's default is what a department gets
+   * when nobody said anything, and it is chosen to work rather than to look
+   * cautious (see pipeline-runner's DEFAULT_PERMISSION_MODE).
+   */
+  permissionMode?: string;
+  /** Operator's `--allow-tool` entries. REPLACES the manifest's `allowTools`
+   *  rather than extending it. */
+  allowTools?: string[];
 }
 
 export type RuntimeBindingResult = { ok: true; binding: RuntimeBinding } | { ok: false; message: string };
@@ -634,6 +656,31 @@ export function runtimeBindingFor(
     }
   }
 
+  // ── The permission posture ───────────────────────────────────────────────
+  // Operator flag, then the manifest's REQUEST, then nothing (the runner's
+  // default). Never a merge: an override that merges is not an override, and
+  // the operator has to be able to make a posture strictly smaller than what
+  // the repo asked for.
+  //
+  // An overridden request is said out loud rather than dropped quietly — the
+  // author wrote it for a reason, and a machine that silently ignores it is
+  // how the two diverge without anyone noticing.
+  const requested = manifest.runtime.permissions;
+  const permissionMode = opts.permissionMode ?? requested?.mode;
+  const allowedTools = opts.allowTools ?? requested?.allowTools;
+  if (opts.permissionMode !== undefined && requested?.mode !== undefined && opts.permissionMode !== requested.mode) {
+    warnings.push(
+      `runtime.permissions.mode asks for '${requested.mode}'; this machine binds '${opts.permissionMode}' instead ` +
+        '(the operator decides — a department can request a posture, never grant itself one).',
+    );
+  }
+  if (opts.allowTools !== undefined && requested?.allowTools !== undefined) {
+    warnings.push(
+      `runtime.permissions.allowTools asks for ${requested.allowTools.join(', ')}; this machine binds ` +
+        `${opts.allowTools.join(', ') || '(none)'} instead — --allow-tool REPLACES the request, it does not extend it.`,
+    );
+  }
+
   return {
     ok: true,
     binding: {
@@ -642,6 +689,8 @@ export function runtimeBindingFor(
       args,
       cwd,
       ...(manifest.runtime.lifecycle !== undefined ? { lifecycle: manifest.runtime.lifecycle } : {}),
+      ...(permissionMode !== undefined ? { permissionMode } : {}),
+      ...(allowedTools !== undefined && allowedTools.length > 0 ? { allowedTools } : {}),
       spec,
       warnings,
     },
@@ -658,6 +707,11 @@ export function buildBindArgs(departmentId: string, binding: RuntimeBinding): st
   for (const a of binding.args) args.push('--arg', a);
   args.push('--cwd', binding.cwd);
   if (binding.lifecycle !== undefined) args.push('--lifecycle', binding.lifecycle);
+  // Omitted when nothing was resolved, so the runner's default applies. An
+  // unknown mode is NOT screened here: `bind` refuses it and names the legal
+  // values, and one list in one package is how the two stay in step.
+  if (binding.permissionMode !== undefined) args.push('--permission-mode', binding.permissionMode);
+  for (const t of binding.allowedTools ?? []) args.push('--allow-tool', t);
   if (Object.keys(binding.spec).length > 0) args.push('--spec', JSON.stringify(binding.spec));
   return args;
 }

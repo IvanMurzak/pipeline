@@ -2120,6 +2120,62 @@ describe('department-serve pure helpers', () => {
     expect(localSupervisorIsUp({ supervisor: 'unknown' })).toBe(false);
   });
 
+  // The permission posture. The ordering is the security property: a
+  // department is routinely a repository someone else wrote, checked out here,
+  // so it may DESCRIBE what it needs and the operator decides.
+  describe('permission posture', () => {
+    test('absent on both sides binds nothing — the runner default applies', () => {
+      const { manifest } = parseDepartmentManifest(departmentYaml({ engine: 'claude-code' }));
+      const result = runtimeBindingFor(manifest!, { manifestDir: resolve('/dept') });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.binding.permissionMode).toBeUndefined();
+      expect(result.binding.allowedTools).toBeUndefined();
+      const argv = buildBindArgs(DEPT_ID, result.binding);
+      expect(argv).not.toContain('--permission-mode');
+      expect(argv).not.toContain('--allow-tool');
+    });
+
+    test("the manifest's request is bound when the operator declares nothing", () => {
+      const { manifest } = parseDepartmentManifest(
+        departmentYaml({
+          engine: 'claude-code',
+          extra: '  permissions:\n    mode: plan\n    allowTools: ["Bash", "WebFetch"]\n',
+        }),
+      );
+      const result = runtimeBindingFor(manifest!, { manifestDir: resolve('/dept') });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.binding.permissionMode).toBe('plan');
+      expect(result.binding.allowedTools).toEqual(['Bash', 'WebFetch']);
+      expect(buildBindArgs(DEPT_ID, result.binding).join(' ')).toContain('--permission-mode plan');
+      expect(buildBindArgs(DEPT_ID, result.binding).join(' ')).toContain('--allow-tool Bash --allow-tool WebFetch');
+    });
+
+    test('the operator OVERRIDES the request, and is told that it did', () => {
+      const { manifest } = parseDepartmentManifest(
+        departmentYaml({ engine: 'claude-code', extra: '  permissions:\n    mode: plan\n' }),
+      );
+      const result = runtimeBindingFor(manifest!, { manifestDir: resolve('/dept'), permissionMode: 'acceptEdits' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.binding.permissionMode).toBe('acceptEdits');
+      // Overridden, never silently dropped: the author wrote it for a reason.
+      expect(result.binding.warnings.some((w) => w.includes("asks for 'plan'"))).toBe(true);
+    });
+
+    test('--allow-tool REPLACES the request rather than extending it', () => {
+      const { manifest } = parseDepartmentManifest(
+        departmentYaml({ engine: 'claude-code', extra: '  permissions:\n    allowTools: ["Bash", "WebFetch"]\n' }),
+      );
+      const result = runtimeBindingFor(manifest!, { manifestDir: resolve('/dept'), allowTools: ['Read'] });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.binding.allowedTools).toEqual(['Read']);
+      expect(result.binding.warnings.some((w) => w.includes('REPLACES'))).toBe(true);
+    });
+  });
+
   test('an engine that names its own command binds it, args and cwd included', () => {
     const { manifest } = parseDepartmentManifest(
       departmentYaml({
