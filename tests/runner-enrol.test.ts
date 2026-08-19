@@ -182,6 +182,39 @@ describe('readRunnerServiceState (x13)', () => {
     expect(readRunnerServiceState(withStdout("[pipeline-runner] service 'pipeline-runner' is not installed\n"))).toBe('not-installed');
   });
 
+  // The backend Windows ACTUALLY gets. `sc.exe` was replaced by Task
+  // Scheduler (a Bun script cannot answer the SCM), and its status verb
+  // renders prose with no `: <state> (` anywhere in it — so the shared rule
+  // returned `unknown` for every Windows machine and `serve` reported
+  // "already installed (its state could not be read)" about a supervisor that
+  // was running. Lines copied verbatim from
+  // pipeline-runner/src/service/windows-task.ts.
+  test("Windows Task Scheduler's four renderings", () => {
+    expect(readRunnerServiceState(withStdout("[pipeline-runner] scheduled task 'pipeline-runner' is running\n"))).toBe('running');
+    expect(
+      readRunnerServiceState(withStdout("[pipeline-runner] scheduled task 'pipeline-runner' is registered but not running\n")),
+    ).toBe('stopped');
+    expect(readRunnerServiceState(withStdout("[pipeline-runner] scheduled task 'pipeline-runner' is not installed\n"))).toBe(
+      'not-installed',
+    );
+    expect(
+      readRunnerServiceState(
+        withStdout(
+          "[pipeline-runner] scheduled task 'pipeline-runner' is registered; the scheduler reported a status this build does not recognise\n",
+        ),
+      ),
+    ).toBe('unknown');
+  });
+
+  test('"registered but not running" is never read as "running"', () => {
+    // The stopped rendering CONTAINS the word `running`; reading the shorter
+    // phrase first would call a dead supervisor live — the same class of
+    // mistake the `: <state> (` rule exists to prevent.
+    expect(
+      readRunnerServiceState(withStdout("[pipeline-runner] scheduled task 'pipeline-runner' is registered but not running\n")),
+    ).not.toBe('running');
+  });
+
   test("pipeline-runner's own fourth state is preserved, not rounded to 'stopped'", () => {
     // `sc query` output matching neither RUNNING nor STOPPED — the backend
     // reports `unknown`, and so must this.

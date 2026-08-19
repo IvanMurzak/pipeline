@@ -109,6 +109,7 @@ import {
 import {
   assessLiveness,
   bindRuntime,
+  checkRunnerIdentity,
   claimInstall,
   departmentUrlFor,
   ensureSupervisor,
@@ -121,6 +122,7 @@ import {
   registerOrUpdateDepartment,
   renderState,
   resolveLocalDepartmentId,
+  restartSupervisor,
   retireDepartmentRequest,
   runtimeBindingFor,
   SUPERVISOR_FOREGROUND_HINT,
@@ -1279,7 +1281,7 @@ interface ServeJson {
   department: { id: string | null; slug: string; digest: string; registration: string | null };
   runner: { id: string | null; name: string; enrolment: 'existing' | 'new' | null };
   binding: { adapter: string; command: string; lifecycle?: string } | null;
-  supervisor: 'installed' | 'already-installed' | 'skipped' | null;
+  supervisor: 'installed' | 'already-installed' | 'restarted' | 'skipped' | null;
   install: { id: string; pendingApproval: boolean; policy?: string; changed: boolean } | null;
   /**
    * x13: the EVIDENCE behind the state, so a scripted caller gets the same
@@ -1516,20 +1518,33 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
 
   let runnerId = identity?.runnerId ?? null;
   if (runnerId !== null) {
-    json.runner.enrolment = 'existing';
-    say(`✓ This machine    already a runner\n`);
     // A machine enrolled against a DIFFERENT control plane holds a runner id
     // this org has never heard of, so the claim in step 8 would 404 with a
     // message that does not explain itself. Say it here instead, where the
-    // cause is visible. Not fatal: the operator may have deliberately pointed
-    // one machine at two servers, and the claim's own error still decides.
+    // cause is visible. Not fatal on its own — the operator may have
+    // deliberately pointed one machine at two servers — and the identity
+    // check right below decides what actually happens.
     if (identity?.baseUrl && identity.baseUrl.replace(/\/+$/, '') !== auth.server) {
       warn(
-        `this machine is registered as a runner against ${identity.baseUrl}, but you are serving to ${auth.server} — ` +
-          're-run `pipeline-runner register --url <this server> …` if the install claim below fails',
+        `this machine is registered as a runner against ${identity.baseUrl}, but you are serving to ${auth.server}`,
       );
     }
-  } else {
+    // Ask the control plane whether that id is still a runner it has. A local
+    // identity is a CLAIM about the server, not a fact — see
+    // `checkRunnerIdentity`'s doc for the dead end that trusting it produced.
+    const check = await checkRunnerIdentity(deps, ctx, runnerId);
+    if (check.verdict === 'stale') {
+      say(`· This machine    its stored runner is no longer valid (${check.reason})\n`);
+      runnerId = null;
+    } else {
+      json.runner.enrolment = 'existing';
+      say(`✓ This machine    already a runner\n`);
+      if (check.verdict === 'unknown') {
+        warn(`could not verify this machine's runner registration (${check.detail}) — continuing with the stored one`);
+      }
+    }
+  }
+  if (runnerId === null) {
     // 05 §5 step 5: shell out to `pipeline-runner register`, never write its
     // config store. `installService: false` keeps step 7's one-service-per-
     // machine decision where it belongs — here, not inside enrolment.
@@ -1588,7 +1603,13 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
       );
     }
   } else {
-    const supervisor = ensureSupervisor(deps, serviceInstalled);
+    // An identity replaced at step 5 leaves an ALREADY-INSTALLED supervisor
+    // holding a dead credential, and `service install` is a no-op for it — so
+    // that case restarts instead. See `restartSupervisor`'s doc.
+    const supervisor =
+      serviceInstalled && json.runner.enrolment === 'new'
+        ? restartSupervisor(deps)
+        : ensureSupervisor(deps, serviceInstalled);
     if (!supervisor.ok) {
       return fail(
         `Registered and bound, but ${supervisor.message}\n` +
@@ -1596,7 +1617,16 @@ export async function runDepartmentServe(args: string[], deps: ServeCommandDeps 
       );
     }
     json.supervisor = supervisor.action;
-    if (supervisor.action === 'installed') {
+    if (supervisor.action === 'restarted') {
+      // Same reasoning as the `installed` branch below: this command just
+      // changed the world, so the state read at step 5 no longer describes it.
+      serviceState = readRunnerServiceState(runnerDeps);
+      say(
+        serviceState === 'running'
+          ? '✓ Supervisor      restarted with this machine’s new runner identity\n'
+          : '⚠ Supervisor      restarted for the new runner identity, but it is not running\n',
+      );
+    } else if (supervisor.action === 'installed') {
       // x13: the world just changed, so the state read at step 5 is stale.
       // This is the ONE case that re-shells `service status` — a6's rule is
       // "ask the machine-level question once", not "never notice an answer

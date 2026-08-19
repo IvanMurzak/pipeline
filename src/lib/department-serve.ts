@@ -893,7 +893,7 @@ export function bindRuntime(deps: ServeDeps, departmentId: string, binding: Runt
 // ---------------------------------------------------------------------------
 
 export type SupervisorOutcome =
-  | { ok: true; action: 'installed' | 'already-installed' }
+  | { ok: true; action: 'installed' | 'already-installed' | 'restarted' }
   | { ok: false; message: string };
 
 /**
@@ -914,6 +914,95 @@ export function ensureSupervisor(deps: ServeDeps, alreadyInstalled: boolean): Su
     };
   }
   return { ok: true, action: 'installed' };
+}
+
+/**
+ * `pipeline-runner service restart` — used for exactly one situation: this
+ * `serve` REPLACED the machine's runner identity (step 5 found the stored one
+ * stale and enrolled again) while a supervisor was already installed.
+ *
+ * That supervisor is holding the credential of a runner that no longer
+ * exists. Nothing about installing a service fixes it — one is installed
+ * already — so without this the run ends with a claimed install, a supervisor
+ * that cannot authenticate, and a department that is never online for a
+ * reason no output mentions. Restarting makes it read the identity `register`
+ * just wrote.
+ */
+export function restartSupervisor(deps: ServeDeps): SupervisorOutcome {
+  const r = deps.shell(RUNNER_CLI_BIN, ['service', 'restart']);
+  if (r.code !== 0) {
+    return {
+      ok: false,
+      message: `the supervisor could not be restarted: ${(r.stderr || r.stdout || `exit ${r.code}`).trim()}`,
+    };
+  }
+  return { ok: true, action: 'restarted' };
+}
+
+// ---------------------------------------------------------------------------
+// Step 5b — is this machine's stored runner identity still real?
+// ---------------------------------------------------------------------------
+
+/**
+ * What the control plane says about the runner id this machine has on disk.
+ *
+ *  - `usable`  — the row exists in this org and is not revoked;
+ *  - `stale`   — the org has no such runner (deleted, or minted against a
+ *                different org), or it is revoked. Either way the id cannot
+ *                claim an install, and no amount of re-running will change
+ *                that: the machine has to enrol again;
+ *  - `unknown` — the question could not be ANSWERED (transport failure, 5xx,
+ *                an auth error). Never treated as `stale`, because acting on
+ *                a non-answer would mint a duplicate runner every time the
+ *                network hiccuped.
+ */
+export type RunnerIdentityCheck =
+  | { verdict: 'usable' }
+  | { verdict: 'stale'; reason: string }
+  | { verdict: 'unknown'; detail: string };
+
+/**
+ * `GET /api/v1/runners/:id` — `requireOrg` only (any member may read it), so
+ * this is available to exactly the operators who are allowed to run `serve`.
+ *
+ * **Why this call exists.** Step 5 used to trust `pipeline-runner status`'s
+ * runner id on sight. A machine whose local identity was overwritten by a
+ * throwaway enrolment (an e2e run, a second org, a `register` against another
+ * server) then carried an id its org had never heard of, and every step from
+ * there on was spent on it: the runtime bound, the supervisor installed, and
+ * only the CLAIM at step 8 discovered the truth — as a bare `runner not found`
+ * with `Re-run to try again` under it. Re-running could not fix it, because
+ * nothing in the loop ever re-enrolled. Asking here turns a dead end into the
+ * enrolment the machine actually needed, before anything is built on the
+ * wrong id.
+ *
+ * A REVOKED runner is `stale` too, and that one is the quieter trap: the
+ * claim SUCCEEDS (the server's `getById` returns revoked rows), so `serve`
+ * reports a clean claim for a runner whose credential the gateway will refuse
+ * — a department that is claimed, never online, and gives no reason why.
+ */
+export async function checkRunnerIdentity(
+  deps: ServeDeps,
+  ctx: CloudContext,
+  runnerId: string,
+): Promise<RunnerIdentityCheck> {
+  const res = await cloudRequest(deps, ctx, 'GET', `/api/v1/runners/${runnerId}`);
+  if (res.networkError !== undefined) return { verdict: 'unknown', detail: res.networkError };
+  if (res.status === 404) {
+    return { verdict: 'stale', reason: `this org has no runner ${runnerId}` };
+  }
+  if (res.status !== 200) {
+    return { verdict: 'unknown', detail: serverError(res) ?? `HTTP ${res.status}` };
+  }
+  const runner = res.body?.['runner'];
+  if (typeof runner !== 'object' || runner === null || Array.isArray(runner)) {
+    return { verdict: 'unknown', detail: 'the response was malformed' };
+  }
+  const revokedAt = (runner as Record<string, unknown>)['revokedAt'];
+  if (typeof revokedAt === 'string' && revokedAt.length > 0) {
+    return { verdict: 'stale', reason: `runner ${runnerId} was revoked on ${revokedAt}` };
+  }
+  return { verdict: 'usable' };
 }
 
 // ---------------------------------------------------------------------------
