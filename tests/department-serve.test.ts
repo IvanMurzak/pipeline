@@ -165,6 +165,13 @@ interface CloudScript {
    *  "could not confirm" branch is reachable without breaking every other
    *  call the way `offlineOn` would. */
   profileStatus?: number;
+  /** Status for `GET /api/v1/runners/:id` — step 5b's "is this machine's
+   *  stored runner id still real?" read. Defaults to 200 (a live runner);
+   *  404 is the stale-identity case that used to dead-end at the claim. */
+  runnerStatus?: number;
+  /** `revokedAt` on the runner the read returns — the quieter stale case
+   *  (the row exists, so the claim SUCCEEDS, but its credential is dead). */
+  runnerRevokedAt?: string;
 }
 
 interface ShellScript {
@@ -177,6 +184,10 @@ interface ShellScript {
    *  (the second read). Defaults to `running` — every backend's `install`
    *  starts the service. */
   serviceStateAfterInstall?: 'running' | 'stopped' | 'unknown';
+  /** `service restart` — reached only when a re-enrolment happened under a
+   *  supervisor that was already installed. Defaults to success. */
+  serviceRestartCode?: number;
+  serviceRestartStderr?: string;
   /** Existing runner identity (a machine that is already enrolled). */
   identityRunnerId?: string | null;
   registerCode?: number;
@@ -257,6 +268,21 @@ function makeWorld(opts: { cwd: string; cloud?: CloudScript; shell?: ShellScript
           department: { id: DEPT_ID, slug: 'unity-review', enabled: true, retired: false, online, manifestDigest: null },
         });
       }
+      // Step 5b: the stored runner id, checked against the org that has to
+      // accept it. Must come BEFORE the collection route below — that one
+      // matches on `endsWith('/api/v1/runners')`, which this URL does not,
+      // but keeping the specific route first keeps the intent readable.
+      if (/\/api\/v1\/runners\/[^/]+$/.test(url) && init.method === 'GET') {
+        const status = cloud.runnerStatus ?? 200;
+        if (status !== 200) return reply(status, { error: 'runner not found' });
+        return reply(200, {
+          runner: {
+            id: RUNNER_ID,
+            name: 'test-machine',
+            revokedAt: cloud.runnerRevokedAt ?? null,
+          },
+        });
+      }
       if (url.endsWith('/api/v1/runners') && init.method === 'POST') {
         const status = cloud.mintStatus ?? 201;
         if (status !== 201) return reply(status, cloud.mintBody ?? { error: 'runner refused' });
@@ -335,6 +361,11 @@ function makeWorld(opts: { cwd: string; cloud?: CloudScript; shell?: ShellScript
       }
       if (cmd === 'pipeline-runner' && args[0] === 'service' && args[1] === 'install') {
         return { code: sh.serviceInstallCode ?? 0, stdout: '', stderr: sh.serviceInstallStderr ?? '' };
+      }
+      // Only reached when this run REPLACED the machine's runner identity
+      // under an already-installed supervisor.
+      if (cmd === 'pipeline-runner' && args[0] === 'service' && args[1] === 'restart') {
+        return { code: sh.serviceRestartCode ?? 0, stdout: '', stderr: sh.serviceRestartStderr ?? '' };
       }
       if (cmd === 'bun' && args[0] === 'add') return { code: 0, stdout: '', stderr: '' };
       return { code: 1, stdout: '', stderr: `test double: unexpected shell call: ${cmd} ${args.join(' ')}` };
@@ -624,6 +655,84 @@ describe('serve — DoD box 2: resumable from any partial state', () => {
     expect(second.fetches.filter((f) => f.init.method === 'POST' && f.url.endsWith('/departments'))).toHaveLength(0);
     expect(second.fetches.filter((f) => f.url.endsWith('/api/v1/runners'))).toHaveLength(0);
     expect(shellArgs(second, 'register')).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // A stored runner identity is a CLAIM about the server, not a fact.
+  //
+  // Reported from a real machine: `serve` printed `✓ This machine already a
+  // runner`, walked every remaining step on that id, and ended with
+  // `Registered, but the install could not be claimed: runner not found` —
+  // `Re-run to try again.` underneath it. Re-running could not fix it: the
+  // local `config.json` had been overwritten by a throwaway e2e enrolment
+  // whose runner was later deleted from the org, and no path in `serve` ever
+  // re-enrolled a machine that believed it already was one.
+  // -------------------------------------------------------------------------
+
+  test('a stored runner the org no longer has is re-enrolled, not carried into the claim', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      cloud: { runnerStatus: 404 },
+      shell: { identityRunnerId: 'dddddddd-dead-4dea-8dea-dddddddddddd' },
+    });
+
+    const code = await runDepartmentServe([], w.deps);
+
+    expect(code).toBe(0);
+    expect(w.out()).toContain('its stored runner is no longer valid');
+    expect(w.out()).not.toContain('✓ This machine    already a runner');
+    expect(w.err()).not.toContain('could not be claimed');
+    // It enrolled again rather than dead-ending, and the CLAIM used the runner
+    // the mint returned — the whole point.
+    expect(w.fetches.filter((f) => f.url.endsWith('/api/v1/runners') && f.init.method === 'POST')).toHaveLength(1);
+    expect(shellArgs(w, 'register')).toHaveLength(1);
+    const claim = w.fetches.find((f) => f.url.includes('/installs') && f.init.method === 'POST')!;
+    expect(bodyOf(claim)['runner_id']).toBe(RUNNER_ID);
+  });
+
+  test('a REVOKED runner is stale too — the claim would have succeeded and never come online', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      cloud: { runnerRevokedAt: '2026-08-17T07:38:11.863Z' },
+      shell: { identityRunnerId: RUNNER_ID },
+    });
+
+    expect(await runDepartmentServe([], w.deps)).toBe(0);
+    expect(w.out()).toContain('was revoked on');
+    expect(w.fetches.filter((f) => f.url.endsWith('/api/v1/runners') && f.init.method === 'POST')).toHaveLength(1);
+  });
+
+  test('re-enrolling under an already-installed supervisor RESTARTS it (it holds the dead credential)', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      cloud: { runnerStatus: 404 },
+      shell: { serviceInstalled: true, identityRunnerId: 'dddddddd-dead-4dea-8dea-dddddddddddd' },
+    });
+
+    expect(await runDepartmentServe([], w.deps)).toBe(0);
+    expect(w.shells.filter((c) => c.args[0] === 'service' && c.args[1] === 'restart')).toHaveLength(1);
+    // `service install` is a no-op for a machine that already has one, which
+    // is exactly why the restart had to be its own decision.
+    expect(w.shells.filter((c) => c.args[0] === 'service' && c.args[1] === 'install')).toHaveLength(0);
+    expect(w.out()).toContain('Supervisor      restarted');
+  });
+
+  test('an UNANSWERABLE identity read keeps the stored runner — a hiccup must not mint a duplicate', async () => {
+    const dir = departmentProject();
+    const w = makeWorld({
+      cwd: dir,
+      cloud: { runnerStatus: 503 },
+      shell: { identityRunnerId: RUNNER_ID },
+    });
+
+    expect(await runDepartmentServe([], w.deps)).toBe(0);
+    expect(w.out()).toContain('✓ This machine    already a runner');
+    expect(w.out()).toContain("could not verify this machine's runner registration");
+    expect(w.fetches.filter((f) => f.url.endsWith('/api/v1/runners') && f.init.method === 'POST')).toHaveLength(0);
+    expect(shellArgs(w, 'register')).toHaveLength(0);
   });
 
   test('a machine that already has a supervisor gets a binding, not a rival service (D26)', async () => {

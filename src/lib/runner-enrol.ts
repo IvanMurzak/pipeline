@@ -229,8 +229,17 @@ export type RunnerServiceState = 'running' | 'stopped' | 'not-installed' | 'unkn
  *
  *   systemd   `pipeline-runner.service: running (enabled)`
  *   launchd   `com.ivanmurzak.pipeline-runner: stopped (not loaded)`
- *   windows   `service 'pipeline-runner': stopped (auto-start)`
+ *   windows   `service 'pipeline-runner': stopped (auto-start)`   (sc.exe backend)
+ *   windows   `scheduled task 'pipeline-runner' is running`       (Task Scheduler backend)
  *   any       `<name> is not installed`
+ *
+ * The Task Scheduler backend is the one Windows actually gets today (a Bun
+ * script cannot answer the SCM, so `sc.exe` was replaced by `schtasks`), and
+ * it renders PROSE — no `: <state> (` anywhere in it. Reading it with the
+ * shared rule below returned `unknown` for every Windows machine, which is
+ * how `serve` came to print "already installed (its state could not be read)"
+ * about a supervisor that was running perfectly well. Both shapes are read
+ * here; neither is guessed at.
  *
  * Rules, in order, chosen so an unreadable answer can never become a claim:
  *  - a non-zero exit is `not-installed` — byte-for-byte the pre-existing
@@ -255,6 +264,17 @@ export function readRunnerServiceState(deps: Pick<RunnerEnrolDeps, 'shell'>): Ru
   if (r.code !== 0) return 'not-installed';
   const combined = `${r.stdout}\n${r.stderr}`;
   if (combined.toLowerCase().includes('not installed')) return 'not-installed';
+  // The Task Scheduler backend renders PROSE, not the `: <state> (` line —
+  // read it FIRST, because "registered but not running" also contains the
+  // word `running` and a generic scan would call a stopped supervisor live.
+  const task = /scheduled task\b[^\n]*?\bis\s+(registered but not running|running|registered\b)/i.exec(combined);
+  if (task !== null) {
+    const phrase = task[1]!.toLowerCase();
+    // `is registered; the scheduler reported a status this build does not
+    // recognise` is the backend saying so itself — pass that through as
+    // `unknown` rather than inventing a state for it.
+    return phrase === 'running' ? 'running' : phrase === 'registered but not running' ? 'stopped' : 'unknown';
+  }
   const m = /:\s*(running|stopped|unknown)\s*\(/i.exec(combined);
   if (m === null) return 'unknown';
   const word = m[1]!.toLowerCase();
