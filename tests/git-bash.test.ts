@@ -133,6 +133,18 @@ describe('the detection ladder on win32', () => {
     });
   });
 
+  test('rung 1: misnamed AND absent reports the BASENAME fault, as the dispatcher does', () => {
+    // Its message is `o ? "not found" : "is not a bash/sh binary"` where `o`
+    // is the basename test — so the basename fault has precedence over the
+    // existence fault, and both statements are true anyway.
+    const both = 'D:\\nope\\git-bash.exe';
+    const p = probe({ env: { [GIT_BASH_PATH_ENV]: both }, files: [] });
+    expect(detectGitBash(p)).toEqual({
+      status: 'missing',
+      ignoredOverride: { path: both, reason: 'not-a-bash-binary' },
+    });
+  });
+
   test('rung 1: an EXISTING file whose basename is not a bash is REJECTED', () => {
     // THE false-found case, reachable by following our own remedy line. A
     // portable Git ships `git-bash.exe` at its root — an existing file, and
@@ -354,6 +366,59 @@ describe('parseWhereOutput', () => {
     expect(parseWhereOutput('\r\n\r\n', withFiles())).toBeNull();
     expect(parseWhereOutput('C:\\gone\\git.exe\n', withFiles())).toBeNull();
   });
+
+  // -- a DRIVE ROOT cwd. The containment test must drop a git planted AT the
+  // root and keep everything deeper: `C:\Program Files\Git\cmd\git.exe` does
+  // not become attacker-controlled because the shell happens to sit at `C:\`.
+  // Windows containers default to `C:\`, and plenty of shells open there.
+
+  test('cwd = C:\\ keeps the real git deeper on the same drive', () => {
+    const real = 'C:\\Program Files\\Git\\cmd\\git.exe';
+    expect(parseWhereOutput(`${real}\n`, { cwd: 'C:\\', fileExists: () => true })).toBe(real);
+  });
+
+  test('cwd = C:\\ still drops a git planted AT the root', () => {
+    const planted = 'C:\\git.exe';
+    const real = 'C:\\Program Files\\Git\\cmd\\git.exe';
+    expect(parseWhereOutput(`${planted}\n${real}\n`, { cwd: 'C:\\', fileExists: () => true })).toBe(real);
+    expect(parseWhereOutput(`${planted}\n`, { cwd: 'C:\\', fileExists: () => true })).toBeNull();
+  });
+
+  test('cwd = D:\\ does not swallow the C: drive (and vice versa)', () => {
+    // The regression this pins: stripping the trailing separator off a root
+    // turned the prefix into `d:\`, which matches every path on D: — and
+    // `c:\`, which matches every path on C:. A portable/scoop/D:-drive Git
+    // then reported `missing` on a machine whose hooks work.
+    const onC = 'C:\\Program Files\\Git\\cmd\\git.exe';
+    const onD = 'D:\\dev\\Git\\cmd\\git.exe';
+    expect(parseWhereOutput(`${onD}\n`, { cwd: 'C:\\', fileExists: () => true })).toBe(onD);
+    expect(parseWhereOutput(`${onC}\n`, { cwd: 'D:\\', fileExists: () => true })).toBe(onC);
+  });
+
+  // -- the known-executable-extension filter (the dispatcher's last clause)
+
+  test('a bare `git` and a `git.ps1` are skipped; the next real .exe wins', () => {
+    // Both are reported by `where.exe` on some PATHs and both are rejected by
+    // the dispatcher. Taking one here would pick a different first survivor
+    // than the consumer does, and rung 4 tests exactly one derived bash path.
+    const out = 'C:\\tools\\git\nC:\\tools\\git.ps1\nC:\\Program Files\\Git\\cmd\\git.exe\n';
+    expect(parseWhereOutput(out, { cwd: CWD, fileExists: () => true })).toBe('C:\\Program Files\\Git\\cmd\\git.exe');
+  });
+
+  test('.cmd / .bat / .com shims are KEPT — scoop and chocolatey ship those', () => {
+    for (const p of ['C:\\shims\\git.cmd', 'C:\\shims\\git.bat', 'C:\\shims\\git.com', 'C:\\shims\\git.EXE']) {
+      expect(parseWhereOutput(`${p}\n`, { cwd: CWD, fileExists: () => true })).toBe(p);
+    }
+  });
+
+  test('trailing dots are stripped before the extension test', () => {
+    // Windows opens `git.exe.` as `git.exe`, so the name is still executable.
+    // (A trailing SPACE never survives the per-line `.trim()` above it.)
+    const p = 'C:\\tools\\git.exe.';
+    expect(parseWhereOutput(`${p}\n`, { cwd: CWD, fileExists: () => true })).toBe(p);
+    // …but a name that is nothing BUT an extension has no stem and is not.
+    expect(parseWhereOutput('C:\\tools\\.exe\n', { cwd: CWD, fileExists: () => true })).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -437,6 +502,12 @@ describe('the ignored-override note', () => {
     const s = gitBashOverrideNoteSummary(d);
     expect(s.includes('\n')).toBe(false);
     expect(s).toContain('nothing is broken');
-    expect(s.toLowerCase()).not.toContain('powershell');
+  });
+
+  test('NEVER suggests "shell": "powershell" — the fourth surface, pinned too', () => {
+    // The other three surfaces were already asserted; this one was only clean
+    // by inspection, which is not the same as being held clean.
+    expect(gitBashOverrideNoteLines(d).join('\n').toLowerCase()).not.toContain('powershell');
+    expect(gitBashOverrideNoteSummary(d).toLowerCase()).not.toContain('powershell');
   });
 });

@@ -28,7 +28,11 @@
 //      "found": we would go silent while all ten hooks throw.
 //   2. `C:\Program Files\Git\bin\bash.exe`
 //   3. `C:\Program Files (x86)\Git\bin\bash.exe`
-//   4. `<dirname(dirname(where.exe git))>\bin\bash.exe`
+//   4. `<dirname(dirname(where.exe git))>\bin\bash.exe`, where the `where.exe`
+//      output is filtered the way the dispatcher filters it — stale entries,
+//      hits inside the current directory, and names without a known
+//      executable extension all skipped before the first survivor is taken
+//      (see `parseWhereOutput`).
 //
 // A BAD OVERRIDE FALLS THROUGH — it does not stop the ladder. The dispatcher
 // logs `CLAUDE_CODE_GIT_BASH_PATH "…" not found` (or `is not a bash/sh
@@ -168,9 +172,17 @@ export function detectGitBash(probe: GitBashProbe): GitBashDetection {
     }
     // Rejected — but NOT terminal. The dispatcher warns and falls back to
     // auto-detection, so this is a note carried down the remaining rungs.
-    // `not-found` wins when both are wrong, matching the dispatcher's own
-    // message precedence.
-    ignoredOverride = { path: configured, reason: exists ? 'not-a-bash-binary' : 'not-found' };
+    //
+    // The BASENAME check has precedence, not existence: the dispatcher's
+    // message is `o ? "not found" : "is not a bash/sh binary"` where `o` is
+    // the basename test, so a value that is both misnamed and absent is
+    // reported as "is not a bash/sh binary" there. Mirrored exactly here —
+    // both statements would be true, and picking the other one would make
+    // this comment a claim about another program that is not so.
+    ignoredOverride = {
+      path: configured,
+      reason: looksLikeBashBinary(configured) ? 'not-found' : 'not-a-bash-binary',
+    };
   }
 
   const foundAt = (path: string, source: GitBashSource): GitBashDetection =>
@@ -281,27 +293,59 @@ function realFileExists(p: string): boolean {
   }
 }
 
+/** The extensions the dispatcher will treat as executable. `.bat` and `.cmd`
+ *  are IN the set, so a scoop/chocolatey shim is kept; what this drops is a
+ *  bare `git` or a `git.ps1`, both of which the dispatcher rejects. */
+const EXECUTABLE_EXTS = new Set(['.com', '.exe', '.bat', '.cmd']);
+
+/** Trailing dots and spaces are stripped first because Windows strips them
+ *  when opening a file: `git.exe. ` names the same file as `git.exe`. `dot > 0`
+ *  keeps a dotfile-style name (`.exe` with no stem) from counting. */
+function hasExecutableExtension(p: string): boolean {
+  const base = winPath.basename(p).toLowerCase().replace(/[. ]+$/, '');
+  const dot = base.lastIndexOf('.');
+  return dot > 0 && EXECUTABLE_EXTS.has(base.slice(dot));
+}
+
+/** Is `p` a direct child of `dir`, or below it? Both arguments must already be
+ *  resolved and lower-cased. This models the dispatcher's own containment test
+ *  and the two clauses are not redundant: at a DRIVE ROOT, `dir + sep` is
+ *  `c:\\` and matches nothing, so the `dirname` clause is the only live one —
+ *  which is exactly what makes a root cwd drop a planted `C:\git.exe` while
+ *  keeping `C:\Program Files\Git\cmd\git.exe`. For every non-root `dir` the
+ *  first clause is subsumed by the second. */
+function isInsideDir(p: string, dir: string): boolean {
+  return winPath.dirname(p) === dir || p.startsWith(dir + winPath.sep);
+}
+
 /**
  * Pick the usable `git` out of `where.exe git`'s stdout — pure, so the one
  * piece of parsing in this module is pinned by tests rather than by a single
  * manual Windows run.
  *
- * Two filters, both the dispatcher's:
+ * Three filters, in the dispatcher's own order:
  *   - the path must still exist (`where` reports stale PATH entries);
  *   - a hit INSIDE the current directory is SKIPPED. `pipeline init` runs in
  *     whatever directory the user chose — commonly a repo they just cloned —
  *     and a `git.exe` sitting there is attacker-supplied, not the system git.
+ *     Note what this must NOT do: treat a whole drive as "inside" merely
+ *     because the shell happens to sit at `C:\`. `C:\Program Files\Git\cmd\
+ *     git.exe` does not become attacker-controlled that way.
+ *   - the name must carry a known executable extension.
  * First survivor wins.
  */
 export function parseWhereOutput(stdout: string, deps: { cwd: string; fileExists: (p: string) => boolean }): string | null {
-  // Trailing separator stripped so the `startsWith(cwd + sep)` test cannot
-  // match a sibling directory whose name merely starts with the cwd's.
-  const cwd = winPath.resolve(deps.cwd).toLowerCase().replace(/[\\/]+$/, '');
+  // resolve() already strips a trailing separator from every non-root path,
+  // and MUST NOT be "helped" into stripping the one on a drive root: `C:\` →
+  // `C:` turns the containment prefix into `C:\`, which matches every path on
+  // the drive and discards them all.
+  const cwd = winPath.resolve(deps.cwd).toLowerCase();
   for (const rawLine of stdout.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line) continue;
     if (!deps.fileExists(line)) continue;
-    if (winPath.resolve(line).toLowerCase().startsWith(cwd + winPath.sep)) continue;
+    if (isInsideDir(winPath.resolve(line).toLowerCase(), cwd)) continue;
+    if (!hasExecutableExtension(line)) continue;
     return line;
   }
   return null;

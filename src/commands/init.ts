@@ -611,6 +611,16 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
     // this is a note, not a warning: no ⚠, no exit-code change, and `gitBash`
     // stays 'found'. It is said at all only so a stale variable does not stay
     // invisible until the day auto-detection stops answering.
+    //
+    // It still goes into `warnings[]` under --json, deliberately. That array
+    // is already this command's channel for "nothing failed, but you should
+    // know": the cloud step pushes one for a --json run with no machine token,
+    // and a missing `claude` pushes another — both on runs that exit 0. A
+    // consumer treating `warnings.length > 0` as failure already false-alarms
+    // on the most common CI shape, so routing this note anywhere else would
+    // buy nothing and would leave a --json caller unable to see a stale
+    // variable at all. The structural field stays honest either way: `gitBash`
+    // is 'found', because that is what the machine is.
     const note = { ...gitBash, ignoredOverride: gitBash.ignoredOverride };
     warnings.push(gitBashOverrideNoteSummary(note));
     if (!parsed.json) for (const l of gitBashOverrideNoteLines(note)) deps.out(`  ${l}\n`);
