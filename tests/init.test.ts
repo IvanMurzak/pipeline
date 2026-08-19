@@ -23,7 +23,7 @@
 //   - The "session already open" next-action line.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -36,6 +36,7 @@ import {
   type ClaudeCliRunner,
 } from '../src/commands/init';
 import type { DriveDeps } from '../src/commands/drive';
+import type { GitBashDetection } from '../src/lib/git-bash';
 
 const created: string[] = [];
 afterEach(() => {
@@ -66,6 +67,13 @@ interface Harness {
 interface HarnessOpts {
   claudeAvailable?: boolean;
   bunAvailable?: boolean;
+  /** The Windows-only Git Bash preflight (src/lib/git-bash.ts). Default:
+   *  `not-applicable` — i.e. a non-Windows host, the shape every pre-existing
+   *  test here was written against. Pinned rather than read from
+   *  `process.platform` ON PURPOSE: CI runs this suite on windows-latest as
+   *  well as ubuntu-latest, and a check that answered differently there would
+   *  make the `--json` shape assertions below platform-dependent. */
+  gitBash?: GitBashDetection;
   claudeCli?: (args: string[]) => ShellResult;
   /** Fake headless run engine. Default: 3 support-answer steps, all succeed,
    *  0.1s apart on the fake clock. */
@@ -133,6 +141,7 @@ function harness(opts: HarnessOpts = {}): Harness {
     },
     bunAvailable: () => opts.bunAvailable ?? true,
     claudeAvailable: () => opts.claudeAvailable ?? true,
+    gitBash: () => opts.gitBash ?? { status: 'not-applicable' },
     claudeCli: (args) => {
       claudeCliCalls.push(args);
       return claudeCliImpl(args);
@@ -722,6 +731,185 @@ describe('cloudStepDecision / cloudConnectArgs', () => {
 
   test('--no-runner reaches connect as --no-runner', () => {
     expect(cloudConnectArgs(opts({ noRunner: true }))).toEqual(['--no-runner']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Git Bash preflight (x2-init-git-bash-preflight)
+//
+// How init COMPOSES the check; the detection ladder itself (which path is
+// probed, in what order, and that it is never a PATH lookup) is exercised in
+// tests/git-bash.test.ts against the pure `detectGitBash`.
+// ---------------------------------------------------------------------------
+
+describe('the Git Bash preflight', () => {
+  test('missing: warns with the consequence and BOTH install routes, and still exits 0', async () => {
+    const proj = tempProject();
+    const h = harness({ gitBash: { status: 'missing' } });
+    const code = await runInit(['--dir', proj, '--no-run'], h.deps);
+    // Warn, do not hard-fail — unlike bun, this is not needed by the CLI
+    // itself, only by the plugin's hooks.
+    expect(code).toBe(0);
+    const out = h.stdout();
+    expect(out).toContain('Git Bash not found');
+    expect(out).toContain("the Pipeline plugin's Claude Code hooks will not run");
+    expect(out).toContain('https://git-scm.com/download/win');
+    expect(out).toContain('winget install --id Git.Git -e --source winget');
+    expect(out).toContain('CLAUDE_CODE_GIT_BASH_PATH');
+    // ONE warning, not one per install route.
+    expect(out.split('\n').filter((l) => l.includes('⚠ Git Bash')).length).toBe(1);
+    // The rest of init still happened.
+    expect(existsSync(join(proj, '.pipeline', 'support-answer', 'PIPELINE.md'))).toBe(true);
+  });
+
+  test('the remedy is NEVER "shell": "powershell"', async () => {
+    // Claude Code's own error text suggests it; for this plugin it re-opens
+    // the fail-open the bash pin closes.
+    const proj = tempProject();
+    const h = harness({ gitBash: { status: 'missing' } });
+    await runInit(['--dir', proj, '--no-run'], h.deps);
+    expect(h.stdout().toLowerCase()).not.toContain('powershell');
+    expect(h.stderr().toLowerCase()).not.toContain('powershell');
+  });
+
+  test('a typo\'d CLAUDE_CODE_GIT_BASH_PATH is named in the warning', async () => {
+    const proj = tempProject();
+    const h = harness({
+      gitBash: { status: 'missing', ignoredOverride: { path: 'D:\\nope\\bash.exe', reason: 'not-found' } },
+    });
+    const code = await runInit(['--dir', proj, '--no-run'], h.deps);
+    expect(code).toBe(0);
+    expect(h.stdout()).toContain('D:\\nope\\bash.exe');
+    expect(h.stdout()).toContain('which does not exist');
+  });
+
+  test('found DESPITE a bad override: an informational note, not a warning, still exit 0', async () => {
+    // The dispatcher ignores a bad CLAUDE_CODE_GIT_BASH_PATH and auto-detects,
+    // so this machine's hooks WORK. Saying "Git Bash not found" here would
+    // send the user to reinstall software they already have.
+    const proj = tempProject();
+    const h = harness({
+      gitBash: {
+        status: 'found',
+        path: 'C:\\Program Files\\Git\\bin\\bash.exe',
+        source: 'program-files',
+        ignoredOverride: { path: 'D:\\nope\\bash.exe', reason: 'not-found' },
+      },
+    });
+    const code = await runInit(['--dir', proj, '--no-run'], h.deps);
+    expect(code).toBe(0);
+    const out = h.stdout();
+    expect(out).toContain('D:\\nope\\bash.exe');
+    expect(out).toContain('C:\\Program Files\\Git\\bin\\bash.exe');
+    // Never the warning glyph, and never the broken-hooks sentence.
+    expect(out).not.toContain('⚠ Git Bash');
+    expect(out).not.toContain('will not run');
+  });
+
+  test('--json: found despite a bad override stays gitBash:"found", with the note in warnings', async () => {
+    const proj = tempProject();
+    const h = harness({
+      env: { PIPELINE_MACHINE_TOKEN: 'mc_test' },
+      gitBash: {
+        status: 'found',
+        path: 'C:\\Program Files\\Git\\bin\\bash.exe',
+        source: 'program-files',
+        ignoredOverride: { path: 'D:\\nope\\bash.exe', reason: 'not-a-bash-binary' },
+      },
+    });
+    const code = await runInit(['--dir', proj, '--json'], h.deps);
+    expect(code).toBe(0);
+    const parsed = JSON.parse(h.stdout().trim());
+    // The structural field reports what the machine IS, not what the variable says.
+    expect(parsed.gitBash).toBe('found');
+    expect(parsed.ok).toBe(true);
+    expect(parsed.warnings.join(' ')).toContain('is not a bash/sh binary');
+    expect(parsed.warnings.join(' ')).toContain('nothing is broken');
+  });
+
+  test('the preflight result survives onto the clone-failure --json document', async () => {
+    // A --json consumer must not lose the hook-environment verdict merely
+    // because a later, unrelated step failed.
+    const proj = tempProject();
+    // `.pipeline` as a FILE makes the template copy throw (ENOTDIR) while
+    // leaving the destination "not already present".
+    writeFileSync(join(proj, '.pipeline'), 'not a directory');
+    const h = harness({ gitBash: { status: 'missing' } });
+    const code = await runInit(['--dir', proj, '--json'], h.deps);
+    expect(code).toBe(1);
+    const parsed = JSON.parse(h.stdout().trim());
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain('could not clone');
+    expect(parsed.gitBash).toBe('missing');
+    expect(parsed.warnings.join(' ')).toContain('git-bash');
+  });
+
+  test('found: completely silent — no warning at all', async () => {
+    const proj = tempProject();
+    const h = harness({
+      gitBash: { status: 'found', path: 'C:\\Program Files\\Git\\bin\\bash.exe', source: 'program-files' },
+    });
+    const code = await runInit(['--dir', proj, '--no-run'], h.deps);
+    expect(code).toBe(0);
+    expect(h.stdout()).not.toContain('Git Bash');
+    expect(h.stderr()).not.toContain('Git Bash');
+  });
+
+  test('non-Windows: the check does not run, and says nothing', async () => {
+    const proj = tempProject();
+    const h = harness({ gitBash: { status: 'not-applicable' } });
+    const code = await runInit(['--dir', proj, '--no-run'], h.deps);
+    expect(code).toBe(0);
+    expect(h.stdout()).not.toContain('Git Bash');
+  });
+
+  test('--json: valid JSON, gitBash:"missing" structurally, ok:true, exit 0', async () => {
+    const proj = tempProject();
+    // The machine credential keeps the cloud step quiet, so `warnings` here
+    // carries the Git Bash entry and nothing else.
+    const h = harness({ gitBash: { status: 'missing' }, env: { PIPELINE_MACHINE_TOKEN: 'mc_test' } });
+    const code = await runInit(['--dir', proj, '--json'], h.deps);
+    expect(code).toBe(0);
+    // Still exactly ONE JSON document on stdout — the warning must never be
+    // printed as free text there.
+    const lines = h.stdout().trim().split('\n');
+    expect(lines).toHaveLength(1);
+    const parsed = JSON.parse(lines[0]!);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.gitBash).toBe('missing');
+    expect(parsed.warnings.join(' ')).toContain('https://git-scm.com/download/win');
+    expect(parsed.warnings.join(' ')).toContain('winget install --id Git.Git -e --source winget');
+  });
+
+  test('--json: gitBash:"found" when present', async () => {
+    const proj = tempProject();
+    const h = harness({
+      gitBash: { status: 'found', path: 'C:\\Program Files\\Git\\bin\\bash.exe', source: 'program-files' },
+      env: { PIPELINE_MACHINE_TOKEN: 'mc_test' },
+    });
+    await runInit(['--dir', proj, '--json'], h.deps);
+    const parsed = JSON.parse(h.stdout().trim());
+    expect(parsed.gitBash).toBe('found');
+    expect(parsed.warnings).toBeUndefined();
+  });
+
+  test('--json on macOS/Linux: the key is ABSENT, not "found"', async () => {
+    // "did not apply here" is a different fact from "ran and found one", and
+    // a script reading this must be able to tell them apart.
+    const proj = tempProject();
+    const h = harness({ gitBash: { status: 'not-applicable' } });
+    await runInit(['--dir', proj, '--json'], h.deps);
+    const parsed = JSON.parse(h.stdout().trim());
+    expect('gitBash' in parsed).toBe(false);
+  });
+
+  test('bun missing still short-circuits: no Git Bash warning before the hard fail', async () => {
+    const proj = tempProject();
+    const h = harness({ bunAvailable: false, gitBash: { status: 'missing' } });
+    const code = await runInit(['--dir', proj], h.deps);
+    expect(code).toBe(1);
+    expect(h.stderr()).toContain('https://bun.sh');
+    expect(h.stdout()).not.toContain('Git Bash');
   });
 });
 
