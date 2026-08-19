@@ -14,9 +14,13 @@
 import { describe, expect, test } from 'bun:test';
 import {
   detectGitBash,
+  gitBashOverrideNoteLines,
+  gitBashOverrideNoteSummary,
   gitBashWarningLines,
   gitBashWarningSummary,
   gitRelativeBashPath,
+  looksLikeBashBinary,
+  parseWhereOutput,
   GIT_BASH_PATH_ENV,
   PROGRAM_FILES_GIT_BASH,
   PROGRAM_FILES_X86_GIT_BASH,
@@ -101,25 +105,90 @@ describe('the detection ladder on win32', () => {
     expect(p.gitExeCalls).toBe(0);
   });
 
-  test('rung 1: an override pointing nowhere is MISSING, not a fallthrough', () => {
-    // Claude Code honours the variable, so a typo breaks the hooks exactly as
-    // thoroughly as no Git Bash at all. Quietly reporting the Program Files
-    // copy would hide the fault that is actually in effect.
+  test('rung 1: an override pointing nowhere FALLS THROUGH — the machine still works', () => {
+    // The dispatcher does NOT honour the variable unconditionally: it logs
+    // `CLAUDE_CODE_GIT_BASH_PATH "…" not found; falling back to
+    // auto-detection` and carries on. So a stale variable on a machine with a
+    // normal Program Files install is a machine whose hooks WORK — reporting
+    // `missing` there would send the user to reinstall what they already have,
+    // and hand a --json consumer a false negative on a healthy box.
     const custom = 'D:\\typo\\bash.exe';
     const p = probe({ env: { [GIT_BASH_PATH_ENV]: custom }, files: [PROGRAM_FILES_GIT_BASH] });
-    expect(detectGitBash(p)).toEqual({ status: 'missing', configuredPath: custom });
-    expect(p.probed).toEqual([custom]);
+    expect(detectGitBash(p)).toEqual({
+      status: 'found',
+      path: PROGRAM_FILES_GIT_BASH,
+      source: 'program-files',
+      // …and the bad variable is still surfaced, as a note rather than a verdict.
+      ignoredOverride: { path: custom, reason: 'not-found' },
+    });
+    expect(p.probed).toEqual([custom, PROGRAM_FILES_GIT_BASH]);
   });
 
-  test('rung 1: a blank override counts as unset', () => {
+  test('rung 1: a bad override plus an empty ladder is MISSING, and says both', () => {
+    const custom = 'D:\\typo\\bash.exe';
+    const p = probe({ env: { [GIT_BASH_PATH_ENV]: custom }, files: [] });
+    expect(detectGitBash(p)).toEqual({
+      status: 'missing',
+      ignoredOverride: { path: custom, reason: 'not-found' },
+    });
+  });
+
+  test('rung 1: an EXISTING file whose basename is not a bash is REJECTED', () => {
+    // THE false-found case, reachable by following our own remedy line. A
+    // portable Git ships `git-bash.exe` at its root — an existing file, and
+    // the icon users actually call "Git Bash". The dispatcher requires the
+    // basename to be one of bash.exe / sh.exe / bash / sh, rejects this, and
+    // falls back; accepting it here would report `found` while all ten hooks
+    // throw.
+    const launcher = 'D:\\PortableGit\\git-bash.exe';
+    const p = probe({ env: { [GIT_BASH_PATH_ENV]: launcher }, files: [launcher] });
+    expect(detectGitBash(p)).toEqual({
+      status: 'missing',
+      ignoredOverride: { path: launcher, reason: 'not-a-bash-binary' },
+    });
+  });
+
+  test('rung 1: every basename the dispatcher accepts, case-insensitively', () => {
+    for (const name of ['bash.exe', 'sh.exe', 'bash', 'sh', 'BASH.EXE', 'Sh']) {
+      const path = `D:\\tools\\${name}`;
+      expect(looksLikeBashBinary(path)).toBe(true);
+      expect(detectGitBash(probe({ env: { [GIT_BASH_PATH_ENV]: path }, files: [path] }))).toEqual({
+        status: 'found',
+        path,
+        source: 'env',
+      });
+    }
+    for (const name of ['git-bash.exe', 'bash.cmd', 'bashx.exe', 'sh.bat', 'git.exe']) {
+      expect(looksLikeBashBinary(`D:\\tools\\${name}`)).toBe(false);
+    }
+  });
+
+  test('rung 1: the value is used RAW — a leading space is not trimmed away', () => {
+    // The dispatcher does not trim, and Windows strips trailing spaces from a
+    // path but not leading ones. Silently repairing the value here would
+    // report `found` for a value the consumer rejects — the false-found
+    // direction again.
+    const raw = ' D:\\tools\\Git\\bin\\bash.exe';
+    const p = probe({ env: { [GIT_BASH_PATH_ENV]: raw }, files: ['D:\\tools\\Git\\bin\\bash.exe'] });
+    expect(detectGitBash(p)).toEqual({
+      status: 'missing',
+      ignoredOverride: { path: raw, reason: 'not-found' },
+    });
+    expect(p.probed[0]).toBe(raw); // asked about the untrimmed string
+  });
+
+  test('rung 1: a blank override counts as unset — no note, no noise', () => {
     // The classic "configured but empty" CI mistake — same stance as
-    // cloudStepDecision's blank PIPELINE_MACHINE_TOKEN.
+    // cloudStepDecision's blank PIPELINE_MACHINE_TOKEN. The dispatcher would
+    // reject it on its basename and fall through, which is what treating it as
+    // unset does, minus a nonsense note about a variable full of spaces.
     const p = probe({ env: { [GIT_BASH_PATH_ENV]: '   ' }, files: [PROGRAM_FILES_GIT_BASH] });
     expect(detectGitBash(p)).toEqual({
       status: 'found',
       path: PROGRAM_FILES_GIT_BASH,
       source: 'program-files',
     });
+    expect(p.probed).toEqual([PROGRAM_FILES_GIT_BASH]); // the blank value was never probed
   });
 
   test('rung 2: the default Program Files install', () => {
@@ -163,7 +232,21 @@ describe('the detection ladder on win32', () => {
     expect(detectGitBash(p)).toEqual({ status: 'missing' });
   });
 
-  test('nothing anywhere: missing, with no configuredPath', () => {
+  test('a bad override rides along all the way down to rung 4', () => {
+    const p = probe({
+      env: { [GIT_BASH_PATH_ENV]: 'D:\\typo\\bash.exe' },
+      gitExe: 'D:\\dev\\Git\\cmd\\git.exe',
+      files: ['D:\\dev\\Git\\bin\\bash.exe'],
+    });
+    expect(detectGitBash(p)).toEqual({
+      status: 'found',
+      path: 'D:\\dev\\Git\\bin\\bash.exe',
+      source: 'git-relative',
+      ignoredOverride: { path: 'D:\\typo\\bash.exe', reason: 'not-found' },
+    });
+  });
+
+  test('nothing anywhere: missing, with no ignoredOverride', () => {
     const p = probe({ files: [], gitExe: null });
     expect(detectGitBash(p)).toEqual({ status: 'missing' });
     expect(p.probed).toEqual([PROGRAM_FILES_GIT_BASH, PROGRAM_FILES_X86_GIT_BASH]);
@@ -217,6 +300,63 @@ describe('gitRelativeBashPath', () => {
 });
 
 // ---------------------------------------------------------------------------
+// parseWhereOutput — the module's only parsing logic, and the one place a
+// binary-planting hit could slip through
+// ---------------------------------------------------------------------------
+
+describe('parseWhereOutput', () => {
+  const CWD = 'C:\\Users\\dev\\project';
+  const withFiles = (...files: string[]) => ({ cwd: CWD, fileExists: (p: string) => files.includes(p) });
+
+  test('first surviving line, CRLF and blank lines tolerated', () => {
+    const out = 'C:\\Program Files\\Git\\cmd\\git.exe\r\nC:\\other\\git.exe\r\n\r\n';
+    expect(parseWhereOutput(out, withFiles('C:\\Program Files\\Git\\cmd\\git.exe', 'C:\\other\\git.exe'))).toBe(
+      'C:\\Program Files\\Git\\cmd\\git.exe',
+    );
+  });
+
+  test('a stale PATH entry is skipped, the next real one wins', () => {
+    // `where` happily reports a path whose file has since been deleted.
+    const out = 'C:\\gone\\git.exe\nC:\\real\\git.exe\n';
+    expect(parseWhereOutput(out, withFiles('C:\\real\\git.exe'))).toBe('C:\\real\\git.exe');
+  });
+
+  test('a hit INSIDE the current directory is skipped — binary planting', () => {
+    // `pipeline init` runs in a directory the user chose, commonly a repo they
+    // have just cloned. A `git.exe` sitting there is attacker-supplied, and
+    // the dispatcher skips exactly this.
+    const planted = `${CWD}\\git.exe`;
+    const out = `${planted}\nC:\\Program Files\\Git\\cmd\\git.exe\n`;
+    expect(parseWhereOutput(out, withFiles(planted, 'C:\\Program Files\\Git\\cmd\\git.exe'))).toBe(
+      'C:\\Program Files\\Git\\cmd\\git.exe',
+    );
+  });
+
+  test('a planted hit in a SUBdirectory of the cwd is skipped too', () => {
+    const planted = `${CWD}\\node_modules\\.bin\\git.exe`;
+    expect(parseWhereOutput(`${planted}\n`, withFiles(planted))).toBeNull();
+  });
+
+  test('the cwd test is case-insensitive and separator-normalised', () => {
+    const planted = 'c:/users/dev/project/git.exe';
+    expect(parseWhereOutput(`${planted}\n`, withFiles(planted))).toBeNull();
+  });
+
+  test('a sibling directory whose name merely starts with the cwd is NOT skipped', () => {
+    // `C:\Users\dev\project-tools` is not inside `C:\Users\dev\project`; a
+    // naive startsWith without the separator would drop it.
+    const sibling = 'C:\\Users\\dev\\project-tools\\git.exe';
+    expect(parseWhereOutput(`${sibling}\n`, withFiles(sibling))).toBe(sibling);
+  });
+
+  test('empty / all-filtered output is null', () => {
+    expect(parseWhereOutput('', withFiles())).toBeNull();
+    expect(parseWhereOutput('\r\n\r\n', withFiles())).toBeNull();
+    expect(parseWhereOutput('C:\\gone\\git.exe\n', withFiles())).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The warning text — a contract, because it is the only thing the user sees
 // ---------------------------------------------------------------------------
 
@@ -241,12 +381,25 @@ describe('the warning', () => {
   test('a typo\'d override is named, with what is wrong with it', () => {
     const d: Extract<GitBashDetection, { status: 'missing' }> = {
       status: 'missing',
-      configuredPath: 'D:\\nope\\bash.exe',
+      ignoredOverride: { path: 'D:\\nope\\bash.exe', reason: 'not-found' },
     };
     const text = gitBashWarningLines(d).join('\n');
     expect(text).toContain('D:\\nope\\bash.exe');
     expect(text).toContain('which does not exist');
+    // …and that the override was ignored rather than obeyed, so the user does
+    // not go hunting for a variable problem that is not the whole story.
+    expect(text).toContain('auto-detect');
     expect(gitBashWarningSummary(d)).toContain('D:\\nope\\bash.exe');
+  });
+
+  test('a wrong-basename override is described as such, not as "does not exist"', () => {
+    const d: Extract<GitBashDetection, { status: 'missing' }> = {
+      status: 'missing',
+      ignoredOverride: { path: 'D:\\PortableGit\\git-bash.exe', reason: 'not-a-bash-binary' },
+    };
+    const text = gitBashWarningLines(d).join('\n');
+    expect(text).toContain('is not a bash/sh binary');
+    expect(text).not.toContain('does not exist');
   });
 
   test('the --json summary is ONE line and says the same things', () => {
@@ -255,5 +408,35 @@ describe('the warning', () => {
     expect(s).toContain('https://git-scm.com/download/win');
     expect(s).toContain('winget install --id Git.Git -e --source winget');
     expect(s).toContain(GIT_BASH_PATH_ENV);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The NOTE — found despite a bad override. A different thing from a warning.
+// ---------------------------------------------------------------------------
+
+describe('the ignored-override note', () => {
+  const d = {
+    status: 'found' as const,
+    path: PROGRAM_FILES_GIT_BASH,
+    source: 'program-files' as const,
+    ignoredOverride: { path: 'D:\\nope\\bash.exe', reason: 'not-found' as const },
+  };
+
+  test('names the bad variable AND the path actually in use, without a warning glyph', () => {
+    const text = gitBashOverrideNoteLines(d).join('\n');
+    expect(text).toContain('D:\\nope\\bash.exe');
+    expect(text).toContain(PROGRAM_FILES_GIT_BASH);
+    // Not a warning: hooks work. `⚠` is reserved for the case where they do not.
+    expect(text).not.toContain('⚠');
+    // And it must NOT claim the hooks are broken.
+    expect(text).not.toContain('will not run');
+  });
+
+  test('the one-line summary says plainly that nothing is broken', () => {
+    const s = gitBashOverrideNoteSummary(d);
+    expect(s.includes('\n')).toBe(false);
+    expect(s).toContain('nothing is broken');
+    expect(s.toLowerCase()).not.toContain('powershell');
   });
 });

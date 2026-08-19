@@ -48,6 +48,8 @@ import { runDrive, type DriveDeps } from './drive';
 import { newId } from '../lib/ids';
 import {
   detectGitBash,
+  gitBashOverrideNoteLines,
+  gitBashOverrideNoteSummary,
   gitBashWarningLines,
   gitBashWarningSummary,
   realGitBashProbe,
@@ -572,19 +574,6 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
     return 1;
   }
 
-  // --- Step 0.2: preflight — Git Bash, Windows only. UNLIKE bun this is a
-  // WARNING, not a stop: the CLI itself does not need it, only the plugin's
-  // Claude Code hooks do (all ten are pinned to `"shell": "bash"`, which
-  // Windows resolves to Git Bash). So this follows the precedent `init`
-  // already sets for a missing Claude Code — say so clearly, continue, exit 0
-  // — rather than bun's hard fail. Computed here, printed after the banner so
-  // the transcript still opens with the one-line "what this is doing" header.
-  //
-  // Detection is deliberately prefix-based, never a PATH lookup for `bash`;
-  // lib/git-bash.ts's header explains why the obvious version is worse than
-  // no check at all.
-  const gitBash = deps.gitBash();
-
   const cloudDecision = cloudStepDecision(parsed, deps.env);
 
   if (!parsed.json) {
@@ -595,11 +584,36 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
     );
   }
 
+  // --- Step 0.2: preflight — Git Bash, Windows only. UNLIKE bun this is a
+  // WARNING, not a stop: the CLI itself does not need it, only the plugin's
+  // Claude Code hooks do (all ten are pinned to `"shell": "bash"`, which
+  // Windows resolves to Git Bash). So this follows the precedent `init`
+  // already sets for a missing Claude Code — say so clearly, continue, exit 0
+  // — rather than bun's hard fail.
+  //
+  // Probed AFTER the banner, deliberately: its last rung shells out to
+  // `where.exe`, which walks every PATH entry and can stall on a dead UNC
+  // one. Bounded by a timeout in lib/git-bash.ts, but even a bounded stall
+  // should happen under a printed header rather than on a blank screen.
+  //
+  // Detection follows the consumer's own ladder — never a PATH lookup for
+  // `bash`; lib/git-bash.ts's header explains why the obvious version is
+  // worse than no check at all.
+  const gitBash = deps.gitBash();
+
   if (gitBash.status === 'missing') {
     warnings.push(gitBashWarningSummary(gitBash));
     // Under --json this is carried by `warnings[]` + the `gitBash` field only:
     // free text on stdout there would corrupt the one-JSON-document contract.
     if (!parsed.json) for (const l of gitBashWarningLines(gitBash)) deps.out(`  ${l}\n`);
+  } else if (gitBash.status === 'found' && gitBash.ignoredOverride) {
+    // Hooks WORK — Claude Code ignored the bad override and auto-detected. So
+    // this is a note, not a warning: no ⚠, no exit-code change, and `gitBash`
+    // stays 'found'. It is said at all only so a stale variable does not stay
+    // invisible until the day auto-detection stops answering.
+    const note = { ...gitBash, ignoredOverride: gitBash.ignoredOverride };
+    warnings.push(gitBashOverrideNoteSummary(note));
+    if (!parsed.json) for (const l of gitBashOverrideNoteLines(note)) deps.out(`  ${l}\n`);
   }
 
   // --- Step 0.5: the cloud. FIRST, and by default (the browser consent is the
@@ -663,7 +677,14 @@ export async function runInit(args: string[], deps: InitDeps = realInitDeps): Pr
   if (clone.status === 'failed') {
     const msg = `could not clone the starter pipeline: ${clone.detail ?? 'unknown error'}`;
     if (parsed.json) {
-      deps.out(JSON.stringify({ ok: false, error: msg, template: entry.name } satisfies JsonResult) + '\n');
+      // The preflight result rides along even on this failure path: the human
+      // transcript already printed it above, and a --json consumer that loses
+      // it here would be told nothing about a broken hook environment merely
+      // because a later, unrelated step failed.
+      const failed: JsonResult = { ok: false, error: msg, template: entry.name };
+      if (gitBash.status !== 'not-applicable') failed.gitBash = gitBash.status;
+      if (warnings.length > 0) failed.warnings = warnings;
+      deps.out(JSON.stringify(failed) + '\n');
     } else {
       deps.err(`pipeline init: ${msg}\n`);
     }

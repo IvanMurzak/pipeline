@@ -23,7 +23,7 @@
 //   - The "session already open" next-action line.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -774,11 +774,74 @@ describe('the Git Bash preflight', () => {
 
   test('a typo\'d CLAUDE_CODE_GIT_BASH_PATH is named in the warning', async () => {
     const proj = tempProject();
-    const h = harness({ gitBash: { status: 'missing', configuredPath: 'D:\\nope\\bash.exe' } });
+    const h = harness({
+      gitBash: { status: 'missing', ignoredOverride: { path: 'D:\\nope\\bash.exe', reason: 'not-found' } },
+    });
     const code = await runInit(['--dir', proj, '--no-run'], h.deps);
     expect(code).toBe(0);
     expect(h.stdout()).toContain('D:\\nope\\bash.exe');
     expect(h.stdout()).toContain('which does not exist');
+  });
+
+  test('found DESPITE a bad override: an informational note, not a warning, still exit 0', async () => {
+    // The dispatcher ignores a bad CLAUDE_CODE_GIT_BASH_PATH and auto-detects,
+    // so this machine's hooks WORK. Saying "Git Bash not found" here would
+    // send the user to reinstall software they already have.
+    const proj = tempProject();
+    const h = harness({
+      gitBash: {
+        status: 'found',
+        path: 'C:\\Program Files\\Git\\bin\\bash.exe',
+        source: 'program-files',
+        ignoredOverride: { path: 'D:\\nope\\bash.exe', reason: 'not-found' },
+      },
+    });
+    const code = await runInit(['--dir', proj, '--no-run'], h.deps);
+    expect(code).toBe(0);
+    const out = h.stdout();
+    expect(out).toContain('D:\\nope\\bash.exe');
+    expect(out).toContain('C:\\Program Files\\Git\\bin\\bash.exe');
+    // Never the warning glyph, and never the broken-hooks sentence.
+    expect(out).not.toContain('⚠ Git Bash');
+    expect(out).not.toContain('will not run');
+  });
+
+  test('--json: found despite a bad override stays gitBash:"found", with the note in warnings', async () => {
+    const proj = tempProject();
+    const h = harness({
+      env: { PIPELINE_MACHINE_TOKEN: 'mc_test' },
+      gitBash: {
+        status: 'found',
+        path: 'C:\\Program Files\\Git\\bin\\bash.exe',
+        source: 'program-files',
+        ignoredOverride: { path: 'D:\\nope\\bash.exe', reason: 'not-a-bash-binary' },
+      },
+    });
+    const code = await runInit(['--dir', proj, '--json'], h.deps);
+    expect(code).toBe(0);
+    const parsed = JSON.parse(h.stdout().trim());
+    // The structural field reports what the machine IS, not what the variable says.
+    expect(parsed.gitBash).toBe('found');
+    expect(parsed.ok).toBe(true);
+    expect(parsed.warnings.join(' ')).toContain('is not a bash/sh binary');
+    expect(parsed.warnings.join(' ')).toContain('nothing is broken');
+  });
+
+  test('the preflight result survives onto the clone-failure --json document', async () => {
+    // A --json consumer must not lose the hook-environment verdict merely
+    // because a later, unrelated step failed.
+    const proj = tempProject();
+    // `.pipeline` as a FILE makes the template copy throw (ENOTDIR) while
+    // leaving the destination "not already present".
+    writeFileSync(join(proj, '.pipeline'), 'not a directory');
+    const h = harness({ gitBash: { status: 'missing' } });
+    const code = await runInit(['--dir', proj, '--json'], h.deps);
+    expect(code).toBe(1);
+    const parsed = JSON.parse(h.stdout().trim());
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain('could not clone');
+    expect(parsed.gitBash).toBe('missing');
+    expect(parsed.warnings.join(' ')).toContain('git-bash');
   });
 
   test('found: completely silent — no warning at all', async () => {
