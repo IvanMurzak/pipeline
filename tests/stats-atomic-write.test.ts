@@ -180,8 +180,12 @@ describe('an INJECTED failure between the temp write and the rename', () => {
     const before = readFileSync(s.runsFile); // raw bytes
 
     const fs = renameFailingFs((dest) => dest.endsWith('runs.jsonl'));
-    // stats.ts is best-effort by contract: it swallows and reports false.
-    expect(statsEnrichTokens(s.base, s.runsFile, RUN_ID, TOKENS, undefined, fs)).toBe(false);
+    // stats.ts is best-effort by contract: it swallows and reports false. It
+    // also writes a diagnostic (asserted in its own describe below) — captured
+    // here only to keep this suite's output to what it actually asserts.
+    captureStderr(() => {
+      expect(statsEnrichTokens(s.base, s.runsFile, RUN_ID, TOKENS, undefined, fs)).toBe(false);
+    });
 
     const after = readFileSync(s.runsFile);
     expect(after.equals(before)).toBe(true);
@@ -201,7 +205,7 @@ describe('an INJECTED failure between the temp write and the rename', () => {
     const before = readFileSync(summaryPath);
 
     const fs = renameFailingFs((dest) => dest.endsWith('SUMMARY.md'));
-    renderSummary(s.base, fs); // never throws — best-effort by contract
+    captureStderr(() => renderSummary(s.base, fs)); // never throws — best-effort by contract
 
     expect(readFileSync(summaryPath).equals(before)).toBe(true);
     expect(tempLeftovers(s.base)).toEqual([]);
@@ -213,7 +217,9 @@ describe('an INJECTED failure between the temp write and the rename', () => {
 
     // runs.jsonl renames fine; SUMMARY.md's rename fails inside renderSummary,
     // which swallows it. The enrichment itself still reports success.
-    expect(statsEnrichTokens(s.base, s.runsFile, RUN_ID, TOKENS, undefined, fs)).toBe(true);
+    captureStderr(() => {
+      expect(statsEnrichTokens(s.base, s.runsFile, RUN_ID, TOKENS, undefined, fs)).toBe(true);
+    });
     expect(readFileSync(s.runsFile, 'utf8')).toContain('"output":25000');
     expect(tempLeftovers(s.pipelineDir)).toEqual([]);
     expect(tempLeftovers(s.base)).toEqual([]);
@@ -221,10 +227,130 @@ describe('an INJECTED failure between the temp write and the rename', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The real thing: a genuinely killed process, stopped inside the window
+// B1 — a refused write must be VISIBLE, never a silent no-op
 // ---------------------------------------------------------------------------
+//
+// The review's blocking finding: on Windows a single concurrent reader makes
+// the atomic rename fail where the plain write it replaced would have
+// succeeded. `statsEnrichTokens` is best-effort (`catch { return false }`) and
+// the live caller in commands/drive.ts ignores the return value, so without a
+// report the user loses the token fold, the .log line, the SUMMARY refresh and
+// the b21 ship with no trace anywhere. These pin that it now speaks.
 
-const WORKER = join(import.meta.dir, 'fixtures', 'stats-atomic-write-worker.ts');
+/** Capture everything written to stderr while `fn` runs. */
+function captureStderr(fn: () => void): string {
+  const original = process.stderr.write;
+  const chunks: string[] = [];
+  (process.stderr as { write: unknown }).write = (chunk: unknown): boolean => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  try {
+    fn();
+  } finally {
+    (process.stderr as { write: unknown }).write = original;
+  }
+  return chunks.join('');
+}
+
+describe('a refused write is reported, not swallowed', () => {
+  test('statsEnrichTokens writes a one-line stderr note naming the file, the errno and the recovery', () => {
+    const s = mkSandbox();
+    const fs = renameFailingFs((dest) => dest.endsWith('runs.jsonl'), 'EPERM');
+
+    let returned: boolean | undefined;
+    const err = captureStderr(() => {
+      returned = statsEnrichTokens(s.base, s.runsFile, RUN_ID, TOKENS, undefined, fs);
+    });
+
+    expect(returned).toBe(false); // best-effort contract unchanged
+    expect(err).toContain('pipeline stats:');
+    expect(err).toContain('runs.jsonl');
+    expect(err).toContain('EPERM'); // the errno, so a Windows sharing violation is identifiable
+    expect(err).toContain('intact');
+    expect(err).toContain('backfill'); // how to recover the lost fold
+    expect(err.trimEnd().split('\n')).toHaveLength(1); // ONE line, not a stack dump
+  });
+
+  test('the loss is also recorded DURABLY in the run’s own .log, where someone would look', () => {
+    const s = mkSandbox();
+    const logPath = join(s.pipelineDir, 'runs', `${RUN_ID}.log`);
+    writeFileSync(logPath, 'existing timeline\n', 'utf8');
+
+    const fs = renameFailingFs((dest) => dest.endsWith('runs.jsonl'), 'EPERM');
+    captureStderr(() => statsEnrichTokens(s.base, s.runsFile, RUN_ID, TOKENS, undefined, fs));
+
+    const log = readFileSync(logPath, 'utf8');
+    expect(log).toContain('existing timeline'); // appended, not clobbered
+    expect(log).toContain('NOT FOLDED');
+    expect(log).toContain('EPERM');
+    // The success path's line must NOT be there — that would be a lie on disk.
+    expect(log).not.toContain('tokens: in=');
+  });
+
+  test('the note says how many rename attempts were spent, so exhaustion is distinguishable', () => {
+    const s = mkSandbox();
+    // Retryable code ⇒ the full default budget is spent before giving up.
+    const fs = renameFailingFs((dest) => dest.endsWith('runs.jsonl'), 'EBUSY');
+    const err = captureStderr(() => statsEnrichTokens(s.base, s.runsFile, RUN_ID, TOKENS, undefined, fs));
+    expect(err).toMatch(/after 14 rename attempts/);
+
+    // A non-retryable refusal reports a single attempt, not the budget.
+    const s2 = mkSandbox();
+    const fs2 = renameFailingFs((dest) => dest.endsWith('runs.jsonl'), 'ENOSPC');
+    const err2 = captureStderr(() => statsEnrichTokens(s2.base, s2.runsFile, RUN_ID, TOKENS, undefined, fs2));
+    expect(err2).toMatch(/after 1 rename attempt[^s]/);
+  });
+
+  test('renderSummary reports its own refusal, with rollup-appropriate advice rather than backfill advice', () => {
+    const s = mkSandbox();
+    renderSummary(s.base);
+    const fs = renameFailingFs((dest) => dest.endsWith('SUMMARY.md'), 'EPERM');
+
+    const err = captureStderr(() => renderSummary(s.base, fs));
+
+    expect(err).toContain('SUMMARY.md');
+    expect(err).toContain('rollup');
+    expect(err).not.toContain('backfill'); // wrong recovery for a derived file
+  });
+
+  test('the happy path stays SILENT — the report fires only on a real loss', () => {
+    const s = mkSandbox();
+    const err = captureStderr(() => {
+      expect(statsEnrichTokens(s.base, s.runsFile, RUN_ID, TOKENS)).toBe(true);
+    });
+    expect(err).toBe('');
+  });
+
+  test('a diagnostic that cannot be written never becomes the failure it reports', () => {
+    const s = mkSandbox();
+    // Both the write AND the report's own stderr are hostile.
+    const fs = renameFailingFs((dest) => dest.endsWith('runs.jsonl'), 'EPERM');
+    const original = process.stderr.write;
+    (process.stderr as { write: unknown }).write = (): boolean => {
+      throw new Error('stderr is closed');
+    };
+    try {
+      // Still returns false rather than throwing into the run loop.
+      expect(statsEnrichTokens(s.base, s.runsFile, RUN_ID, TOKENS, undefined, fs)).toBe(false);
+    } finally {
+      (process.stderr as { write: unknown }).write = original;
+    }
+    // And the file is still untouched.
+    expect(readFileSync(s.runsFile, 'utf8')).toBe(runsJsonlFixture());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The retry budget, proven against a REAL contending process
+// ---------------------------------------------------------------------------
+//
+// Lives in this @serial file rather than beside the other atomic-write unit
+// tests because it is timing-sensitive: it needs the machine to itself so a
+// real reader's hold and a real backoff can be compared without CPU
+// contention distorting either.
+
+const HOLDER = join(import.meta.dir, 'fixtures', 'read-handle-holder.ts');
 
 async function waitForFile(path: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -234,6 +360,49 @@ async function waitForFile(path: string, timeoutMs: number): Promise<boolean> {
   }
   return existsSync(path);
 }
+
+test(
+  'the retry budget rides out a REAL concurrent reader — the write lands once the handle is released',
+  async () => {
+    const s = mkSandbox();
+    const before = readFileSync(s.runsFile, 'utf8');
+    const readyMarker = join(s.root, 'held.marker');
+    // 100 ms against the ~231 ms budget: comfortably inside it, with enough
+    // margin that a loaded CI box cannot flake this.
+    const child = spawn(process.execPath, [HOLDER, s.runsFile, '100', readyMarker], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    liveChildren.add(child);
+
+    try {
+      const held = await waitForFile(readyMarker, 30_000);
+      expect(held).toBe(true);
+
+      // On Windows this rename is refused until the child closes its handle,
+      // so success here IS the retry loop working. On POSIX the rename ignores
+      // open handles and succeeds immediately — also correct, and the reason
+      // this asserts the OUTCOME rather than a retry count.
+      const ok = statsEnrichTokens(s.base, s.runsFile, RUN_ID, TOKENS);
+
+      expect(ok).toBe(true);
+      const after = readFileSync(s.runsFile, 'utf8');
+      expect(after).not.toBe(before);
+      expect(after).toContain('"output":25000');
+      expect(tempLeftovers(s.pipelineDir)).toEqual([]);
+    } finally {
+      if (child.pid !== undefined) killTree(child.pid);
+      liveChildren.delete(child);
+    }
+  },
+  60_000,
+);
+
+// ---------------------------------------------------------------------------
+// The real thing: a genuinely killed process, stopped inside the window
+// ---------------------------------------------------------------------------
+
+const WORKER = join(import.meta.dir, 'fixtures', 'stats-atomic-write-worker.ts');
 
 test(
   'a REAL killed process, interrupted between the temp-file write and the rename, leaves the user’s runs.jsonl COMPLETELY intact',

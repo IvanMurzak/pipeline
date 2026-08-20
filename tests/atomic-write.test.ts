@@ -23,7 +23,12 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { realAtomicFs, writeFileAtomicSync, type AtomicFs } from '../src/lib/atomic-write';
+import {
+  realAtomicFs,
+  writeFileAtomicSync,
+  type AtomicFs,
+  type AtomicWriteError,
+} from '../src/lib/atomic-write';
 
 let sandbox: string;
 
@@ -303,6 +308,90 @@ describe('writeFileAtomicSync — REAL platform rename semantics with a concurre
       }
     } finally {
       closeSync(fd);
+    }
+  });
+});
+
+describe('writeFileAtomicSync — the retry budget is pinned, not incidental', () => {
+  // A6 — the review found the defaults only PARTLY pinned: neutering them to
+  // 1 attempt / 0 ms failed three tests, so >=3 attempts was pinned, but the
+  // exact count and base were not — which is how the docblock drifted to
+  // "5 / 1 ms" while the constants said 6 / 2 ms. These assert the numbers
+  // themselves, against a permanently-failing rename.
+  test('the DEFAULT budget is exactly 14 attempts', () => {
+    const target = join(sandbox, 'runs.jsonl');
+    writeFileSync(target, 'original\n', 'utf8');
+    const r = recordingFs(() => {
+      throw errno('EBUSY'); // never clears ⇒ the full budget is spent
+    });
+
+    // renameBackoffMs: 0 keeps the test fast; it does not change the COUNT.
+    expect(() => writeFileAtomicSync(target, 'x\n', { fs: r.fs, renameBackoffMs: 0 })).toThrow('injected EBUSY');
+    expect(r.attempts()).toBe(14);
+    expect(readFileSync(target, 'utf8')).toBe('original\n');
+  });
+
+  test('the backoff is CAPPED, so a long budget still retries finely near its ceiling', () => {
+    const target = join(sandbox, 'runs.jsonl');
+    writeFileSync(target, 'original\n', 'utf8');
+    const gaps: number[] = [];
+    let last = 0;
+    const r = recordingFs(() => {
+      const now = Date.now();
+      if (last !== 0) gaps.push(now - last);
+      last = now;
+      throw errno('EBUSY');
+    });
+
+    expect(() => writeFileAtomicSync(target, 'x\n', { fs: r.fs })).toThrow('injected EBUSY');
+
+    // Uncapped doubling from 1 ms would reach 8192 ms by the 14th attempt.
+    // Capped at 25 ms, no single gap may approach that. Generous upper bound
+    // so a loaded CI box cannot flake this.
+    expect(Math.max(...gaps)).toBeLessThan(200);
+    // ...and the later gaps really are the cap, not still doubling.
+    expect(gaps.length).toBe(13);
+  });
+
+  test('a failure annotates the error with how many renames were attempted', () => {
+    const target = join(sandbox, 'runs.jsonl');
+    writeFileSync(target, 'original\n', 'utf8');
+
+    // Exhausted retries.
+    const busy = recordingFs(() => {
+      throw errno('EBUSY');
+    });
+    try {
+      writeFileAtomicSync(target, 'x\n', { fs: busy.fs, renameAttempts: 5, renameBackoffMs: 0 });
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect((e as AtomicWriteError).renameAttempts).toBe(5);
+    }
+
+    // Refused outright on the first attempt (non-retryable).
+    const once = recordingFs(() => {
+      throw errno('ENOSPC');
+    });
+    try {
+      writeFileAtomicSync(target, 'x\n', { fs: once.fs });
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect((e as AtomicWriteError).renameAttempts).toBe(1);
+    }
+
+    // The temp WRITE failed — the rename was never reached.
+    const fs: AtomicFs = {
+      writeFileSync: () => {
+        throw errno('EACCES');
+      },
+      renameSync: () => undefined,
+      unlinkSync: () => undefined,
+    };
+    try {
+      writeFileAtomicSync(target, 'x\n', { fs });
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect((e as AtomicWriteError).renameAttempts).toBe(0);
     }
   });
 });

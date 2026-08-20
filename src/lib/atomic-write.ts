@@ -1,12 +1,25 @@
 // Atomic whole-file replacement: write a sibling temp file, then rename it
-// over the target. The shared version of a primitive this repo had already
-// grown FIVE private copies of — `cloud-config.ts#writeFileAtomic`,
+// over the target. A shared version of a primitive this repo had already grown
+// FIVE private copies of — `cloud-config.ts#writeFileAtomic`,
 // `render.ts#atomicReplace`, and the three near-identical
 // `writeFileAtomic`/`writeJsonAtomic` bodies in `telemetry-outbox.ts`,
-// `telemetry-status.ts` and `telemetry-upload.ts`. New callers import THIS
-// one instead of copying a sixth; the existing five are left alone
-// deliberately (they are already atomic — consolidating them is a separate,
-// wider change than the one that introduced this module).
+// `telemetry-status.ts` and `telemetry-upload.ts`. The existing five are left
+// alone deliberately (they are already atomic).
+//
+// ⚠ THIS IS NOT A DROP-IN FOR ALL FIVE, AND ESPECIALLY NOT FOR THE CREDENTIAL
+// STORE. It takes no file mode. `cloud-config.ts#writeFileAtomic` takes one
+// and calls `chmodSync(tmp, mode)` BEFORE the rename, specifically to defeat
+// umask, because it writes the credential store at 0600. Porting that caller
+// onto this function as written would silently widen a private key to 0644 on
+// POSIX. Adding `mode` here is a reasonable future change; until someone does
+// it AND verifies the mode bits on a POSIX box, treat this primitive as being
+// for files whose permissions do not matter.
+//
+// The same gap in miniature applies to every caller: because the destination
+// inode is the TEMP file's, the result carries the umask default rather than
+// any mode the destination previously had. A plain `writeFileSync` over an
+// existing file preserved it. Only relevant to a user who deliberately
+// tightened permissions on a stats file, but it is a real semantic change.
 //
 // ── WHAT THE PRIMITIVE BUYS ────────────────────────────────────────────────
 // A plain `writeFileSync` truncates its target to zero bytes and then fills
@@ -17,10 +30,26 @@
 // killed at any instant either
 //   (a) never created the temp file            → original untouched,
 //   (b) created it but never renamed           → original untouched, one
-//                                                orphan temp left behind
-//                                                (never read by anything), or
+//                                                orphan temp left behind, or
 //   (c) completed the rename                   → new content fully in place.
 // The target path is NEVER observed partially written.
+//
+// Case (b) is only safe because the orphan is INERT, and that rests on a
+// property of the callers rather than of this file: every consumer of these
+// files discovers them by EXACT FILENAME, never by suffix or glob —
+// `stats.ts#findRunsFiles` matches `name === 'runs.jsonl'`, and
+// `findRunsFilesWithDirs` constructs `join(dir, 'runs.jsonl')`. So a `.tmp-`
+// orphan is never parsed, never counted into SUMMARY.md and never shipped.
+// IF A FUTURE READER EVER MATCHES THESE FILES BY PATTERN, that stops being
+// true and an abandoned temp becomes a phantom duplicate run record.
+//
+// Nothing removes orphans either, and each is a full-size copy of its target,
+// so on a machine that kills processes routinely they accumulate. A stale
+// sweep is deliberately NOT done here: deleting a `.tmp-` sibling risks
+// destroying a CONCURRENT writer's in-flight temp, and pid-liveness checks
+// cannot save it because pids are reused. An age-gated sweep (drop `.tmp-`
+// siblings older than a day) would be safe in a way an unconditional one is
+// not — a reasonable follow-up, not done here.
 //
 // ── SAME DIRECTORY IS LOAD-BEARING ─────────────────────────────────────────
 // The temp file is created in `dirname(filePath)`, not in the OS temp dir.
@@ -53,15 +82,64 @@
 // handles entirely, and a reader holding the old fd keeps reading the old
 // inode. tests/atomic-write.test.ts asserts BOTH behaviours, per platform.
 //
-// In practice the readers of these files (`renderSummary`, `pipeline stats`)
-// use `readFileSync`, which opens and closes in well under a millisecond, so
-// real overlap is brief. The rename is therefore retried a few times with a
-// short synchronous backoff (~62 ms worst case — this runs on a hook path and
-// must not stall a user's run) which comfortably covers a transient reader or
-// a quick AV scan. A reader that holds its handle open for longer than the
-// budget makes the write FAIL — loudly, with the original file intact. That
-// is the deliberate trade: a skipped stats enrichment is recoverable, a
-// corrupted runs.jsonl is not.
+// ── THE TRADE THIS MAKES ON WINDOWS — READ BEFORE "IMPROVING" IT ───────────
+// State it plainly, because the first version of this file did not and that
+// was the review's blocking finding: ON WINDOWS THIS PRIMITIVE CAN REFUSE A
+// WRITE THAT A PLAIN `writeFileSync` WOULD HAVE COMPLETED. Measured end to
+// end through `statsEnrichTokens`, Windows 11 / Bun 1.3.14, with ONE
+// concurrent read handle held open:
+//
+//     plain writeFileSync : returns true,  tokens land,      ~17 ms
+//     writeFileAtomicSync : returns false, tokens do NOT,   ~103 ms
+//
+// So this is not a free win, and "byte-identical" is only true of writes that
+// SUCCEED. What changed is *whether* they succeed. The deliberate choice is
+// to lose an enrichment rather than risk a torn file: a skipped fold is
+// re-derivable by `stats-backfill.ts`, a truncated runs.jsonl is gone. That
+// trade is only defensible while the loss is VISIBLE, which is why
+// `stats.ts` reports it rather than swallowing it — see the call sites.
+//
+// ── SIZING THE RETRY BUDGET (measured, not rounded) ────────────────────────
+// Retrying is worth it because the realistic contender is brief. Measured on
+// the same box:
+//
+//   · a real reader — `readFileSync` of a 1.5 KB runs.jsonl — holds the
+//     handle for a mean of 0.025 ms over 2000 iterations;
+//   · 1000 uncontended writes with retries DISABLED produced 0 failures and a
+//     2.11 ms slowest write, i.e. no ambient AV/indexer interference was
+//     observable here at all. (This is why the earlier claim that the budget
+//     "comfortably covers a quick AV scan" was removed rather than re-tuned:
+//     it asserted something this box cannot demonstrate. Defender can hold a
+//     freshly created file well past any budget we would want on a hook path;
+//     if that happens the write fails visibly, which is the honest outcome.)
+//   · against a REAL cross-process reader holding a handle, the budget below
+//     measured: hold 0/25/100/200 ms → SUCCEEDED (in 4/15/109/217 ms, i.e.
+//     the write lands right after the reader lets go); hold 400/1000 ms →
+//     FAILED EPERM after all 14 attempts, original intact, zero orphan temps.
+//     Note the failure costs ~325 ms of WALL time, not the 231 ms of sleeps —
+//     each refused `MoveFileExW` itself costs ~6-7 ms.
+//
+// The budget is therefore ~10,000× the measured reader hold, which is margin
+// for a loaded machine rather than a guess. It is capped rather than doubled
+// forever because the happy path pays NOTHING (a first-attempt success sleeps
+// zero) while the failure path is paid per call — and `stats-backfill.ts`
+// calls this once PER RECORD, so an unbounded budget would multiply across a
+// backfill of a large .stats tree.
+//
+// ── WHAT THIS IS NOT ───────────────────────────────────────────────────────
+// ATOMIC IS NOT CONCURRENCY-SAFE. This makes a single write indivisible; it
+// does NOT make a read-modify-write serialisable. `statsEnrichTokens` reads
+// runs.jsonl, folds, and writes it back, so a concurrent `appendFileSync` from
+// `statsFinalizeRun` landing between the read and the rename is still lost.
+// That is not a regression — the old truncate-then-fill lost the same append,
+// and in fact lost it WORSE: it could interleave into a partially rewritten
+// file and leave a torn line, whereas this loses the record cleanly. But
+// nobody should read "atomic" here as "safe to run two of these at once".
+//
+// SYMLINKS ARE REPLACED, NOT FOLLOWED. If the destination is a symlink, a
+// plain `writeFileSync` would write THROUGH it to the link target; the rename
+// swaps the link itself for a regular file. Standard for this technique and
+// fine for the stats files, but a real semantic change worth knowing about.
 //
 // A RETRY IS NOT A FALLBACK. Every attempt is the same atomic rename; there
 // is no degraded path. If the retries are exhausted the temp file is removed
@@ -100,13 +178,24 @@ export const realAtomicFs: AtomicFs = {
  */
 const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
 
-/** 6 attempts with a doubling 2 ms base ⇒ sleeps of 2+4+8+16+32 = 62 ms worst
- *  case. Sized against the measurement in the header: long enough to ride out
- *  a concurrent `readFileSync` or a quick AV touch, short enough that a hook
- *  path never visibly stalls. Zero delay on the normal path — the first
- *  attempt succeeds and nothing sleeps. */
-const DEFAULT_RENAME_ATTEMPTS = 6;
-const DEFAULT_RENAME_BACKOFF_MS = 2;
+/**
+ * 14 attempts, 1 ms base, doubling but CAPPED at 25 ms ⇒ sleeps of
+ * 1+2+4+8+16+25×8 = 231 ms worst case. See the sizing section in the header
+ * for the measurements behind these numbers.
+ *
+ * The cap is the point. Pure doubling reaches a long budget with very coarse
+ * granularity at the tail — measured: with an uncapped 1022 ms budget, a
+ * reader that released its handle at 600 ms was not retried until ~1022 ms,
+ * so the call cost 1103 ms to do something it could have done at 600. Capping
+ * the interval keeps the ceiling while retrying every 25 ms near it, so the
+ * write lands shortly after the contender actually lets go.
+ *
+ * Zero delay on the normal path: the first attempt succeeds and nothing
+ * sleeps at all (1000/1000 uncontended writes needed no retry).
+ */
+const DEFAULT_RENAME_ATTEMPTS = 14;
+const DEFAULT_RENAME_BACKOFF_MS = 1;
+const RENAME_BACKOFF_CAP_MS = 25;
 
 /** Monotonic per-process counter — see the temp-name note in the header. */
 let tmpSeq = 0;
@@ -129,10 +218,19 @@ export function atomicTempPath(filePath: string): string {
 export interface AtomicWriteDeps {
   /** Defaults to the real `node:fs`. */
   fs?: AtomicFs;
-  /** Rename attempts before giving up (default 5, minimum 1). */
+  /** Rename attempts before giving up (default 14, minimum 1). */
   renameAttempts?: number;
-  /** Base backoff between rename attempts, doubling each time (default 1 ms). */
+  /** Base backoff between rename attempts. Doubles each attempt, capped at
+   *  25 ms (default 1 ms base ⇒ 231 ms total across the 14 attempts). */
   renameBackoffMs?: number;
+}
+
+/** The error a failed atomic write throws is the UNDERLYING fs error, rethrown
+ *  unchanged (same object — cleanup never masks the real fault), with this one
+ *  field added so a caller can report how hard it tried. `renameAttempts` is
+ *  0 when the temp WRITE failed and the rename was never reached. */
+export interface AtomicWriteError extends NodeJS.ErrnoException {
+  renameAttempts?: number;
 }
 
 /**
@@ -148,30 +246,41 @@ export interface AtomicWriteDeps {
  * call site that forgets its own `scrub` is caught there.
  *
  * The bytes that land are therefore byte-for-byte the bytes a plain
- * `writeFileSync` of the same string would have produced.
+ * `writeFileSync` of the same string would have produced — WHEN THE WRITE
+ * SUCCEEDS. On Windows it can legitimately refuse where a plain write would
+ * have succeeded; see the trade section in the header.
  *
  * Throws on failure, having already removed its temp file, and leaves
- * `filePath` untouched. Callers that must never throw wrap it — `stats.ts`
- * already does, and its best-effort contract is unchanged.
+ * `filePath` untouched. The thrown error is the underlying fs error, annotated
+ * with `renameAttempts` (see `AtomicWriteError`). Callers that must never
+ * throw wrap it — but a caller that swallows this silently is hiding a lost
+ * write, so `stats.ts` reports it before returning false.
  */
 export function writeFileAtomicSync(filePath: string, data: string, deps: AtomicWriteDeps = {}): void {
   const fs = deps.fs ?? realAtomicFs;
   const attempts = Math.max(1, deps.renameAttempts ?? DEFAULT_RENAME_ATTEMPTS);
   const backoffMs = Math.max(0, deps.renameBackoffMs ?? DEFAULT_RENAME_BACKOFF_MS);
   const tmp = atomicTempPath(filePath);
+  let renameAttempts = 0;
   try {
     fs.writeFileSync(tmp, data, 'utf8');
     for (let attempt = 1; ; attempt++) {
+      renameAttempts = attempt;
       try {
         fs.renameSync(tmp, filePath);
         return;
       } catch (e) {
         const code = (e as NodeJS.ErrnoException).code ?? '';
         if (attempt >= attempts || !RETRYABLE_RENAME_CODES.has(code)) throw e;
-        sleepSync(backoffMs * 2 ** (attempt - 1));
+        sleepSync(Math.min(backoffMs * 2 ** (attempt - 1), RENAME_BACKOFF_CAP_MS));
       }
     }
   } catch (e) {
+    // Record how many renames were tried, so the caller can tell "refused once
+    // outright" from "retried to exhaustion and the contender never let go".
+    // Annotating the SAME error object rather than wrapping it keeps the
+    // rethrow-the-original-fault contract exactly as it was.
+    if (e instanceof Error) (e as AtomicWriteError).renameAttempts = renameAttempts;
     // Cleanup is best-effort and must never mask the real fault: whatever
     // went wrong with the write or the rename is what the caller sees. (When
     // the temp file was never created, this unlink throws ENOENT and is
