@@ -32,6 +32,11 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+// z1 — runs.jsonl and SUMMARY.md are WHOLE-FILE REWRITES of files the user
+// accumulates over time. A plain writeFileSync truncates before it fills, so a
+// process death mid-write destroys run history rather than failing a run. Both
+// rewrites go through temp-file-plus-rename; see lib/atomic-write.ts.
+import { realAtomicFs, writeFileAtomicSync, type AtomicFs, type AtomicWriteError } from './atomic-write';
 import { ensureGeneratedDir } from './generated-dir';
 import { resolveProjectRoot } from './event';
 import { shipFinishedRunRecord } from './telemetry-ship';
@@ -700,6 +705,52 @@ export function renderFailureLogSection(failures: RunFailureDetail[], totalFaile
   return L.join('\n') + '\n';
 }
 
+/**
+ * z1 — report a stats write that was REFUSED, so the loss is diagnosable.
+ *
+ * Nothing else in this module speaks, by design: stats are best-effort and
+ * must never affect an action, an exit code or an event. This is the one
+ * exception, and it earns it — a durability change whose failure mode is
+ * "silently does nothing" is worse than the hazard it fixes. It still changes
+ * no action, no exit code and no event; it only says what was lost.
+ *
+ * Two channels, because they fail in different ways:
+ *   · the run's own `.log` — DURABLE, and exactly where someone asking "why
+ *     does this run have no token stats?" is already looking. Absent when the
+ *     run predates the log or the log write itself is what failed.
+ *   · stderr — IMMEDIATE, reaches an interactive `pipeline stats` caller and
+ *     is captured for the relay hooks. One line, only on a real loss.
+ * Both are scrubbed: the message carries a path and an OS error string.
+ */
+function reportLostWrite(target: string, logPath: string | null, err: unknown, kind: 'record' | 'summary'): void {
+  const e = err as AtomicWriteError;
+  const tried = e?.renameAttempts;
+  const why =
+    `${e?.code ?? 'error'}${tried ? ` after ${tried} rename attempt${tried === 1 ? '' : 's'}` : ''}` +
+    `: ${e?.message ?? String(err)}`;
+  // The actionable half, and it differs by file: a run record is a one-shot
+  // opportunity recoverable only while its transcript survives, whereas the
+  // rollup is derived and rebuilds itself on the next successful enrichment.
+  const consequence =
+    kind === 'record'
+      ? 'the token fold for this run was skipped — re-run `pipeline stats backfill` to recover it ' +
+        'while the transcript is still on disk'
+      : 'the rollup is stale and will rebuild on the next successful enrichment';
+  const note = `pipeline stats: could not update ${basename(target)} (${why}). The existing file is intact and was NOT modified; ${consequence}.`;
+  try {
+    if (logPath !== null && existsSync(logPath)) {
+      appendFileSync(logPath, scrub(`tokens: NOT FOLDED — ${why} (${new Date().toISOString()})\n`), 'utf8');
+    }
+  } catch {
+    // best-effort — a diagnostic must never become the failure it reports
+  }
+  try {
+    process.stderr.write(scrub(`${note}\n`));
+  } catch {
+    // best-effort
+  }
+}
+
 /** Enrich a finished run with folded token stats: rewrite its runs.jsonl line,
  *  append a tokens line (and, when provided, a tool-fails section) to its
  *  .log, regenerate SUMMARY.md, and — ux-v2 `b21` — re-ship the now-complete
@@ -713,6 +764,10 @@ export function statsEnrichTokens(
   runId: string,
   tokens: TokenStats,
   failures?: RunFailureDetail[],
+  // z1 — test seam ONLY (production always takes the default). Threaded so a
+  // real child process can stall INSIDE the rename and be killed there,
+  // proving the atomicity claim against a real kill instead of arguing it.
+  fs: AtomicFs = realAtomicFs,
 ): boolean {
   try {
     if (!existsSync(runsFile)) return false;
@@ -721,11 +776,27 @@ export function statsEnrichTokens(
     }
     const next = rewriteRunTokens(readFileSync(runsFile, 'utf8'), runId, tokens);
     if (next === null) return false;
-    writeFileSync(runsFile, scrub(next), 'utf8');
-    const log = join(dirname(runsFile), 'runs', `${runId}.log`);
-    if (existsSync(log)) {
+    // z1 — atomic: the user's accumulated run history is never truncated by a
+    // death mid-write. Same bytes as the writeFileSync this replaced.
+    //
+    // The atomic write can REFUSE where the plain one succeeded (a concurrent
+    // reader on Windows — see lib/atomic-write.ts). That must not be silent:
+    // this whole function is best-effort, `catch { return false }` swallows
+    // everything, and the live caller in commands/drive.ts ignores the return
+    // value, so without the report below one held handle would cost the
+    // tokens, the .log line, the SUMMARY refresh AND the b21 ship with no
+    // trace anywhere. Rethrown after reporting: the enrichment genuinely did
+    // not happen, so skipping the rest of this block is correct.
+    const logPath = join(dirname(runsFile), 'runs', `${runId}.log`);
+    try {
+      writeFileAtomicSync(runsFile, scrub(next), { fs });
+    } catch (e) {
+      reportLostWrite(runsFile, logPath, e, 'record');
+      throw e;
+    }
+    if (existsSync(logPath)) {
       appendFileSync(
-        log,
+        logPath,
         scrub(
           `tokens: in=${tokens.input} out=${tokens.output} cache_read=${tokens.cache_read} cache_write=${tokens.cache_creation}` +
             (tokens.tools_called != null ? ` tools=${tokens.tools_called}` : '') +
@@ -736,10 +807,10 @@ export function statsEnrichTokens(
         ),
       );
       if (failures && failures.length) {
-        appendFileSync(log, scrub(renderFailureLogSection(failures, tokens.tools_failed ?? failures.length)));
+        appendFileSync(logPath, scrub(renderFailureLogSection(failures, tokens.tools_failed ?? failures.length)));
       }
     }
-    renderSummary(base);
+    renderSummary(base, fs);
     // b21 — the enriched snapshot, from the file we just wrote (never a
     // re-derivation), so what ships is exactly what a later `cloud connect`
     // re-scan would find and therefore computes the SAME revision.
@@ -913,15 +984,30 @@ function findRunsFilesWithDirs(base: string, depth = 8): string[] {
   return [...seen];
 }
 
-/** Regenerate SUMMARY.md from every runs.jsonl under the base. Never throws. */
-export function renderSummary(base: string): void {
+/** Regenerate SUMMARY.md from every runs.jsonl under the base. Never throws.
+ *
+ *  z1 — the SUMMARY.md write is atomic too. Note that this file is DERIVED:
+ *  unlike runs.jsonl it can be regenerated from the run records at any time,
+ *  so a torn write here costs a stale rollup rather than lost history. It gets
+ *  the same treatment anyway because the mechanical shape is identical, the
+ *  helper is already imported, and a half-written SUMMARY.md is a file the
+ *  user reads directly. `fs` is a test seam; production takes the default. */
+export function renderSummary(base: string, fs: AtomicFs = realAtomicFs): void {
   try {
     const records: RunRecord[] = [];
     for (const f of findRunsFiles(base)) {
       if (existsSync(f)) records.push(...parseRunRecords(readFileSync(f, 'utf8')));
     }
     ensureGeneratedDir(base);
-    writeFileSync(join(base, 'SUMMARY.md'), scrub(renderSummaryMd(records, findInflight(base))), 'utf8');
+    const summary = join(base, 'SUMMARY.md');
+    try {
+      writeFileAtomicSync(summary, scrub(renderSummaryMd(records, findInflight(base))), { fs });
+    } catch (e) {
+      // Same reasoning as the runs.jsonl write — a refused write must not be
+      // silent. No `.log` channel here: SUMMARY.md belongs to no single run.
+      reportLostWrite(summary, null, e, 'summary');
+      throw e;
+    }
   } catch {
     // best-effort
   }
