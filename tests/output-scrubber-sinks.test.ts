@@ -100,7 +100,15 @@ function sitesMatching(pattern: RegExp): SinkSite[] {
 }
 
 const STREAM_SINK = /(?:process\.(?:stdout|stderr)\.write|console\.(?:log|error|warn|info|debug|trace))\(/;
-const FILE_SINK = /(?:appendFileSync|writeFileSync)\(/;
+// `writeFileAtomicSync` (lib/atomic-write.ts) is a file sink in its own right.
+// It MUST be listed here: it is a wrapper whose name does not contain
+// "writeFileSync", so without this alternative every call routed through it
+// would silently drop out of the enumeration — a caller that forgot its
+// `scrub(` would stop being caught, and this suite would go on passing. That
+// is exactly the "the writer that forgets will be a NEW one" failure this file
+// exists to prevent, so a new atomic wrapper belongs in this list on the day
+// it is written.
+const FILE_SINK = /(?:appendFileSync|writeFileSync|writeFileAtomicSync)\(/;
 
 /** A short, line-number-free label so a failure names the offender usefully. */
 const label = (s: SinkSite): string => `${s.file}: ${s.call.slice(0, 90)}`;
@@ -137,6 +145,34 @@ const UNSCRUBBED_BY_DESIGN: Exemption[] = [
     file: 'src/lib/cloud-config.ts',
     match: '(filePath, serialized)',
     why: 'the credential store again (non-atomic path) — same reason, same prohibition',
+  },
+  // ── THE ATOMIC-WRITE PRIMITIVE (z1) ────────────────────────────────────
+  // Same argument as cloud-config.ts above, one level lower: this module is a
+  // GENERIC byte-faithful writer, not a stats writer. Scrubbing inside it
+  // would double-scrub every caller that already redacts (changing the bytes
+  // that land) and would destroy any secret a future caller must persist
+  // verbatim. Redaction stays at the CALL SITES — and those call sites are
+  // still enumerated, because FILE_SINK matches `writeFileAtomicSync(` too.
+  // Check `src/lib/stats.ts` in this suite's output: both of its atomic writes
+  // carry their own `scrub(`, and this suite fails if one ever stops.
+  {
+    file: 'src/lib/atomic-write.ts',
+    match: "(path: string, data: string, encoding: 'utf8')",
+    why: 'the AtomicFs INTERFACE DECLARATION — a type, not a call site',
+  },
+  {
+    file: 'src/lib/atomic-write.ts',
+    match: '(filePath: string, data: string, deps: AtomicWriteDeps',
+    why: "the primitive's OWN function declaration — a signature, not a call site",
+  },
+  {
+    file: 'src/lib/atomic-write.ts',
+    match: "(tmp, data, 'utf8')",
+    why:
+      'the temp-file write inside the primitive. It persists whatever bytes the caller ' +
+      'handed it, deliberately unmodified — that byte-faithfulness is the contract. ' +
+      'Redacting here would corrupt a credential-store-shaped caller and double-scrub ' +
+      'the stats callers; both call sites in lib/stats.ts scrub their own input.',
   },
   {
     file: 'src/commands/drive.ts',

@@ -32,6 +32,11 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+// z1 — runs.jsonl and SUMMARY.md are WHOLE-FILE REWRITES of files the user
+// accumulates over time. A plain writeFileSync truncates before it fills, so a
+// process death mid-write destroys run history rather than failing a run. Both
+// rewrites go through temp-file-plus-rename; see lib/atomic-write.ts.
+import { realAtomicFs, writeFileAtomicSync, type AtomicFs } from './atomic-write';
 import { ensureGeneratedDir } from './generated-dir';
 import { resolveProjectRoot } from './event';
 import { shipFinishedRunRecord } from './telemetry-ship';
@@ -713,6 +718,10 @@ export function statsEnrichTokens(
   runId: string,
   tokens: TokenStats,
   failures?: RunFailureDetail[],
+  // z1 — test seam ONLY (production always takes the default). Threaded so a
+  // real child process can stall INSIDE the rename and be killed there,
+  // proving the atomicity claim against a real kill instead of arguing it.
+  fs: AtomicFs = realAtomicFs,
 ): boolean {
   try {
     if (!existsSync(runsFile)) return false;
@@ -721,7 +730,9 @@ export function statsEnrichTokens(
     }
     const next = rewriteRunTokens(readFileSync(runsFile, 'utf8'), runId, tokens);
     if (next === null) return false;
-    writeFileSync(runsFile, scrub(next), 'utf8');
+    // z1 — atomic: the user's accumulated run history is never truncated by a
+    // death mid-write. Same bytes as the writeFileSync this replaced.
+    writeFileAtomicSync(runsFile, scrub(next), { fs });
     const log = join(dirname(runsFile), 'runs', `${runId}.log`);
     if (existsSync(log)) {
       appendFileSync(
@@ -739,7 +750,7 @@ export function statsEnrichTokens(
         appendFileSync(log, scrub(renderFailureLogSection(failures, tokens.tools_failed ?? failures.length)));
       }
     }
-    renderSummary(base);
+    renderSummary(base, fs);
     // b21 — the enriched snapshot, from the file we just wrote (never a
     // re-derivation), so what ships is exactly what a later `cloud connect`
     // re-scan would find and therefore computes the SAME revision.
@@ -913,15 +924,22 @@ function findRunsFilesWithDirs(base: string, depth = 8): string[] {
   return [...seen];
 }
 
-/** Regenerate SUMMARY.md from every runs.jsonl under the base. Never throws. */
-export function renderSummary(base: string): void {
+/** Regenerate SUMMARY.md from every runs.jsonl under the base. Never throws.
+ *
+ *  z1 — the SUMMARY.md write is atomic too. Note that this file is DERIVED:
+ *  unlike runs.jsonl it can be regenerated from the run records at any time,
+ *  so a torn write here costs a stale rollup rather than lost history. It gets
+ *  the same treatment anyway because the mechanical shape is identical, the
+ *  helper is already imported, and a half-written SUMMARY.md is a file the
+ *  user reads directly. `fs` is a test seam; production takes the default. */
+export function renderSummary(base: string, fs: AtomicFs = realAtomicFs): void {
   try {
     const records: RunRecord[] = [];
     for (const f of findRunsFiles(base)) {
       if (existsSync(f)) records.push(...parseRunRecords(readFileSync(f, 'utf8')));
     }
     ensureGeneratedDir(base);
-    writeFileSync(join(base, 'SUMMARY.md'), scrub(renderSummaryMd(records, findInflight(base))), 'utf8');
+    writeFileAtomicSync(join(base, 'SUMMARY.md'), scrub(renderSummaryMd(records, findInflight(base))), { fs });
   } catch {
     // best-effort
   }
