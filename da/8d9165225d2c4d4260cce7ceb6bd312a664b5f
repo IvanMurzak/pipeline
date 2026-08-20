@@ -1,0 +1,61 @@
+tests/output-scrubber-sinks.test.ts
+  s_b0d6dae684b6dc::t_36bfab33f13746 103-111
+  s_b0d6dae684b6dc::t_869e3f4b07a995 149-176
+src/lib/stats.ts
+  s_b0d6dae684b6dc::t_8d2b63ce591c22 753
+  s_b0d6dae684b6dc::t_9c2c7f3e111b1b 35-39
+  s_b0d6dae684b6dc::t_84f83776104ccb 733-734
+  s_b0d6dae684b6dc::t_84f9755f25dd4e 927-935,942
+  s_b0d6dae684b6dc::t_3f8338f536bb94 721-724
+  s_b0d6dae684b6dc::t_4895b8482b18f7 735
+tests/atomic-write.test.ts
+  s_b0d6dae684b6dc::t_1721cea1108dc5 51-55,58,60-63,65,69-70,74,77-78,93-95,97,109,111,113-115,120-121,135,139,146-147,150,153,216-217,223,227,229,235,240,244-246,248,259,263-264,311,313,315,317
+  s_b0d6dae684b6dc::t_bc27cf1b18d67e 1-11,24-50,56-57,59,64,66-68,71-73,75-76,79-92,96,98-108,110,112,116-119,122-134,136-138,140-145,148-149,151-152,154-215,218-222,224-226,228,230-234,236-239,241-243,247,249-258,260-262,265-269,310,312,314,316,318-321
+  s_b0d6dae684b6dc::t_ee7f932e23b746 12-23
+  s_b0d6dae684b6dc::t_ab329f8de886e7 270-309
+tests/fixtures/stats-atomic-write-worker.ts
+  s_b0d6dae684b6dc::t_d86cde957c4bb4 1-61
+src/lib/atomic-write.ts
+  s_b0d6dae684b6dc::t_e90cbcefbbd0bd 103-109
+  s_b0d6dae684b6dc::t_67e3128475b07c 142-151
+  s_b0d6dae684b6dc::t_5e924a2880b987 1-11,13-38,76-83,85-98,100-101,111-141,152-162,164-183,186
+  s_b0d6dae684b6dc::t_e990111326ebc4 12
+  s_b0d6dae684b6dc::t_bf7c8842de3ea7 50-59
+  s_b0d6dae684b6dc::t_2949ba969bcf5d 39-41,47-49
+  s_b0d6dae684b6dc::t_a382c75029783f 60-62,73-75
+  s_b0d6dae684b6dc::t_bfc80d10e69451 84
+  s_b0d6dae684b6dc::t_13163afa5278e9 99
+  s_b0d6dae684b6dc::t_5c89106bb49e14 102
+  s_b0d6dae684b6dc::t_92f89712c31336 110
+  s_b0d6dae684b6dc::t_041c7ea20a66e4 163
+  s_b0d6dae684b6dc::t_8f278cee3541aa 184-185
+  s_3d460f09d3f4d5::t_9856cef187a497 42-46,63-72
+tests/stats-atomic-write.test.ts
+  s_b0d6dae684b6dc::t_63fa8d82812861 1-255,257-258,260,267-272,277-295,302-305
+  s_b0d6dae684b6dc::t_14b4462fd9b822 296-301
+  s_b0d6dae684b6dc::t_cf91b92163fba3 256,259,261-266,273-276
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "da8d9165225d2c4d4260cce7ceb6bd312a664b5f",
+  "prompts": {},
+  "sessions": {
+    "s_3d460f09d3f4d5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a67c5c49ead10fdb8",
+        "model": "unknown"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_b0d6dae684b6dc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1a10d359-39fb-4d74-8cd3-e80b2772eb52",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
