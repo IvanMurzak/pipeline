@@ -1,0 +1,48 @@
+src/lib/stats.ts
+  s_b0d6dae684b6dc::t_2bbb573ec32449 1002-1007,1009-1010
+  s_b0d6dae684b6dc::t_d341f0f621d93d 797,799
+  s_b0d6dae684b6dc::t_b45e2047ffcf27 39
+  s_b0d6dae684b6dc::t_dfad8b8908ac33 810
+  s_b0d6dae684b6dc::t_860e26f616fe88 725-726,731-741
+  s_b0d6dae684b6dc::t_1cd3717d173ca1 708-724,727-730,742-752
+  s_b0d6dae684b6dc::t_d84cff3952b449 781-793,795-796
+  s_b0d6dae684b6dc::t_6c953611f576e2 753
+  s_b0d6dae684b6dc::t_485298a348c6d3 794
+  s_b0d6dae684b6dc::t_f27b916c1ed95a 1008
+tests/fixtures/read-handle-holder.ts
+  s_b0d6dae684b6dc::t_71a35d43cc6f86 1-27
+tests/stats-atomic-write.test.ts
+  s_b0d6dae684b6dc::t_82e41c7e9bc9f0 208
+  s_b0d6dae684b6dc::t_a9e2cf81e777d8 345-353,364-401
+  s_b0d6dae684b6dc::t_5c17248554078c 220-222
+  s_b0d6dae684b6dc::t_f6f47daf76cf6c 183-188
+  s_b0d6dae684b6dc::t_567cc5f1c8ca8c 230,232-238,240-344,402-406
+tests/atomic-write.test.ts
+  s_b0d6dae684b6dc::t_d9cbd0207adacf 26-31
+  s_b0d6dae684b6dc::t_f7f6c258df691f 315-398
+src/lib/atomic-write.ts
+  s_b0d6dae684b6dc::t_251095f610bd6d 264,268,275,279-283
+  s_b0d6dae684b6dc::t_3a8a10edb8d2e8 2-3,6-22,53,234-235
+  s_b0d6dae684b6dc::t_7006b42c4db874 249-251,254-257
+  s_b0d6dae684b6dc::t_c0b1027f110122 85-114,121-142
+  s_b0d6dae684b6dc::t_e4067479b3e23e 181-198
+  s_b0d6dae684b6dc::t_3181615a6c43ec 221,223-224,228-233
+  s_b0d6dae684b6dc::t_8bdf2de2366499 33,37-52
+  s_b0d6dae684b6dc::t_e90646cd5e4a6d 115-120
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "7016eb52c0de77d5868b33d567dc4d1ea321cdcd",
+  "prompts": {},
+  "sessions": {
+    "s_b0d6dae684b6dc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1a10d359-39fb-4d74-8cd3-e80b2772eb52",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
