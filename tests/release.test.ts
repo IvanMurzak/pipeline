@@ -179,7 +179,13 @@ test('runRelease: human mode prints the version line + checklist and edits the f
   expect(r.code).toBe(0);
   expect(r.out).toContain('version: 0.56.0 -> 0.56.1');
   expect(r.out).toContain('Commit & push in the plugin repo');
-  expect(r.out).toContain('submodule pointer');
+  // Step 2 is conditional on how the marketplace resolves the plugin: a pinning
+  // entry needs a bump, a `ref`-based one was already released by step 1. Both
+  // halves are asserted so a regression to the old unconditional
+  // "bump the submodule pointer" instruction fails here.
+  expect(r.out).toContain('Only if the marketplace pins this plugin');
+  expect(r.out).toContain('If the entry resolves by ref');
+  expect(r.out).not.toContain('In the marketplace repo: bump the submodule pointer');
   const after = readFileSync(join(root, '.claude-plugin', 'plugin.json'), 'utf-8');
   expect(after).toContain('"version": "0.56.1"');
 });
@@ -188,6 +194,9 @@ test('runRelease: --json emits the single report object', () => {
   const root = makePluginDir(MANIFEST);
   const r = captured(() => runRelease(['minor', '--plugin-root', root, '--json']));
   expect(r.code).toBe(0);
+  // The checklist is human-mode only — it must never leak into --json, which
+  // has to stay a single parseable report object.
+  expect(r.out).not.toContain('Next steps');
   expect(JSON.parse(r.out)).toEqual({
     status: 'bumped',
     old_version: '0.56.0',

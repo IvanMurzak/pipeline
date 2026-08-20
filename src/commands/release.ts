@@ -4,7 +4,10 @@
 // Claude Code caches installed plugins by name@version, so every meaningful
 // change MUST bump `.claude-plugin/plugin.json`'s `version`. This command bumps
 // that one field (semver patch/minor/major) and prints the checklist for the
-// rest (commit/push + the parent marketplace repo's submodule-pointer bump).
+// rest (commit/push, plus a pointer bump in the marketplace ONLY where its
+// entry pins this plugin — a submodule, or a `sha`/`version`/`sha256` in
+// marketplace.json. An entry that resolves by `ref` needs nothing beyond the
+// push; this project's own marketplace is that shape).
 //
 // Deliberately NO git operations — it only edits plugin.json. The write is a
 // targeted text substitution of the version value, so the file's existing
@@ -170,7 +173,9 @@ const CHECKLIST = [
   '',
   'Next steps (manual — this command touches only plugin.json):',
   '  1. Commit & push in the plugin repo.',
-  '  2. In the marketplace repo: bump the submodule pointer to the new commit.',
+  '  2. Only if the marketplace pins this plugin — a submodule pointer, or a',
+  '     sha / version / sha256 in its marketplace.json entry — bump it there.',
+  '     If the entry resolves by ref (e.g. "ref": "main"), step 1 released it.',
   '  3. Users pick the new version up on their next plugin update',
   '     (Claude Code caches plugins by name@version).',
   '',
