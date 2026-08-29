@@ -9,6 +9,7 @@
 import { test, expect, afterEach } from 'bun:test';
 import { computePlan } from '../src/lib/plan';
 import { MAX_COMPOSITION_DEPTH } from '../src/lib/compose';
+import { MANIFEST_FILENAME } from '../src/lib/manifest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -17,6 +18,9 @@ const created: string[] = [];
 
 interface PipelineFixture {
   manifest?: string;
+  /** A SCHEMA-2 pipeline: `pipeline.yml` INSTEAD of a PIPELINE.md, which is
+   *  what a migrated pipeline looks like on disk — the v1 header is gone. */
+  yml?: string;
   steps: Record<string, string | ((base: string) => string)>;
 }
 
@@ -29,7 +33,8 @@ function scaffoldProject(pipelines: Record<string, PipelineFixture>): string {
   for (const [name, p] of Object.entries(pipelines)) {
     const root = join(base, ...name.split('/'));
     mkdirSync(join(root, 'steps'), { recursive: true });
-    writeFileSync(join(root, 'PIPELINE.md'), p.manifest ?? '---\n---\n');
+    if (p.yml !== undefined) writeFileSync(join(root, MANIFEST_FILENAME), p.yml);
+    else writeFileSync(join(root, 'PIPELINE.md'), p.manifest ?? '---\n---\n');
     for (const [file, content] of Object.entries(p.steps)) {
       const full = join(root, 'steps', file);
       mkdirSync(dirname(full), { recursive: true });
@@ -166,7 +171,10 @@ test('an unresolvable pipeline reference is a plan ERROR naming the probed locat
   const plan = computePlan(join(base, 'main'));
   expect(plan.errors.length).toBe(1);
   expect(plan.errors[0]).toContain("steps/01-run.md: pipeline reference 'ghost' does not resolve");
-  expect(plan.errors[0]).toContain('no PIPELINE.md at any of:');
+  // Both spellings are named: a schema-2 child needs no PIPELINE.md, so a
+  // message that mentioned only the v1 header sent the reader hunting for a
+  // file the child is not required to have.
+  expect(plan.errors[0]).toContain('no pipeline.yml or PIPELINE.md at any of:');
   expect(plan.errors[0]).toContain(join(base, 'ghost'));
 });
 
@@ -577,4 +585,133 @@ test("backward compat: unknown type: values still warn and default to agent ('pi
   const plan = computePlan(join(base, 'main'));
   expect(plan.steps[0].type).toBe('agent');
   expect(plan.warnings).toEqual(["steps/01-a.md: unknown type 'robot' — treating as agent"]);
+});
+
+// ---------------------------------------------------------------------------
+// SCHEMA-2 composition — resolution and the graph lint over real trees
+//
+// Two halves of one hole. `resolvePipelineRef` probed PIPELINE.md only, so a
+// migrated child was reported as a broken reference; and the graph lint ran
+// only on the v1 walk, so a schema-2 plan checked that each reference RESOLVED
+// and nothing else — a cycle between two manifests planned clean and produced
+// a run that descends until the runtime depth fail-safe trips.
+// ---------------------------------------------------------------------------
+
+/** A leaf schema-2 pipeline: one agent step, no composition. */
+function ymlLeaf(name: string): PipelineFixture {
+  return {
+    yml: `schema: 2\nname: ${name}\nsteps:\n  - name: a\n    body: steps/01-a.md\n`,
+    steps: { '01-a.md': '# A\n\n## Steps\n- do the thing\n' },
+  };
+}
+
+/** A schema-2 pipeline whose only step composes `ref`. */
+function ymlComposer(name: string, ref: string): PipelineFixture {
+  return {
+    yml: `schema: 2\nname: ${name}\nsteps:\n  - name: run\n    type: pipeline\n    pipeline: ${ref}\n`,
+    steps: {},
+  };
+}
+
+test('a v1 pipeline resolves a SCHEMA-2 child — a pipeline.yml is a pipeline root', () => {
+  const base = scaffoldProject({
+    main: {
+      steps: { '01-run.md': pipelineStepDoc({ fm: { type: 'pipeline', pipeline: 'child', step_id: 'run' } }) },
+    },
+    child: ymlLeaf('child'),
+  });
+  const plan = computePlan(join(base, 'main'));
+  expect(plan.errors).toEqual([]);
+  expect(plan.steps[0].pipeline_spec?.resolved_root).toBe(join(base, 'child'));
+});
+
+test('a SCHEMA-2 plan detects a cycle between two manifests (A→B→A)', () => {
+  const base = scaffoldProject({ a: ymlComposer('a', 'b'), b: ymlComposer('b', 'a') });
+  const plan = computePlan(join(base, 'a'));
+  expect(plan.errors.length).toBe(1);
+  expect(plan.errors[0]).toContain('composition cycle detected: a → b → a');
+  expect(plan.errors[0]).toContain("'type: pipeline' references must form a DAG");
+});
+
+test('a SCHEMA-2 plan detects a self-reference', () => {
+  const base = scaffoldProject({ a: ymlComposer('a', 'a') });
+  const plan = computePlan(join(base, 'a'));
+  expect(plan.errors.length).toBe(1);
+  expect(plan.errors[0]).toContain('composition cycle detected: a → a');
+});
+
+test('a SCHEMA-2 chain one deeper than the cap is an ERROR; at the cap it is clean', () => {
+  const chainOf = (n: number): Record<string, PipelineFixture> => {
+    const out: Record<string, PipelineFixture> = {};
+    for (let i = 1; i < n; i++) out[`p${i}`] = ymlComposer(`p${i}`, `p${i + 1}`);
+    out[`p${n}`] = ymlLeaf(`p${n}`);
+    return out;
+  };
+
+  const over = computePlan(join(scaffoldProject(chainOf(MAX_COMPOSITION_DEPTH + 1)), 'p1'));
+  expect(over.errors.length).toBe(1);
+  expect(over.errors[0]).toContain(
+    `composition depth ${MAX_COMPOSITION_DEPTH + 1} exceeds the cap (${MAX_COMPOSITION_DEPTH})`,
+  );
+  expect(over.errors[0]).toContain('p1 → p2 → p3 → p4 → p5 → p6 → p7');
+
+  expect(computePlan(join(scaffoldProject(chainOf(MAX_COMPOSITION_DEPTH)), 'p1')).errors).toEqual([]);
+});
+
+test('maxCompositionDepth overrides the cap on the SCHEMA-2 path too, and warns when invalid', () => {
+  const base = scaffoldProject({
+    p1: ymlComposer('p1', 'p2'),
+    p2: ymlComposer('p2', 'p3'),
+    p3: ymlLeaf('p3'),
+  });
+  const capped = computePlan(join(base, 'p1'), { maxCompositionDepth: 2 });
+  expect(capped.errors.length).toBe(1);
+  expect(capped.errors[0]).toContain('composition depth 3 exceeds the cap (2)');
+
+  expect(computePlan(join(base, 'p1'), { maxCompositionDepth: 3 }).errors).toEqual([]);
+
+  const invalid = computePlan(join(base, 'p1'), { maxCompositionDepth: 0 });
+  expect(invalid.errors).toEqual([]);
+  expect(invalid.warnings).toContain(
+    `maxCompositionDepth 0 is invalid (positive integer required) — using the default ${MAX_COMPOSITION_DEPTH}`,
+  );
+});
+
+test('a MIXED cycle is detected from either end (v1 ↔ schema-2)', () => {
+  const fromV1 = scaffoldProject({
+    a: {
+      steps: { '01-run.md': pipelineStepDoc({ fm: { type: 'pipeline', pipeline: 'b', step_id: 'run' } }) },
+    },
+    b: ymlComposer('b', 'a'),
+  });
+  expect(computePlan(join(fromV1, 'a')).errors[0]).toContain('composition cycle detected: a → b → a');
+
+  const fromV2 = scaffoldProject({ a: ymlComposer('a', 'b'), b: composer('a') });
+  expect(computePlan(join(fromV2, 'a')).errors[0]).toContain('composition cycle detected: a → b → a');
+});
+
+test('a SCHEMA-2 composition DAG (diamond) lints clean — the lint does not fire on valid graphs', () => {
+  const base = scaffoldProject({
+    a: {
+      yml:
+        'schema: 2\nname: a\nsteps:\n' +
+        '  - name: run-b\n    type: pipeline\n    pipeline: b\n' +
+        '  - name: run-c\n    type: pipeline\n    pipeline: c\n',
+      steps: {},
+    },
+    b: ymlComposer('b', 'd'),
+    c: ymlComposer('c', 'd'),
+    d: ymlLeaf('d'),
+  });
+  const plan = computePlan(join(base, 'a'));
+  expect(plan.errors).toEqual([]);
+  expect(plan.warnings).toEqual([]);
+});
+
+test('a non-composed SCHEMA-2 pipeline is untouched by the lint', () => {
+  const base = scaffoldProject({ solo: ymlLeaf('solo') });
+  const plan = computePlan(join(base, 'solo'));
+  expect(plan.errors).toEqual([]);
+  expect(plan.warnings).toEqual([]);
+  expect(plan.steps.map((s) => s.pipeline_spec)).toEqual([null]);
 });

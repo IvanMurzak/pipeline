@@ -145,8 +145,6 @@ export interface ManifestStep {
    *  body's `## Message` section; a gate runs no agent and reads no body, so
    *  in v2 it is declared here. Null ⇒ the runtime's default prompt. */
   message: string | null;
-  /** `type: pipeline` only — whether the child gets its own isolation. */
-  child_isolation: 'own' | 'inherit' | null;
 }
 
 export interface Manifest {
@@ -432,7 +430,6 @@ const STEP_KEYS: ReadonlySet<string> = new Set([
   'on_failure',
   'required_role',
   'message',
-  'isolation',
 ]);
 
 /** Keys with a v2 home worth naming: `id:` was the field's working name during
@@ -450,6 +447,19 @@ const STEP_KEY_HINTS: Readonly<Record<string, string>> = {
     `in a manifest (put it in a script and point 'script:' at that)`,
   'permission-mode':
     `not a manifest key — a step's permission mode is read from the frontmatter of its body file`,
+  // Accepted, enum-checked and then DROPPED for two releases: it never reached
+  // the plan, so a manifest that declared it got no child isolation at all —
+  // the exact "looks configured while behaving otherwise" failure v2 exists to
+  // refuse. Isolation is a property of the pipeline that RUNS, and a composed
+  // child is a full run of its own: it inits at its own root, computes its own
+  // plan, and provisions/tears down whatever its own header declares (the same
+  // rule that already makes a child resolve its own model, effort and vars).
+  // Neither value was expressible — `own` is unconditional, and nothing in the
+  // engine can run one run inside another run's worktree.
+  isolation:
+    `not a step key — isolation is declared once, in the pipeline header; a composed child ` +
+    `pipeline always runs under the isolation ITS OWN pipeline declares, and no step can ` +
+    `change that (delete the key, or change the child's header)`,
 };
 
 function parseStep(
@@ -502,16 +512,7 @@ function parseStep(
         : readEnum(raw.on_failure, ON_FAILURES, `${at}.on_failure`, errors),
     required_role: null,
     message: readString(raw.message, `${at}.message`, errors),
-    child_isolation: null,
   };
-
-  if (raw.isolation !== undefined) {
-    if (type !== 'pipeline') {
-      errors.push(`${at}.isolation: only a 'type: pipeline' step may set isolation (the pipeline header owns it otherwise)`);
-    } else {
-      step.child_isolation = readEnum(raw.isolation, ['own', 'inherit'], `${at}.isolation`, errors);
-    }
-  }
 
   if (raw.required_role !== undefined) {
     if (type !== 'gate') {

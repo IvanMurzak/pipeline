@@ -8,6 +8,7 @@ import { test, expect } from 'bun:test';
 import {
   lintComposition,
   resolvePipelineRef,
+  unresolvedRefDetail,
   MAX_COMPOSITION_DEPTH,
   type ComposeFs,
   type CompositionEdge,
@@ -38,6 +39,7 @@ function memFs(files: Record<string, string>): ComposeFs {
 const P = resolve('/proj/.pipeline');
 const pipe = (name: string) => join(P, ...name.split('/'));
 const manifest = (name: string) => join(pipe(name), 'PIPELINE.md');
+const yml = (name: string) => join(pipe(name), 'pipeline.yml');
 const stepRef = (child: string) => `---\ntype: pipeline\npipeline: ${child}\n---\n# Step\n`;
 
 /** Fixture builder: each entry is either a leaf pipeline (null) or the name of
@@ -49,6 +51,23 @@ function world(pipelines: Record<string, string | null>): ComposeFs {
     files[join(pipe(name), 'steps', '01-a.md')] = ref === null ? '# A\n' : stepRef(ref);
   }
   return memFs(files);
+}
+
+/** The same fixture in SCHEMA 2: no PIPELINE.md, no step files — the whole
+ *  pipeline is one `pipeline.yml`, which is what a migrated pipeline looks
+ *  like on disk. */
+function manifestWorld(pipelines: Record<string, string | null>): ComposeFs {
+  const files: Record<string, string> = {};
+  for (const [name, ref] of Object.entries(pipelines)) {
+    files[yml(name)] = manifestYaml(name.split('/').pop()!, ref);
+  }
+  return memFs(files);
+}
+
+function manifestYaml(name: string, ref: string | null): string {
+  return ref === null
+    ? `schema: 2\nname: ${name}\nsteps:\n  - name: a\n    body: steps/a.md\n`
+    : `schema: 2\nname: ${name}\nsteps:\n  - name: a\n    type: pipeline\n    pipeline: ${ref}\n`;
 }
 
 const edge = (root: string): CompositionEdge => ({ rel: '01-a.md', root });
@@ -93,6 +112,22 @@ test('relative traversal (../name) resolves against the referencing root', () =>
   const fs = memFs({ [manifest('sib')]: '---\n---\n' });
   const r = resolvePipelineRef('../sib', pipe('main'), fs);
   expect(r.root).toBe(pipe('sib'));
+});
+
+test('a SCHEMA-2 child resolves — a pipeline.yml makes a directory a pipeline root', () => {
+  // The v1 header is optional in v2, so probing only PIPELINE.md refused to
+  // see a migrated pipeline: a real child, reported as a broken reference.
+  const fs = memFs({ [yml('child')]: manifestYaml('child', null) });
+  const r = resolvePipelineRef('child', pipe('main'), fs);
+  expect(r.root).toBe(pipe('child'));
+});
+
+test('an unresolvable reference names BOTH pipeline files it looked for', () => {
+  const r = resolvePipelineRef('z', pipe('main'), memFs({}));
+  expect(r.root).toBeNull();
+  expect(unresolvedRefDetail(r.tried)).toBe(
+    `no pipeline.yml or PIPELINE.md at any of: ${r.tried.join(', ')}`,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -191,4 +226,101 @@ test('non-pipeline steps in children contribute no edges (agent/script/unknown t
     [join(pipe('b'), 'steps', '03-odd.md')]: '---\ntype: robot\npipeline: ghost\n---\n# R\n',
   });
   expect(lintComposition(pipe('a'), [edge(pipe('b'))], { fs })).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// SCHEMA-2 children — the graph walk reads `pipeline.yml`, not just steps/*.md
+//
+// A schema-2 pipeline keeps its steps in the manifest, so the markdown walk
+// found NO `type: pipeline` frontmatter in one and reported no edges: every
+// cycle and every over-deep chain between manifests passed the lint clean.
+// ---------------------------------------------------------------------------
+
+test('a cycle between two SCHEMA-2 pipelines is detected (A→B→A)', () => {
+  const fs = manifestWorld({ a: 'b', b: 'a' });
+  const errors = lintComposition(pipe('a'), [edge(pipe('b'))], { fs });
+  expect(errors.length).toBe(1);
+  expect(errors[0]).toContain('composition cycle detected: a → b → a');
+});
+
+test('a MIXED cycle (v1 entry → schema-2 child → v1 entry) is detected too', () => {
+  const fs = memFs({
+    [manifest('a')]: '---\n---\n',
+    [join(pipe('a'), 'steps', '01-a.md')]: stepRef('b'),
+    [yml('b')]: manifestYaml('b', 'a'),
+  });
+  const errors = lintComposition(pipe('a'), [edge(pipe('b'))], { fs });
+  expect(errors.length).toBe(1);
+  expect(errors[0]).toContain('composition cycle detected: a → b → a');
+});
+
+test('a chain of SCHEMA-2 pipelines one deeper than the cap is an ERROR', () => {
+  const names = Array.from({ length: MAX_COMPOSITION_DEPTH + 1 }, (_, i) => `p${i + 1}`);
+  const chain: Record<string, string | null> = {};
+  names.forEach((n, i) => (chain[n] = i < names.length - 1 ? names[i + 1] : null));
+
+  const over = lintComposition(pipe('p1'), [edge(pipe('p2'))], { fs: manifestWorld(chain) });
+  expect(over.length).toBe(1);
+  expect(over[0]).toContain(
+    `composition depth ${MAX_COMPOSITION_DEPTH + 1} exceeds the cap (${MAX_COMPOSITION_DEPTH})`,
+  );
+
+  const atCap: Record<string, string | null> = { ...chain };
+  atCap[`p${MAX_COMPOSITION_DEPTH}`] = null;
+  delete atCap[`p${MAX_COMPOSITION_DEPTH + 1}`];
+  expect(lintComposition(pipe('p1'), [edge(pipe('p2'))], { fs: manifestWorld(atCap) })).toEqual([]);
+});
+
+test("a schema-2 child's unresolvable reference is labeled by its manifest step name", () => {
+  const errors = lintComposition(pipe('a'), [edge(pipe('b'))], {
+    fs: manifestWorld({ a: 'b', b: 'ghost' }),
+  });
+  expect(errors.length).toBe(1);
+  expect(errors[0]).toContain(
+    "composition: 'b' pipeline.yml step 'a': pipeline reference 'ghost' does not resolve",
+  );
+  expect(errors[0]).toContain('no pipeline.yml or PIPELINE.md at any of:');
+});
+
+test("a schema-2 child whose manifest does not parse is reported, not walked silently", () => {
+  // Returning no edges would narrow the graph in silence — the parent's run
+  // breaks inside that child either way, so the plan says so.
+  const errors = lintComposition(pipe('a'), [edge(pipe('b'))], {
+    fs: memFs({ [yml('b')]: 'schema: 2\nname: b\n' }),
+  });
+  expect(errors.length).toBe(1);
+  expect(errors[0]).toContain("composition: 'b': pipeline.yml does not parse");
+  expect(errors[0]).toContain("the child's own composition cannot be checked");
+});
+
+test('a schema-2 child with no pipeline steps contributes no edges', () => {
+  const fs = memFs({
+    [yml('b')]: [
+      'schema: 2',
+      'name: b',
+      'steps:',
+      '  - name: a',
+      '    body: steps/a.md',
+      '  - name: s',
+      '    type: script',
+      '    script: s.py',
+      '',
+    ].join('\n'),
+  });
+  expect(lintComposition(pipe('a'), [edge(pipe('b'))], { fs })).toEqual([]);
+});
+
+test('a child holding BOTH formats is read as schema 2 — the format computePlan runs', () => {
+  // pipeline.yml wins in computePlan, so it must win here: reading the stale
+  // PIPELINE.md tree would lint a graph the run does not execute.
+  const fs = memFs({
+    [yml('b')]: manifestYaml('b', 'a'),
+    [manifest('b')]: '---\n---\n',
+    [join(pipe('b'), 'steps', '01-a.md')]: '# a leftover v1 step, no reference\n',
+    [manifest('a')]: '---\n---\n',
+    [join(pipe('a'), 'steps', '01-a.md')]: stepRef('b'),
+  });
+  const errors = lintComposition(pipe('a'), [edge(pipe('b'))], { fs });
+  expect(errors.length).toBe(1);
+  expect(errors[0]).toContain('composition cycle detected: a → b → a');
 });
