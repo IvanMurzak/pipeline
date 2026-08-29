@@ -36,6 +36,39 @@
 # ⚠ Never gate anything on a PIPED test command. `bun test … | tail -n` exits
 # with TAIL's status, so a red suite reports success. Read the runner's own exit
 # code — which is exactly what these steps do by not piping at all.
+#
+# ── WHY THE BUN VERSION IS A MATRIX AXIS, PINNED AT BOTH ENDS ───────────────
+# This job used to say `bun-version: latest`, and that floated CI from 1.3.14
+# to 1.4.0 the day 1.4.0 shipped. Under Bun 1.4 on Windows, an awaited
+# `Bun.stdin.text()` inside a DYNAMICALLY IMPORTED module never settles, so
+# `pipeline fix --scope-guard` exited 0 — and to a PreToolUse hook 0 means
+# ALLOW. The write-containment guard shipped FAILING OPEN in 0.24.0. Fixed in
+# f2a5dd0a, whose process-level regression test in `tests/fix.test.ts` reads
+# the real fd and only fails on the runtime that has the bug.
+#
+# The naive reading is "pin to one version and stop the drift". That is half
+# right and would have been worse: `latest` did not cause that bug, it REVEALED
+# it. Users install this package with `bun add -g` and run it under THEIR bun,
+# which today is 1.4.x. A CI pinned only to the floor would have been green and
+# blind, and the guard would still be failing open in the field.
+#
+# So: never float, but test both ends of the supported range.
+#   1.3.14 — the floor. It is `engines.bun` in package.json, the last 1.3.x
+#            release, and the version CI was actually on before the drift. It
+#            is NOT the fleet-wide 1.3.11: `Bun.YAML` does not exist there, so
+#            the whole v2 `pipeline.yml` path throws BY DESIGN (see the guard
+#            in `src/lib/manifest.ts`). A 1.3.11 leg would assert that this
+#            package does not work, which it already says out loud.
+#   1.4.0  — what a user's `bun add -g` installs today, and the runtime the
+#            fail-open guard was found on.
+# Both are EXACT. When bun ships a new minor, add it here as a third pin (or
+# move the current pin forward) — deliberately, in a diff someone reviews. Do
+# not reintroduce `latest`: a runtime that changes without a commit is a
+# regression nobody can bisect.
+#
+# The cross is free in wall time: the four legs run in parallel and the
+# critical path is still the single Windows leg (~7.5 min vs ~1.5 on Linux).
+# Only total runner-minutes double, and this repository is public.
 on:
   push:
     branches: [main]
@@ -62,12 +95,17 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        # Floor and current. Exact pins only — see the header. Adding a version
+        # here is a review-visible decision; `latest` is not.
+        bun: ["1.3.14", "1.4.0"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: ${{ matrix.bun }}
+      - name: Confirm the runtime under test
+        run: bun --version
       - name: Install dependencies
         run: bun install
       - name: Run unit tests

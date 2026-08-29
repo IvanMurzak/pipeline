@@ -35,6 +35,14 @@ produce a Node-targeted bundle:
 bun run build          # → dist/cli.mjs (Node-compatible ESM)
 ```
 
+**Supported Bun versions: `>= 1.3.14` (`engines.bun`), tested on `1.3.14` and
+`1.4.0`.** Because the published `bin` is source, this CLI runs on *your* Bun,
+not one we ship — so CI pins both ends of that range explicitly and crosses them
+with Linux and Windows. 1.3.14 is a hard floor rather than a preference: v2
+`pipeline.yml` parsing uses Bun's built-in `Bun.YAML`, which older releases do
+not have. Nothing in CI tracks `latest`; a new Bun release becomes supported
+when it is added to that matrix in a reviewed change.
+
 ## Documentation
 
 - **[`docs/cli.md`](docs/cli.md)** — telemetry (`pipeline stats telemetry`), the
@@ -538,3 +546,9 @@ with nothing detecting the divergence.
 ```bash
 bun test tests/
 ```
+
+CI runs exactly that, sequentially, across four legs — `{ubuntu, windows} ×
+{bun 1.3.14, bun 1.4.0}` — plus a `--version` and `bun run build` smoke on each.
+Some suites only fail on one of those combinations (the write-containment guard
+in `pipeline fix --scope-guard` failed open on Windows under Bun 1.4 alone), so
+a green run on one leg is not evidence about the others.
