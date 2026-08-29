@@ -120,8 +120,9 @@ function scaffold(opts: { baseBranch?: string } = {}): Fixture {
   writeFileSync(join(pipelineRoot, 'steps', '02-extra.md'), '# extra\n\nBRANCH-ONLY STEP\n');
   git(project, 'add', '-A');
   git(project, 'commit', '-q', '-m', 'branch pipeline');
-  // Branch with an INVALID pipeline definition (no iteration files at all —
-  // the plan error the sequential mode lints unconditionally).
+  // Branch with an INVALID pipeline definition (PIPELINE.md declares a
+  // pipeline, but its steps/ is gone — the plan error the sequential mode
+  // lints unconditionally).
   git(project, 'checkout', '-q', '-b', 'broken', 'main');
   git(project, 'rm', '-q', '-r', '.pipeline/demo/steps');
   git(project, 'commit', '-q', '-m', 'broken pipeline');
@@ -428,7 +429,7 @@ test('plan-error-after-provision: destroy hook runs with outcome=halted, no work
     expect(r1.code).toBe(1);
     expect(r1.json.action).toBe('halt');
     expect(r1.json.reason).toContain('worktree pipeline plan errors');
-    expect(r1.json.reason).toContain('No iteration files found');
+    expect(r1.json.reason).toContain('No step files found');
     // The provision happened — and the destroy hook reaped it (no leak).
     expect(r1.json.provisioned.worktree_path).toBe(wt);
     expect(existsSync(wt)).toBe(false);

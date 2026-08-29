@@ -130,6 +130,11 @@ a compact JSON plan: `mode` (sequential | parallel), `isolation`, resolved
 
 Exit code is `1` when `errors` is non-empty (caller should halt), `0` otherwise.
 
+A `--root` with **no pipeline in it** is refused rather than planned: a path that
+does not exist, and a directory holding no `pipeline.yml`, no `PIPELINE.md` and
+no `steps/*.md`, each print a plan carrying that single error and nothing else —
+never a default-populated plan for a pipeline that is not there.
+
 **Mode gate:** a pipeline runs in parallel/DAG mode **only** when `PIPELINE.md`
 declares `execution: parallel`. Steps that declare `depends-on` without that flag
 run sequentially and emit a warning. This keeps the common (sequential) case at
