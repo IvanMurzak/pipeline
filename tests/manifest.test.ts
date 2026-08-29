@@ -146,6 +146,191 @@ describe('unknown values are errors, never fallbacks', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Unknown KEYS — the other half of the same promise
+//
+// An unknown value was already refused; an unknown key used to be dropped on
+// the floor, which is the same lie told one character earlier. `on-failure:` is
+// the live case: the spelling the v1 docs taught, one hyphen away from the
+// `on_failure:` this parser reads, accepted-and-ignored on every run since.
+// ---------------------------------------------------------------------------
+
+describe('unknown keys are errors, never ignored lines', () => {
+  const withStep = (lines: string) =>
+    parse(`schema: 2\nname: d\nsteps:\n  - name: a\n    type: script\n    script: s.ts\n${lines}`);
+
+  test("the headline: `on-failure:` is refused and points at `on_failure:`", () => {
+    const m = withStep('    on-failure: agent\n');
+    expect(m.errors).toContain(
+      `steps[0].on-failure: renamed — the v2 key is 'on_failure:' (underscore); the hyphenated spelling is v1's`,
+    );
+    // And it is an ERROR, so the plan halts rather than running on the default.
+    expect(m.errors).toHaveLength(1);
+  });
+
+  test('every v1 step key names its v2 home', () => {
+    const cases: [string, string][] = [
+      ['id: build', "identified by 'name:'"],
+      ['step_id: build', "identified by 'name:'"],
+      ['depends-on: [b]', "declared with 'needs:'"],
+      ['depends_on: [b]', "declared with 'needs:'"],
+      ['command: echo hi', "runs a 'script:' file"],
+      ['permission-mode: acceptEdits', 'frontmatter of its body file'],
+    ];
+    for (const [line, expected] of cases) {
+      const key = line.slice(0, line.indexOf(':'));
+      const m = withStep(`    ${line}\n`);
+      expect(m.errors.some((e) => e.startsWith(`steps[0].${key}:`) && e.includes(expected))).toBe(true);
+    }
+  });
+
+  test("the design-time 'id:' key keeps its own sentence, and is reported even when 'name' is missing", () => {
+    const m = parse(`schema: 2\nname: d\nsteps:\n  - id: build\n    body: a.md\n`);
+    expect(m.errors).toContain(`steps[0].id: renamed — a step is identified by 'name:' now`);
+    expect(m.errors.some((e) => e.includes("missing 'name'"))).toBe(true);
+  });
+
+  test('a plain typo names the step, the key, and what a step may declare', () => {
+    const m = withStep('    tiemout: 30\n');
+    expect(m.errors).toHaveLength(1);
+    expect(m.errors[0]).toStartWith('steps[0].tiemout: unknown key —');
+    expect(m.errors[0]).toContain('name, type, body, needs');
+  });
+
+  test('a hyphen where v2 writes an underscore is diagnosed without a rename table', () => {
+    for (const [key, meant] of [
+      ['self-improve: false', 'self_improve'],
+      ['required-role: owner', 'required_role'],
+    ] as const) {
+      const m = withStep(`    ${key}\n`);
+      expect(m.errors.some((e) => e.includes(`did you mean '${meant}'?`))).toBe(true);
+    }
+  });
+
+  test('a key legal on ANOTHER step type keeps its targeted error — it is not double-reported', () => {
+    // `timeout:` is a real step key, so the sweep leaves it alone; the per-type
+    // check below still says the one useful thing about it.
+    const m = parse(`schema: 2\nname: d\nsteps:\n  - name: a\n    body: a.md\n    timeout: 30\n`);
+    expect(m.errors).toEqual([`steps[0].timeout: only a 'type: script' step has a timeout`]);
+  });
+
+  test('a v1 PIPELINE.md header carried over is refused key by key', () => {
+    const m = parse(
+      `schema: 2\nname: d\nmodel: opus\neffort: high\nformat: 1\nworktree_hook_dir: x/.hooks\n` +
+        `finalize: true\ndelete_branches: false\ngraph: {}\nsteps:\n  - name: a\n    body: a.md\n`,
+    );
+    expect(m.errors.some((e) => e.startsWith('model:') && e.includes("'defaults:'"))).toBe(true);
+    expect(m.errors.some((e) => e.startsWith('effort:') && e.includes("'defaults:'"))).toBe(true);
+    expect(m.errors.some((e) => e.startsWith('format:') && e.includes('schema: 2'))).toBe(true);
+    expect(m.errors.some((e) => e.startsWith('worktree_hook_dir:'))).toBe(true);
+    expect(m.errors.some((e) => e.startsWith('finalize:'))).toBe(true);
+    expect(m.errors.some((e) => e.startsWith('delete_branches:'))).toBe(true);
+    expect(m.errors.some((e) => e.startsWith('graph:') && e.includes("'flow:'"))).toBe(true);
+  });
+
+  test('an unknown header key lists what the header declares', () => {
+    const m = parse(`schema: 2\nname: d\nisolaton: run\nsteps:\n  - name: a\n    body: a.md\n`);
+    expect(m.errors).toHaveLength(1);
+    expect(m.errors[0]).toStartWith('isolaton: unknown key — the manifest header declares');
+  });
+
+  test('the sub-blocks are swept too: defaults, an input spec, and a body include', () => {
+    const m = parse(`
+schema: 2
+name: d
+defaults:
+  modle: opus
+steps:
+  - name: a
+    type: script
+    script: s.ts
+    params:
+      x:
+        type: string
+        requried: true
+  - name: b
+    body:
+      - { use: a.md, whn: flag }
+      - oneof:
+          - { use: c.md, when: flag }
+          - { use: d.md }
+        when: flag
+`);
+    expect(m.errors).toContain(`defaults.modle: unknown key — 'defaults:' declares model, effort`);
+    expect(m.errors.some((e) => e.startsWith('steps[0].params.x.requried: unknown key'))).toBe(true);
+    expect(m.errors.some((e) => e.startsWith('steps[1].body[0].whn: unknown key'))).toBe(true);
+    expect(
+      m.errors.some((e) => e.startsWith('steps[1].body[1].when:') && e.includes('belong to its options')),
+    ).toBe(true);
+  });
+
+  test('a manifest that uses every legal key stays clean', () => {
+    const m = parse(`
+schema: 2
+name: full
+description: does things
+execution: parallel
+isolation: run
+runner: driver
+base_branch: next
+self_improve: false
+defaults:
+  model: opus
+  effort: high
+submodules: [a]
+vars:
+  PP_X: "1"
+steps:
+  - name: a
+    body:
+      - { use: a.md, when: flag }
+      - oneof:
+          - { use: c.md, when: flag }
+          - use: d.md
+    model: sonnet
+    effort: low
+    self_improve: true
+    needs: []
+    retries: 2
+  - name: b
+    type: script
+    script: s.ts
+    needs: [a]
+    timeout: 30
+    retries: 1
+    on_failure: agent
+    params:
+      x: { type: string, required: true, description: an input }
+    output:
+      y: { type: string, enum: [a, b], default: a, from: "\${steps.a.output.z}" }
+  - name: c
+    type: gate
+    needs: [b]
+    required_role: owner
+    message: ship it?
+  - name: d
+    type: pipeline
+    needs: [c]
+    pipeline: ../child
+    isolation: own
+    args:
+      z: { type: number, value: 1 }
+    output:
+      w: { type: object }
+flow:
+  a:
+    - { goto: b }
+  b:
+    - { goto: c }
+  c:
+    - { goto: d }
+  d:
+    - { done: true }
+`);
+    expect(m.errors).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // runner: — the execution mode (E7/E15)
 // ---------------------------------------------------------------------------
 
@@ -768,5 +953,85 @@ flow:
 
   test('flow is absent by default — a pipeline without it is still valid', () => {
     expect(parse(MINIMAL).flow).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Unknown edge keys — the worst instance of the unknown-key class
+  //
+  // A dropped step key loses a fallback. A dropped `when:` loses the CONDITION:
+  // `{ goto: b, wehn: flag }` is not a broken edge, it is an UNCONDITIONAL one,
+  // so the run takes a branch it was told to guard. Swept in `parseFlow` (v2
+  // only) rather than in validateGraph, which the v1 `## Graph` reader shares.
+  // -------------------------------------------------------------------------
+
+  const routed = (flow: string) =>
+    parse(`schema: 2
+name: d
+steps:
+  - name: a
+    body: a.md
+  - name: b
+    body: b.md
+    needs: []
+flow:
+${flow}`);
+
+  test('a misspelled condition is refused instead of silently routing every run', () => {
+    const m = routed(`  a:
+    - { goto: b, wehn: flag }
+    - { goto: b }
+`);
+    expect(m.errors).toContain(
+      'flow.a[0].wehn: unknown key — a flow edge declares when, goto, done, max',
+    );
+  });
+
+  test('each edge key names its v2 spelling', () => {
+    const cases: [string, string][] = [
+      ['if: flag, goto: b', "condition is 'when:'"],
+      ['condition: flag, goto: b', "condition is 'when:'"],
+      ['next: b', "target is 'goto:'"],
+      ['next_iteration: b', "target is 'goto:'"],
+      ['target: b', "target is 'goto:'"],
+      ['goto: b, complete: true', "ends the run is 'done: true'"],
+      ['goto: b, end: true', "ends the run is 'done: true'"],
+      ['goto: b, limit: 3', "budget is 'max:'"],
+    ];
+    for (const [edge, expected] of cases) {
+      const key = edge.includes('goto: b, ') ? edge.split('goto: b, ')[1].split(':')[0] : edge.split(':')[0];
+      const m = routed(`  a:
+    - { ${edge} }
+`);
+      expect(m.errors.some((e) => e.startsWith(`flow.a[0].${key}:`) && e.includes(expected))).toBe(true);
+    }
+  });
+
+  test('the shorthand node takes no condition — one written there would never run', () => {
+    const m = routed(`  a:
+    goto: b
+    when: flag
+`);
+    expect(m.errors.some((e) => e.startsWith('flow.a.when:') && e.includes('LIST of edges'))).toBe(true);
+    // The shorthand itself stays legal — only the key that does nothing is refused.
+    expect(routed(`  a:
+    goto: b
+`).errors).toEqual([]);
+  });
+
+  test('a key no rename entry covers still errors — it never passes in silence', () => {
+    const m = routed(`  a:
+    - { goto: b, next-iteration: b }
+`);
+    expect(m.errors.some((e) => e.startsWith('flow.a[0].next-iteration: unknown key'))).toBe(true);
+  });
+
+  test('every legal edge key together stays clean', () => {
+    const m = routed(`  a:
+    - { when: flag, goto: b, max: 3 }
+    - { goto: b }
+  b:
+    - { done: true }
+`);
+    expect(m.errors).toEqual([]);
   });
 });

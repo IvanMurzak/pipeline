@@ -1,6 +1,7 @@
 import { test, expect, afterEach } from 'bun:test';
 import { computePlan } from '../src/lib/plan';
 import { invokeNext } from '../src/commands/next';
+import { runPlan } from '../src/commands/plan';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -333,9 +334,59 @@ test('worktree_hook_dir parses an override and defaults otherwise', () => {
   expect(defaulted.worktree_hook_dir).toBe('.pipeline/.hooks');
 });
 
-test('no iteration files → error', () => {
+test('a PIPELINE.md with no step files → error, in v2 vocabulary', () => {
   const plan = computePlan(scaffold('---\n---\n', {}));
-  expect(plan.errors.some((e) => e.includes('No iteration files'))).toBe(true);
+  // The declaration is real, so the v1 walk still runs and lints it — it just
+  // says "step files" now: "iteration files" was v1's name for them, and a step
+  // has not been a file since v2.
+  expect(plan.errors.some((e) => e.includes('No step files found under'))).toBe(true);
+  expect(plan.errors.some((e) => e.includes('iteration files'))).toBe(false);
+});
+
+// ---------------------------------------------------------------------------
+// A root with no pipeline in it is NOT a plan
+//
+// `pipeline plan --root .pipeline/typo` used to print a complete, plausible
+// plan — isolation, runner, base_branch, every default populated, `steps: []` —
+// whose only tell was one lint line about missing files. Answering with a plan
+// for a pipeline that does not exist is worse than refusing: the JSON reads as
+// a real pipeline that happens to be empty.
+// ---------------------------------------------------------------------------
+
+test('a root that does not exist is refused as such, not planned', () => {
+  const missing = join(mkdtempSync(join(tmpdir(), 'plan-')), 'nope');
+  created.push(dirname(missing));
+  const plan = computePlan(missing);
+  expect(plan.errors).toEqual([`No pipeline at ${missing} — the path does not exist`]);
+  expect(plan.steps).toEqual([]);
+  // The exit-code contract callers gate on: errors ⇒ non-zero.
+  expect(plan.errors.length).toBeGreaterThan(0);
+});
+
+test('a directory holding no pipeline says so — distinctly from a missing path', () => {
+  const empty = mkdtempSync(join(tmpdir(), 'plan-'));
+  created.push(empty);
+  const plan = computePlan(empty);
+  expect(plan.errors).toHaveLength(1);
+  expect(plan.errors[0]).toContain(`No pipeline at ${empty}`);
+  expect(plan.errors[0]).toContain('the directory exists but holds no pipeline.yml');
+  expect(plan.errors[0]).not.toContain('does not exist');
+  expect(plan.steps).toEqual([]);
+  // Not a v1 plan wearing default clothes: nothing was inferred from an absent
+  // PIPELINE.md.
+  expect(plan.advance).toBe('reported');
+  expect(plan.layers).toBeNull();
+});
+
+test('a v1 root is still planned when only one half of it is present', () => {
+  // steps/ but no PIPELINE.md — a real (if unconfigured) v1 pipeline.
+  const stepsOnly = computePlan(scaffold(null, { '01-a.md': '# A\n' }));
+  expect(stepsOnly.errors).toEqual([]);
+  expect(stepsOnly.steps.map((s) => s.step_id)).toEqual(['01-a']);
+  // PIPELINE.md but no steps/ — refused for having no steps, NOT for being
+  // absent: it declares a pipeline, so the walk reports what is wrong with it.
+  const manifestOnly = computePlan(scaffold('---\n---\n', {}));
+  expect(manifestOnly.errors.some((e) => e.startsWith('No pipeline at'))).toBe(false);
 });
 
 test('runner defaults to manager when absent (and with no PIPELINE.md at all)', () => {
@@ -1003,4 +1054,36 @@ test('a broken pipeline.yml halts — it never falls back to the v1 walk', () =>
 test('a directory with no pipeline.yml still plans the v1 way', () => {
   const plan = computePlan(scaffold(null, { '01-a.md': '# A\n', '02-b.md': '# B\n' }));
   expect(plan.steps.map((s) => s.step_id)).toEqual(['01-a', '02-b']);
+});
+
+// ---------------------------------------------------------------------------
+// `pipeline plan` — the command layer's half of the same contract
+// ---------------------------------------------------------------------------
+
+/** Run runPlan(args) capturing stdout/stderr + the exit code. */
+function invokePlan(args: string[]): { code: number; stdout: string; stderr: string } {
+  let stdout = '';
+  let stderr = '';
+  const origOut = process.stdout.write;
+  const origErr = process.stderr.write;
+  process.stdout.write = ((s: string) => ((stdout += s), true)) as typeof process.stdout.write;
+  process.stderr.write = ((s: string) => ((stderr += s), true)) as typeof process.stderr.write;
+  try {
+    const code = runPlan(args);
+    return { code, stdout, stderr };
+  } finally {
+    process.stdout.write = origOut;
+    process.stderr.write = origErr;
+  }
+}
+
+test('pipeline plan --root <missing> exits 1 with JSON that names the absence', () => {
+  const missing = join(mkdtempSync(join(tmpdir(), 'plan-')), 'does-not-exist');
+  created.push(dirname(missing));
+  const r = invokePlan(['--root', missing]);
+  // The contract callers gate on is unchanged: JSON on stdout, exit 1.
+  expect(r.code).toBe(1);
+  const json = JSON.parse(r.stdout);
+  expect(json.errors).toEqual([`No pipeline at ${missing} — the path does not exist`]);
+  expect(json.steps).toEqual([]);
 });

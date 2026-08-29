@@ -923,6 +923,9 @@ function lintScriptSurfaces(
  * holding both formats is a pipeline mid-migration, and reading half of each is
  * the ambiguity v2 exists to remove. A leftover `PIPELINE.md` beside it is
  * prose for humans and is not parsed at all.
+ *
+ * A root that holds NEITHER format is not planned at all — see
+ * {@link pipelineAbsence}.
  */
 export function computePlan(pipelineRoot: string, options: ComputePlanOptions = {}): Plan {
   const manifestFile = join(pipelineRoot, MANIFEST_FILENAME);
@@ -938,6 +941,15 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
     }
     return planFromManifest(parseManifest(text), pipelineRoot, options);
   }
+  // No `pipeline.yml`. Before falling back to the v1 walk, answer the question
+  // the walk cannot: is there a pipeline here AT ALL? The walk defaults every
+  // header field from an absent PIPELINE.md, so a mistyped `--root` used to
+  // print a complete, plausible-looking plan — `isolation: worktree`, every
+  // default populated, `steps: []` — whose only tell was one lint line about
+  // missing files. A plan for a pipeline that does not exist is worse than no
+  // plan: it answers the question that was asked instead of rejecting it.
+  const absence = pipelineAbsence(pipelineRoot);
+  if (absence) return haltedPlan([absence]);
   // Deliberately NOT flagged in `plan.warnings`: that list is design-time lint
   // about the pipeline's CONTENT, it is persisted into the run state and handed
   // to the retrospective improver — which would then try to "fix" a deprecation
@@ -945,6 +957,31 @@ export function computePlan(pipelineRoot: string, options: ComputePlanOptions = 
   // `plan.advance === 'reported'` already identifies one, so the command layer
   // says it once per run instead (see commands/next.ts).
   return computePlanFromMarkdown(pipelineRoot, options);
+}
+
+/** Why there is no pipeline at `pipelineRoot`, or null when there is one to
+ *  plan. The two cases are told apart on purpose — a mistyped path and a
+ *  directory that was never a pipeline are different mistakes, and the reader
+ *  can only fix the one they actually made.
+ *
+ *  A v1 root is NOT absent even when half of it is missing: a `PIPELINE.md`, or
+ *  step markdown under `steps/`, declares a pipeline, so the v1 walk parses it
+ *  and reports what is wrong with it (an empty `steps/` included). Absent means
+ *  neither format left anything here to read. */
+function pipelineAbsence(pipelineRoot: string): string | null {
+  let st;
+  try {
+    st = statSync(pipelineRoot);
+  } catch {
+    return `No pipeline at ${pipelineRoot} — the path does not exist`;
+  }
+  if (!st.isDirectory()) return `No pipeline at ${pipelineRoot} — the path is not a directory`;
+  if (existsSync(join(pipelineRoot, 'PIPELINE.md'))) return null;
+  if (listMarkdownFiles(join(pipelineRoot, 'steps')).length > 0) return null;
+  return (
+    `No pipeline at ${pipelineRoot} — the directory exists but holds no ` +
+    `${MANIFEST_FILENAME}, no PIPELINE.md and no steps/*.md`
+  );
 }
 
 /** A plan that can only halt — one error, no steps. Used when the manifest
@@ -1159,10 +1196,16 @@ function computePlanFromMarkdown(pipelineRoot: string, options: ComputePlanOptio
   }
   const hasEffortOverride = (id: string) => Object.prototype.hasOwnProperty.call(effortOverrides, id);
 
-  // 2. Enumerate iteration files.
+  // 2. Enumerate step files.
   const stepsDir = join(pipelineRoot, 'steps');
   const files = listMarkdownFiles(stepsDir);
-  if (files.length === 0) errors.push(`No iteration files found under ${stepsDir}`);
+  // Reached only for a root that DOES declare a v1 pipeline (computePlan turns
+  // a root with nothing in it away first) — so this says the declaration has no
+  // steps, in the vocabulary the CLI uses today: "iteration files" was v1's
+  // name for them, and a step has not been a file since v2.
+  if (files.length === 0) {
+    errors.push(`No step files found under ${stepsDir} — a v1 pipeline's steps are the markdown files there`);
+  }
 
   const steps: PlanStep[] = [];
   /** Script, pipeline AND gate steps carry cross-step lints (`## Next` — all

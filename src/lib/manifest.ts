@@ -26,7 +26,10 @@
 //     behaving otherwise. The same rule governs where a key may appear: a knob
 //     declared on a step kind that cannot use it is an error, not an ignored
 //     block — a step whose inputs never bind is the loudest failure v2 exists
-//     to prevent.
+//     to prevent. And an unknown KEY is an error for the same reason: a
+//     misspelling this parser does not read is a setting its author believes
+//     they made (`on-failure:` for `on_failure:` was exactly that, one
+//     character wide and silent for as long as it sat there).
 //   * Everything v1 kept in a step's markdown — a script's `## Params`, a
 //     gate's `## Message` — is declared HERE. Only an agent step's body is
 //     prose, because only an agent reads prose.
@@ -233,6 +236,55 @@ function readMap(v: unknown, path: string, errors: string[]): Record<string, unk
   return v;
 }
 
+/** A key this parser does not read is an ERROR, never a dropped line.
+ *
+ *  This is the unknown-VALUE rule applied to the other half of a declaration.
+ *  Every block below reads a fixed set of keys, and reading a fixed set says
+ *  nothing about the ones left over: a typo, or a v1 holdover, used to sit in
+ *  a manifest looking configured while the run took the default. `on-failure:`
+ *  is the live example — the spelling the docs taught, one character away from
+ *  the `on_failure:` this parser reads, accepted and ignored on every run.
+ *  A knob the author believes they set is exactly the failure v2 exists to
+ *  prevent, so it halts the plan instead of riding along.
+ *
+ *  `hints` names the v2 home of a key that HAS one (a v1 name, a rename) or
+ *  says plainly that it has none; a key differing from a known one only by
+ *  hyphens-for-underscores is diagnosed with no table entry at all. */
+function checkKeys(
+  raw: Record<string, unknown>,
+  known: ReadonlySet<string>,
+  path: string,
+  subject: string,
+  errors: string[],
+  hints: Readonly<Record<string, string>> = {},
+): void {
+  for (const key of Object.keys(raw)) {
+    if (known.has(key)) continue;
+    const at = path ? `${path}.${key}` : key;
+    const hint = hints[key];
+    if (hint !== undefined) {
+      errors.push(`${at}: ${hint}`);
+      continue;
+    }
+    const underscored = key.replace(/-/g, '_');
+    if (underscored !== key && known.has(underscored)) {
+      errors.push(`${at}: unknown key — did you mean '${underscored}'? (every v2 key uses underscores)`);
+      continue;
+    }
+    errors.push(`${at}: unknown key — ${subject} declares ${[...known].join(', ')}`);
+  }
+}
+
+const PARAM_SPEC_KEYS: ReadonlySet<string> = new Set([
+  'type',
+  'required',
+  'enum',
+  'default',
+  'value',
+  'from',
+  'description',
+]);
+
 /** A `params:` / `args:` / `output:` block — the SAME declaration vocabulary v1
  *  wrote as a fenced JSON block under `## Params`, moved into the manifest and
  *  written as YAML. Checked against `PARAM_TYPES` from the frozen contract so
@@ -262,6 +314,7 @@ function readParamSpecs(
       );
       continue;
     }
+    checkKeys(raw, PARAM_SPEC_KEYS, at, 'an input spec', errors);
     if (typeof raw.type !== 'string' || !PARAM_TYPES.has(raw.type)) {
       errors.push(
         `${at}.type: unknown type ${JSON.stringify(raw.type ?? null)} — expected one of ${[...PARAM_TYPES].join(' | ')}`,
@@ -284,12 +337,21 @@ function readParamSpecs(
 // body: string | [ entry, ... ]
 // ---------------------------------------------------------------------------
 
+const BODY_OPTION_KEYS: ReadonlySet<string> = new Set(['use', 'when']);
+const BODY_ONEOF_KEYS: ReadonlySet<string> = new Set(['oneof']);
+/** `when:` beside `oneof:` is the tempting one: the conditions belong to the
+ *  OPTIONS, so one on the entry itself would never be consulted. */
+const BODY_ONEOF_HINTS: Readonly<Record<string, string>> = {
+  when: `not a key here — a oneof's conditions belong to its options, one 'when:' each`,
+};
+
 function parseBodyOption(v: unknown, path: string, errors: string[]): BodyOption | null {
   if (typeof v === 'string') return { use: v, when: null };
   if (!isPlainObject(v)) {
     errors.push(`${path}: expected a path or { use, when }, got ${typeof v}`);
     return null;
   }
+  checkKeys(v, BODY_OPTION_KEYS, path, 'a body include', errors);
   const use = readString(v.use, `${path}.use`, errors);
   if (!use) {
     if (v.use === undefined) errors.push(`${path}: missing 'use'`);
@@ -310,6 +372,7 @@ function parseBody(v: unknown, path: string, errors: string[]): BodyEntry[] {
   v.forEach((raw, i) => {
     const at = `${path}[${i}]`;
     if (isPlainObject(raw) && raw.oneof !== undefined) {
+      checkKeys(raw, BODY_ONEOF_KEYS, at, 'a oneof entry', errors, BODY_ONEOF_HINTS);
       if (!Array.isArray(raw.oneof)) {
         errors.push(`${at}.oneof: expected a list of options`);
         return;
@@ -347,6 +410,48 @@ function parseBody(v: unknown, path: string, errors: string[]): BodyEntry[] {
 // steps
 // ---------------------------------------------------------------------------
 
+/** Every key `parseStep` reads — the UNION across step types, deliberately.
+ *  A key that is legal on another kind of step already gets its own targeted
+ *  error below ("only a 'type: script' step has a timeout"), which says what to
+ *  do about it; adding "unknown key" on top would bury the useful one. */
+const STEP_KEYS: ReadonlySet<string> = new Set([
+  'name',
+  'type',
+  'body',
+  'needs',
+  'model',
+  'effort',
+  'self_improve',
+  'script',
+  'pipeline',
+  'args',
+  'params',
+  'output',
+  'timeout',
+  'retries',
+  'on_failure',
+  'required_role',
+  'message',
+  'isolation',
+]);
+
+/** Keys with a v2 home worth naming: `id:` was the field's working name during
+ *  design, and the rest are v1 — a step's frontmatter keys, which a manifest
+ *  written by hand from a v1 pipeline inherits verbatim. Saying where each one
+ *  went beats a bare "unknown key" on the keys people actually type. */
+const STEP_KEY_HINTS: Readonly<Record<string, string>> = {
+  id: `renamed — a step is identified by 'name:' now`,
+  step_id: `renamed — a step is identified by 'name:' now (v1 read it from the step file's frontmatter)`,
+  'depends-on': `renamed — a step's dependencies are declared with 'needs:'`,
+  depends_on: `renamed — a step's dependencies are declared with 'needs:'`,
+  'on-failure': `renamed — the v2 key is 'on_failure:' (underscore); the hyphenated spelling is v1's`,
+  command:
+    `removed — a v2 script step runs a 'script:' file; an inline command is not expressible ` +
+    `in a manifest (put it in a script and point 'script:' at that)`,
+  'permission-mode':
+    `not a manifest key — a step's permission mode is read from the frontmatter of its body file`,
+};
+
 function parseStep(
   raw: unknown,
   index: number,
@@ -359,11 +464,11 @@ function parseStep(
     return null;
   }
 
-  // `id:` was the field's working name during design. Say so explicitly rather
-  // than letting it surface as a confusing "missing 'name'".
-  if (raw.id !== undefined) {
-    errors.push(`${at}.id: renamed — a step is identified by 'name:' now`);
-  }
+  // Swept BEFORE anything is read — including before the 'name' check, which
+  // returns early: a step written with `id:` has to hear that `id:` was
+  // renamed, not a confusing "missing 'name'".
+  checkKeys(raw, STEP_KEYS, at, 'a step', errors, STEP_KEY_HINTS);
+
   const name = readString(raw.name, `${at}.name`, errors);
   if (!name) {
     if (raw.name === undefined) errors.push(`${at}: missing 'name'`);
@@ -486,11 +591,64 @@ function parseStep(
 // `## Graph` markdown section into a first-class manifest key.
 // ---------------------------------------------------------------------------
 
+/** The keys one routing edge may carry. `validateGraph` checks an edge's
+ *  SHAPE (exactly one of goto/done, a known target, a sane max) and reads
+ *  nothing else, so anything outside this set is dropped in silence — and a
+ *  dropped `when:` does not lose a fallback the way a dropped step key does,
+ *  it makes a CONDITIONAL edge UNCONDITIONAL. `{ goto: b, wehn: flag }` routes
+ *  every run to `b`. */
+const FLOW_EDGE_KEYS: ReadonlySet<string> = new Set(['when', 'goto', 'done', 'max']);
+
+/** The shorthand node — `a: { goto: b }` / `a: { done: true }`. `nodeEdges`
+ *  reads exactly one of goto/done off it and discards the rest, so a condition
+ *  written here is a condition that never runs. */
+const FLOW_NODE_KEYS: ReadonlySet<string> = new Set(['goto', 'done']);
+
+const FLOW_EDGE_HINTS: Readonly<Record<string, string>> = {
+  if: `renamed — an edge's condition is 'when:'`,
+  condition: `renamed — an edge's condition is 'when:'`,
+  next: `renamed — an edge's target is 'goto:'`,
+  next_iteration:
+    `renamed — an edge's target is 'goto:' (v1 had each step report its own next_iteration; ` +
+    `in v2 the route is declared here)`,
+  target: `renamed — an edge's target is 'goto:'`,
+  complete: `renamed — an edge that ends the run is 'done: true'`,
+  end: `renamed — an edge that ends the run is 'done: true'`,
+  limit: `renamed — a bounded loop's budget is 'max:'`,
+};
+
+/** The shorthand form takes no condition and no budget: both belong to an edge
+ *  in the list form, which is what carrying them here silently loses. */
+const FLOW_NODE_HINTS: Readonly<Record<string, string>> = {
+  ...FLOW_EDGE_HINTS,
+  when: `not a key here — a conditional route is a LIST of edges: '<step>: [ { when: …, goto: … }, { goto: … } ]'`,
+  max: `not a key here — a loop budget belongs on the edge that loops, in the list form`,
+};
+
 function parseFlow(v: unknown, errors: string[]): Graph | null {
   if (v === undefined || v === null) return null;
   if (!isPlainObject(v)) {
     errors.push(`flow: expected a mapping of step_id → edges`);
     return null;
+  }
+  // The unknown-key sweep is done HERE rather than in `validateGraph`, which
+  // this shares with the v1 `## Graph` reader (lib/graph.ts): a v2 manifest is
+  // refused for a key that would have been dropped, and no v1 pipeline changes
+  // meaning. Shape stays validateGraph's job — a non-mapping edge already has
+  // its own error there, so it is skipped rather than reported twice.
+  for (const [node, raw] of Object.entries(v)) {
+    const at = `flow.${node}`;
+    if (Array.isArray(raw)) {
+      raw.forEach((edge, i) => {
+        if (isPlainObject(edge)) {
+          checkKeys(edge, FLOW_EDGE_KEYS, `${at}[${i}]`, 'a flow edge', errors, FLOW_EDGE_HINTS);
+        }
+      });
+      continue;
+    }
+    if (isPlainObject(raw)) {
+      checkKeys(raw, FLOW_NODE_KEYS, at, 'a flow shorthand', errors, FLOW_NODE_HINTS);
+    }
   }
   return v as unknown as Record<string, GraphNode> as Graph;
 }
@@ -619,6 +777,41 @@ export function frozenBodyFiles(manifest: Manifest): Set<string> {
 // Entry point
 // ---------------------------------------------------------------------------
 
+/** Every top-level key `parseManifest` reads. */
+const MANIFEST_KEYS: ReadonlySet<string> = new Set([
+  'schema',
+  'name',
+  'description',
+  'execution',
+  'isolation',
+  'runner',
+  'base_branch',
+  'self_improve',
+  'defaults',
+  'submodules',
+  'vars',
+  'steps',
+  'flow',
+]);
+
+/** The header keys of v1's `PIPELINE.md` frontmatter, and where each one went.
+ *  Three of them have no v2 key at all, which is worth saying out loud: a
+ *  manifest that carries them over is not configured, it is decorated. */
+const MANIFEST_KEY_HINTS: Readonly<Record<string, string>> = {
+  graph: `renamed — conditional routing is a first-class key now: 'flow:'`,
+  model: `moved — a pipeline-wide model is declared under 'defaults:' (defaults: → model:)`,
+  effort: `moved — a pipeline-wide effort is declared under 'defaults:' (defaults: → effort:)`,
+  format: `not a v2 key — a pipeline.yml is versioned by 'schema: ${MANIFEST_SCHEMA}'`,
+  worktree_hook_dir: `not a v2 key — worktree hooks are read from .pipeline/.hooks`,
+  delete_branches: `not a v2 key — a completed run deletes its branch either way`,
+  finalize: `not a v2 key — a run finalizes when the pipeline has a worktree-finalize hook`,
+  'permission-mode':
+    `not a manifest key — a step's permission mode is read from the frontmatter of its body file`,
+};
+
+/** Every key the `defaults:` block reads. */
+const DEFAULTS_KEYS: ReadonlySet<string> = new Set(['model', 'effort']);
+
 /** Parse and validate a `pipeline.yml`. Pure: no filesystem, no environment.
  *  Errors are collected rather than thrown so a caller can print all of them at
  *  once; a manifest with a non-empty `errors` must never be run. */
@@ -635,6 +828,8 @@ export function parseManifest(text: string): Manifest {
   if (!isPlainObject(doc)) {
     return blank({ errors: [`${MANIFEST_FILENAME}: expected a mapping at the top level`], warnings });
   }
+
+  checkKeys(doc, MANIFEST_KEYS, '', 'the manifest header', errors, MANIFEST_KEY_HINTS);
 
   // `schema:` is required and exact. A manifest that does not say which format
   // it is written in is precisely the ambiguity v2 exists to remove.
@@ -659,6 +854,7 @@ export function parseManifest(text: string): Manifest {
   const selfImprove = readBool(doc.self_improve, 'self_improve', errors) ?? true;
 
   const defaultsMap = readMap(doc.defaults, 'defaults', errors);
+  checkKeys(defaultsMap, DEFAULTS_KEYS, 'defaults', `'defaults:'`, errors);
   const rawSteps = doc.steps;
   const steps: ManifestStep[] = [];
   if (rawSteps === undefined) errors.push(`steps: missing`);
