@@ -420,6 +420,22 @@ describe('pipeline fix --scope-guard: as a real subprocess, a file outside the f
     expect(readFileSync(victim, 'utf8')).toBe(original);
   });
 
+  test('the DEFAULT reader (no injected stdin) fails closed on an empty payload', () => {
+    // Covers the real fd-0 read the hook actually uses — the injected-stdin
+    // tests above cannot. Bun 1.4 on Windows never settled `Bun.stdin.text()`
+    // inside this dynamically imported command, so the process exited 0 with no
+    // output, and 0 is ALLOW: the guard failed OPEN because the runtime moved
+    // under it. Empty in, deny out, at the process level.
+    const { pipelineRoot } = projectWithPipeline();
+    const proc = spawnSync(
+      process.execPath,
+      [CLI, 'fix', '--scope-guard', '--root', pipelineRoot],
+      { input: '', encoding: 'utf8' },
+    );
+    expect(proc.status).toBe(2);
+    expect(proc.stdout).toContain('"deny"');
+  });
+
   test('the same guard ALLOWS a write inside the pipeline folder (silently, exit 0)', () => {
     const { pipelineRoot } = projectWithPipeline();
     const payload = JSON.stringify({

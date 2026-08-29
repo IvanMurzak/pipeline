@@ -591,11 +591,64 @@ function parseStep(
 // `## Graph` markdown section into a first-class manifest key.
 // ---------------------------------------------------------------------------
 
+/** The keys one routing edge may carry. `validateGraph` checks an edge's
+ *  SHAPE (exactly one of goto/done, a known target, a sane max) and reads
+ *  nothing else, so anything outside this set is dropped in silence — and a
+ *  dropped `when:` does not lose a fallback the way a dropped step key does,
+ *  it makes a CONDITIONAL edge UNCONDITIONAL. `{ goto: b, wehn: flag }` routes
+ *  every run to `b`. */
+const FLOW_EDGE_KEYS: ReadonlySet<string> = new Set(['when', 'goto', 'done', 'max']);
+
+/** The shorthand node — `a: { goto: b }` / `a: { done: true }`. `nodeEdges`
+ *  reads exactly one of goto/done off it and discards the rest, so a condition
+ *  written here is a condition that never runs. */
+const FLOW_NODE_KEYS: ReadonlySet<string> = new Set(['goto', 'done']);
+
+const FLOW_EDGE_HINTS: Readonly<Record<string, string>> = {
+  if: `renamed — an edge's condition is 'when:'`,
+  condition: `renamed — an edge's condition is 'when:'`,
+  next: `renamed — an edge's target is 'goto:'`,
+  next_iteration:
+    `renamed — an edge's target is 'goto:' (v1 had each step report its own next_iteration; ` +
+    `in v2 the route is declared here)`,
+  target: `renamed — an edge's target is 'goto:'`,
+  complete: `renamed — an edge that ends the run is 'done: true'`,
+  end: `renamed — an edge that ends the run is 'done: true'`,
+  limit: `renamed — a bounded loop's budget is 'max:'`,
+};
+
+/** The shorthand form takes no condition and no budget: both belong to an edge
+ *  in the list form, which is what carrying them here silently loses. */
+const FLOW_NODE_HINTS: Readonly<Record<string, string>> = {
+  ...FLOW_EDGE_HINTS,
+  when: `not a key here — a conditional route is a LIST of edges: '<step>: [ { when: …, goto: … }, { goto: … } ]'`,
+  max: `not a key here — a loop budget belongs on the edge that loops, in the list form`,
+};
+
 function parseFlow(v: unknown, errors: string[]): Graph | null {
   if (v === undefined || v === null) return null;
   if (!isPlainObject(v)) {
     errors.push(`flow: expected a mapping of step_id → edges`);
     return null;
+  }
+  // The unknown-key sweep is done HERE rather than in `validateGraph`, which
+  // this shares with the v1 `## Graph` reader (lib/graph.ts): a v2 manifest is
+  // refused for a key that would have been dropped, and no v1 pipeline changes
+  // meaning. Shape stays validateGraph's job — a non-mapping edge already has
+  // its own error there, so it is skipped rather than reported twice.
+  for (const [node, raw] of Object.entries(v)) {
+    const at = `flow.${node}`;
+    if (Array.isArray(raw)) {
+      raw.forEach((edge, i) => {
+        if (isPlainObject(edge)) {
+          checkKeys(edge, FLOW_EDGE_KEYS, `${at}[${i}]`, 'a flow edge', errors, FLOW_EDGE_HINTS);
+        }
+      });
+      continue;
+    }
+    if (isPlainObject(raw)) {
+      checkKeys(raw, FLOW_NODE_KEYS, at, 'a flow shorthand', errors, FLOW_NODE_HINTS);
+    }
   }
   return v as unknown as Record<string, GraphNode> as Graph;
 }

@@ -954,4 +954,84 @@ flow:
   test('flow is absent by default — a pipeline without it is still valid', () => {
     expect(parse(MINIMAL).flow).toBeNull();
   });
+
+  // -------------------------------------------------------------------------
+  // Unknown edge keys — the worst instance of the unknown-key class
+  //
+  // A dropped step key loses a fallback. A dropped `when:` loses the CONDITION:
+  // `{ goto: b, wehn: flag }` is not a broken edge, it is an UNCONDITIONAL one,
+  // so the run takes a branch it was told to guard. Swept in `parseFlow` (v2
+  // only) rather than in validateGraph, which the v1 `## Graph` reader shares.
+  // -------------------------------------------------------------------------
+
+  const routed = (flow: string) =>
+    parse(`schema: 2
+name: d
+steps:
+  - name: a
+    body: a.md
+  - name: b
+    body: b.md
+    needs: []
+flow:
+${flow}`);
+
+  test('a misspelled condition is refused instead of silently routing every run', () => {
+    const m = routed(`  a:
+    - { goto: b, wehn: flag }
+    - { goto: b }
+`);
+    expect(m.errors).toContain(
+      'flow.a[0].wehn: unknown key — a flow edge declares when, goto, done, max',
+    );
+  });
+
+  test('each edge key names its v2 spelling', () => {
+    const cases: [string, string][] = [
+      ['if: flag, goto: b', "condition is 'when:'"],
+      ['condition: flag, goto: b', "condition is 'when:'"],
+      ['next: b', "target is 'goto:'"],
+      ['next_iteration: b', "target is 'goto:'"],
+      ['target: b', "target is 'goto:'"],
+      ['goto: b, complete: true', "ends the run is 'done: true'"],
+      ['goto: b, end: true', "ends the run is 'done: true'"],
+      ['goto: b, limit: 3', "budget is 'max:'"],
+    ];
+    for (const [edge, expected] of cases) {
+      const key = edge.includes('goto: b, ') ? edge.split('goto: b, ')[1].split(':')[0] : edge.split(':')[0];
+      const m = routed(`  a:
+    - { ${edge} }
+`);
+      expect(m.errors.some((e) => e.startsWith(`flow.a[0].${key}:`) && e.includes(expected))).toBe(true);
+    }
+  });
+
+  test('the shorthand node takes no condition — one written there would never run', () => {
+    const m = routed(`  a:
+    goto: b
+    when: flag
+`);
+    expect(m.errors.some((e) => e.startsWith('flow.a.when:') && e.includes('LIST of edges'))).toBe(true);
+    // The shorthand itself stays legal — only the key that does nothing is refused.
+    expect(routed(`  a:
+    goto: b
+`).errors).toEqual([]);
+  });
+
+  test('a key no rename entry covers still errors — it never passes in silence', () => {
+    const m = routed(`  a:
+    - { goto: b, next-iteration: b }
+`);
+    expect(m.errors.some((e) => e.startsWith('flow.a[0].next-iteration: unknown key'))).toBe(true);
+  });
+
+  test('every legal edge key together stays clean', () => {
+    const m = routed(`  a:
+    - { when: flag, goto: b, max: 3 }
+    - { goto: b }
+  b:
+    - { done: true }
+`);
+    expect(m.errors).toEqual([]);
+  });
 });

@@ -74,7 +74,7 @@
 //   2  usage error, a `--root` outside the project's pipelines dir, a missing
 //      manifest, or a pipeline whose manifest cannot be read
 
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { computePlan } from '../lib/plan';
@@ -207,6 +207,26 @@ export function decideScopeGuard(pipelineRoot: string, payload: unknown): ScopeD
   return { allow: true };
 }
 
+/** Read the hook payload off fd 0.
+ *
+ *  DELIBERATELY NOT `Bun.stdin.text()`. On Windows under Bun 1.4 that promise
+ *  never settles when it is awaited inside a DYNAMICALLY imported module —
+ *  which is exactly how `cli.ts` loads this command (`await
+ *  import('./commands/fix')`). The await never returned, nothing was written,
+ *  the event loop drained, and the process exited 0 — and to a PreToolUse hook,
+ *  0 means ALLOW. A guard that fails OPEN because the runtime changed
+ *  underneath it is the precise failure this file exists to prevent, so the
+ *  read is now a plain synchronous fd read with the same behaviour on every
+ *  version. A read that throws still lands in the caller's catch, which denies.
+ *
+ *  Reproducer, no project code involved (Bun 1.4, Windows): a module imported
+ *  with `await import()` whose exported function awaits `Bun.stdin.text()`
+ *  exits 0 with no output; the same function called from a static import, or
+ *  the same dynamic import under Bun 1.3, reads the payload and exits 2. */
+function readHookPayload(): string {
+  return readFileSync(0, 'utf8');
+}
+
 export interface ScopeGuardDeps {
   readStdin?: () => Promise<string>;
   out?: (s: string) => void;
@@ -244,6 +264,17 @@ export async function runScopeGuard(args: string[], deps: ScopeGuardDeps = {}): 
     return 2;
   }
 
+  // FAIL CLOSED even if this process never reaches a decision. The Bun 1.4
+  // regression above did not merely lose the payload — it left the process with
+  // nothing to do, so it drained its event loop and exited 0, and 0 is ALLOW.
+  // The read no longer has that shape, but a guard should not depend on a
+  // runtime detail to stay a guard: from here on the process's DEFAULT exit
+  // status is deny, and only an explicit decision (cli.ts calls process.exit
+  // with the returned code) can lower it. Skipped when a caller injects its own
+  // stdin — that is an in-process test, which must not stamp an exit status on
+  // the test runner.
+  if (deps.readStdin === undefined) process.exitCode = 2;
+
   const deny = (reason: string): number => {
     out(
       JSON.stringify({
@@ -260,7 +291,7 @@ export async function runScopeGuard(args: string[], deps: ScopeGuardDeps = {}): 
 
   let raw: string;
   try {
-    raw = await (deps.readStdin ?? (() => Bun.stdin.text()))();
+    raw = await (deps.readStdin ?? readHookPayload)();
   } catch (e) {
     return deny(`pipeline fix: could not read the hook payload (${String(e)}) — refused.`);
   }
