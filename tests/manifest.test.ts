@@ -311,7 +311,6 @@ steps:
     type: pipeline
     needs: [c]
     pipeline: ../child
-    isolation: own
     args:
       z: { type: number, value: 1 }
     output:
@@ -721,7 +720,6 @@ steps:
   - name: release
     type: pipeline
     pipeline: ../release-package
-    isolation: own
     args:
       package:
         type: string
@@ -731,8 +729,33 @@ steps:
     const s = m.steps[0];
     expect(s.type).toBe('pipeline');
     expect(s.pipeline).toBe('../release-package');
-    expect(s.child_isolation).toBe('own');
     expect(s.args).toEqual({ package: { type: 'string', value: 'protocol' } });
+  });
+
+  test("a step's `isolation:` is REFUSED — no step can set it, pipeline steps included", () => {
+    // It used to be accepted here, enum-checked to own|inherit, and then
+    // dropped on the way to the plan: a manifest that declared child isolation
+    // got none. Refusing it is the whole v2 rule — an unknown value is an
+    // error, never a fallback that looks configured while behaving otherwise.
+    for (const type of ['pipeline', 'agent']) {
+      const m = parse(
+        `schema: 2\nname: d\nsteps:\n  - name: a\n    type: ${type}\n` +
+          (type === 'pipeline' ? '    pipeline: ../child\n' : '    body: steps/a.md\n') +
+          `    isolation: own\n`,
+      );
+      expect(
+        m.errors.some((e) => e.includes('steps[0].isolation') && e.includes('not a step key')),
+      ).toBe(true);
+    }
+
+    // The message says where isolation DOES live, and that a child pipeline's
+    // own header is the only thing that decides the child's isolation.
+    const one = parse(
+      `schema: 2\nname: d\nsteps:\n  - name: a\n    type: pipeline\n    pipeline: ../child\n    isolation: inherit\n`,
+    );
+    expect(one.errors).toEqual([
+      "steps[0].isolation: not a step key — isolation is declared once, in the pipeline header; a composed child pipeline always runs under the isolation ITS OWN pipeline declares, and no step can change that (delete the key, or change the child's header)",
+    ]);
   });
 
   test('inputs go under the key named for the step kind, or it is an error', () => {
@@ -811,11 +834,6 @@ steps:
   test('a key belonging to another type is refused, not ignored', () => {
     const m = parse(`schema: 2\nname: d\nsteps:\n  - name: a\n    body: a.md\n    script: x.py\n`);
     expect(m.errors.some((e) => e.includes("add 'type: script'"))).toBe(true);
-  });
-
-  test('only a pipeline step may declare isolation — the header owns it otherwise', () => {
-    const m = parse(`schema: 2\nname: d\nsteps:\n  - name: a\n    body: a.md\n    isolation: own\n`);
-    expect(m.errors.some((e) => e.includes('only a'))).toBe(true);
   });
 
   test('an unknown step type is refused', () => {

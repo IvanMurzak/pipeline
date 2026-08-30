@@ -34,7 +34,14 @@
 
 import { existsSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
-import { resolvePipelineRef, type PipelineStepSpec } from './compose';
+import {
+  lintCompositionForPlan,
+  resolvePipelineRef,
+  unresolvedRefDetail,
+  type ComposeFs,
+  type CompositionEdge,
+  type PipelineStepSpec,
+} from './compose';
 import type { GateStepSpec } from './gate';
 import { normalizeApprovalRole } from './gate';
 import {
@@ -79,6 +86,10 @@ export interface ManifestPlanOptions extends ComputePlanOptions {
    *  Injected so the translation can be exercised without a real tree; the
    *  default is the same on-disk resolver `computePlan` uses. */
   resolvePipeline?: (ref: string, fromRoot: string) => { root: string | null; tried: string[] };
+  /** Filesystem seam for the composition graph lint — the referenced children
+   *  are read from disk. Same reason as `resolvePipeline`: injected so the
+   *  lint can be exercised over an in-memory tree. Default: node:fs. */
+  composeFs?: ComposeFs;
 }
 
 /**
@@ -185,6 +196,25 @@ export function planFromManifest(
   }
 
   lintBindings(manifest, steps, errors, warnings);
+
+  // Composition lint — the cross-PIPELINE reference graph reachable through
+  // `type: pipeline` steps must be a DAG within the depth cap. The v1 walk ran
+  // this and the manifest translation did not, so a schema-2 plan checked only
+  // that each reference RESOLVED: two manifests referencing each other passed
+  // lint and produced a run that descends until the runtime depth fail-safe
+  // trips. Same call, same messages, same skip-when-uncomposed as lib/plan.ts.
+  const compositionEdges: CompositionEdge[] = steps.flatMap((s) =>
+    s.type === 'pipeline' && s.pipeline_spec?.resolved_root
+      ? [{ rel: s.rel, root: s.pipeline_spec.resolved_root }]
+      : [],
+  );
+  lintCompositionForPlan(
+    pipelineRoot,
+    compositionEdges,
+    { maxCompositionDepth: options.maxCompositionDepth, fs: options.composeFs },
+    errors,
+    warnings,
+  );
 
   return {
     mode: manifest.execution,
@@ -431,7 +461,7 @@ function pipelineSpec(
     const resolved = resolveRef(step.pipeline, pipelineRoot);
     if (resolved.root === null) {
       errors.push(
-        `step '${step.name}': pipeline reference '${step.pipeline}' does not resolve — nothing at any of: ${resolved.tried.join(', ')}`,
+        `step '${step.name}': pipeline reference '${step.pipeline}' does not resolve — ${unresolvedRefDetail(resolved.tried)}`,
       );
     } else {
       resolvedRoot = resolved.root;

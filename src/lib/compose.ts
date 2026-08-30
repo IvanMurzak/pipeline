@@ -21,6 +21,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { parseFrontmatter } from './frontmatter';
+import { MANIFEST_FILENAME, parseManifest } from './manifest';
 import type { ScriptParamSpec } from './script-types';
 
 /** Parsed `type: pipeline` declaration attached to a PlanStep — the composed
@@ -32,7 +33,8 @@ export interface PipelineStepSpec {
    *  another pipeline); null when the required key is missing (plan ERROR). */
   pipeline: string | null;
   /** Absolute root directory of the referenced pipeline (the dir holding its
-   *  PIPELINE.md); null when the reference does not resolve (plan ERROR). */
+   *  `pipeline.yml` or its PIPELINE.md); null when the reference does not
+   *  resolve (plan ERROR). */
   resolved_root: string | null;
   /** `## Params` bindings for the child pipeline — same declaration + binding
    *  syntax/semantics as script steps (value XOR from, `${steps.<id>.output.<path>}`
@@ -113,15 +115,32 @@ function findPipelinesRoot(fromRoot: string): string | null {
 }
 
 export interface ResolvedPipelineRef {
-  /** Absolute pipeline root (dir containing PIPELINE.md), or null. */
+  /** Absolute pipeline root (dir containing a `pipeline.yml` or a
+   *  PIPELINE.md), or null. */
   root: string | null;
   /** Candidate roots probed, in order (for the actionable error message). */
   tried: string[];
 }
 
+/** The v1 header file. A directory holding it is a pipeline root, exactly as a
+ *  directory holding `pipeline.yml` is — `computePlan` reads either. */
+const V1_MANIFEST_FILENAME = 'PIPELINE.md';
+
+/** Named for the error message: what a candidate directory must hold to BE a
+ *  pipeline root. Both spellings, in the order `computePlan` prefers them. */
+const PIPELINE_ROOT_FILES = [MANIFEST_FILENAME, V1_MANIFEST_FILENAME] as const;
+
+/** Whether `dir` is a pipeline root in EITHER format. Probing only PIPELINE.md
+ *  made a schema-2 child that dropped its v1 header unresolvable — a pipeline
+ *  the engine runs happily, that composition refused to see. */
+function isPipelineRoot(dir: string, fs: ComposeFs): boolean {
+  return PIPELINE_ROOT_FILES.some((name) => fs.exists(join(dir, name)));
+}
+
 /**
  * Resolve a `pipeline:` reference from a pipeline root. Candidate bases, in
- * order (first candidate whose dir holds a PIPELINE.md wins):
+ * order (first candidate that IS a pipeline root — `pipeline.yml` or
+ * PIPELINE.md — wins):
  *   1. the referencing pipeline root itself   — child pipelines (`targets/x`)
  *      and explicit relative refs (`../sibling`);
  *   2. its parent directory                   — sibling pipelines by name
@@ -142,9 +161,15 @@ export function resolvePipelineRef(
   for (const candidate of candidates) {
     if (tried.includes(candidate)) continue;
     tried.push(candidate);
-    if (fs.exists(join(candidate, 'PIPELINE.md'))) return { root: candidate, tried };
+    if (isPipelineRoot(candidate, fs)) return { root: candidate, tried };
   }
   return { root: null, tried };
+}
+
+/** The tail of an unresolved-reference error — one wording, so the v1 walk,
+ *  the manifest translation and the child-graph lint cannot drift. */
+export function unresolvedRefDetail(tried: string[]): string {
+  return `no ${PIPELINE_ROOT_FILES.join(' or ')} at any of: ${tried.join(', ')}`;
 }
 
 /** One outgoing composition edge of the ENTRY pipeline: a `type: pipeline`
@@ -152,7 +177,9 @@ export function resolvePipelineRef(
  *  edges whose reference did not resolve are reported by computePlan itself
  *  and excluded here. */
 export interface CompositionEdge {
-  /** Step path relative to the entry pipeline's `steps/`, POSIX-separated. */
+  /** How the step is LABELLED: its path relative to the entry pipeline's
+   *  `steps/` (POSIX-separated) in v1, its manifest `name:` in schema 2. The
+   *  lint routes on `root` alone — this only names the step to a reader. */
   rel: string;
   /** Absolute root of the referenced (child) pipeline. */
   root: string;
@@ -178,8 +205,66 @@ function makeLabeler(entryRoot: string): (root: string) => string {
 }
 
 /** Outgoing `type: pipeline` references of a NON-entry pipeline, read
- *  statically from its steps' frontmatter through the fs seam. */
+ *  statically through the fs seam — from its `pipeline.yml` when it has one,
+ *  else from its steps' frontmatter. Same precedence `computePlan` uses, so
+ *  the graph walked here is the graph that would run. */
 function childEdges(
+  root: string,
+  fs: ComposeFs,
+  label: string,
+  errors: Set<string>,
+): CompositionEdge[] {
+  return fs.exists(join(root, MANIFEST_FILENAME))
+    ? manifestChildEdges(root, fs, label, errors)
+    : markdownChildEdges(root, fs, label, errors);
+}
+
+/** Schema-2 child: its steps live in `pipeline.yml`, not in step frontmatter,
+ *  so the v1 walk below found NOTHING in it — a cycle between two manifests
+ *  went undetected. */
+function manifestChildEdges(
+  root: string,
+  fs: ComposeFs,
+  label: string,
+  errors: Set<string>,
+): CompositionEdge[] {
+  let raw: string;
+  try {
+    raw = fs.readFile(join(root, MANIFEST_FILENAME));
+  } catch (e) {
+    errors.add(
+      `composition: '${label}': ${MANIFEST_FILENAME} could not be read (${(e as Error).message}) — the child's own composition cannot be checked`,
+    );
+    return [];
+  }
+  const manifest = parseManifest(raw);
+  // A child that does not parse cannot be walked, and reporting nothing would
+  // silently narrow the graph — the parent's run would break inside it anyway.
+  if (manifest.errors.length > 0) {
+    errors.add(
+      `composition: '${label}': ${MANIFEST_FILENAME} does not parse (${manifest.errors[0]}) — the child's own composition cannot be checked`,
+    );
+    return [];
+  }
+  const edges: CompositionEdge[] = [];
+  for (const step of manifest.steps) {
+    // A parsed manifest never carries a `type: pipeline` step without a
+    // `pipeline:` — that is one of parseStep's hard errors, caught above.
+    if (step.type !== 'pipeline' || step.pipeline === null) continue;
+    const resolved = resolvePipelineRef(step.pipeline, root, fs);
+    if (resolved.root === null) {
+      errors.add(
+        `composition: '${label}' ${MANIFEST_FILENAME} step '${step.name}': pipeline reference '${step.pipeline}' does not resolve — ${unresolvedRefDetail(resolved.tried)}`,
+      );
+      continue;
+    }
+    edges.push({ rel: step.name, root: resolved.root });
+  }
+  return edges;
+}
+
+/** v1 child: one step per markdown file, the reference in its frontmatter. */
+function markdownChildEdges(
   root: string,
   fs: ComposeFs,
   label: string,
@@ -208,7 +293,7 @@ function childEdges(
     const resolved = resolvePipelineRef(ref, root, fs);
     if (resolved.root === null) {
       errors.add(
-        `composition: '${label}' steps/${rel}: pipeline reference '${ref}' does not resolve — no PIPELINE.md at any of: ${resolved.tried.join(', ')}`,
+        `composition: '${label}' steps/${rel}: pipeline reference '${ref}' does not resolve — ${unresolvedRefDetail(resolved.tried)}`,
       );
       continue;
     }
@@ -220,8 +305,8 @@ function childEdges(
 /**
  * Lint the cross-pipeline reference graph reachable from `entryRoot` through
  * its `type: pipeline` steps (`entryEdges`, parsed by computePlan). Children's
- * own references are read statically through the fs seam. Returns plan ERROR
- * strings:
+ * own references are read statically through the fs seam, from whichever
+ * format each child is written in. Returns plan ERROR strings:
  *   - a reference CYCLE (self-reference included), naming the cycle path;
  *   - a chain deeper than the depth cap (entry pipeline counts as depth 1);
  *   - a child's `type: pipeline` step whose reference is missing/unresolvable
@@ -278,4 +363,40 @@ export function lintComposition(
     );
   }
   return [...errors];
+}
+
+/**
+ * The plan-side wrapper around {@link lintComposition}: validate the depth-cap
+ * override, then append the graph's errors.
+ *
+ * Shared by BOTH plan builders on purpose. The lint used to be wired into the
+ * v1 walk only, so a schema-2 plan checked that each `pipeline:` reference
+ * RESOLVED and nothing else — two manifests pointing at each other were a plan
+ * with no errors and a run that never terminates. A lint that only one of two
+ * front doors calls is a lint that will be forgotten again.
+ *
+ * A pipeline with no resolved `type: pipeline` step passes no edges and this
+ * does nothing — non-composed pipelines lint exactly as before.
+ */
+export function lintCompositionForPlan(
+  pipelineRoot: string,
+  edges: CompositionEdge[],
+  options: { maxCompositionDepth?: number | undefined; fs?: ComposeFs | undefined },
+  errors: string[],
+  warnings: string[],
+): void {
+  if (edges.length === 0) return;
+  let maxDepth = options.maxCompositionDepth;
+  if (maxDepth !== undefined && (!Number.isInteger(maxDepth) || maxDepth < 1)) {
+    warnings.push(
+      `maxCompositionDepth ${String(maxDepth)} is invalid (positive integer required) — using the default ${MAX_COMPOSITION_DEPTH}`,
+    );
+    maxDepth = undefined;
+  }
+  errors.push(
+    ...lintComposition(pipelineRoot, edges, {
+      ...(maxDepth === undefined ? {} : { maxDepth }),
+      ...(options.fs === undefined ? {} : { fs: options.fs }),
+    }),
+  );
 }

@@ -10,15 +10,43 @@
 
 import { test, expect, describe } from 'bun:test';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { planFromManifest } from '../src/lib/manifest-plan';
 import { parseManifest } from '../src/lib/manifest';
+import { MAX_COMPOSITION_DEPTH, type ComposeFs } from '../src/lib/compose';
 import { pickMode } from '../src/lib/next';
 import { DEFAULT_SCRIPT_TIMEOUT_S } from '../src/lib/script-types';
 
 // An absolute root on both platforms. Nothing is read from disk — the
-// translation only joins paths — so the directory need not exist.
+// translation only joins paths, and the one part that WOULD read (the
+// composition graph lint) goes through the injected `composeFs` seam — so the
+// directory need not exist.
 const ROOT = join(tmpdir(), 'pipeline-plan-demo', '.pipeline', 'demo');
+
+/** A tree with nothing in it: every composed child is a leaf. */
+const EMPTY_FS: ComposeFs = {
+  exists: () => false,
+  readFile: () => {
+    throw new Error('ENOENT');
+  },
+  listMarkdownFiles: () => [],
+};
+
+/** In-memory ComposeFs over a path → contents map (the tests/compose.test.ts
+ *  fixture, reused so the two files describe the same tree the same way). */
+function memFs(files: Record<string, string>): ComposeFs {
+  const map = new Map<string, string>();
+  for (const [k, v] of Object.entries(files)) map.set(resolve(k), v);
+  return {
+    exists: (p) => map.has(resolve(p)),
+    readFile: (p) => {
+      const v = map.get(resolve(p));
+      if (v === undefined) throw new Error(`ENOENT: ${p}`);
+      return v;
+    },
+    listMarkdownFiles: () => [],
+  };
+}
 
 function plan(yaml: string, options = {}) {
   const manifest = parseManifest(yaml.trim() + '\n');
@@ -356,7 +384,7 @@ steps:
         type: string
         value: protocol
 `,
-      { resolvePipeline: stubResolver },
+      { resolvePipeline: stubResolver, composeFs: EMPTY_FS },
     );
     expect(p.errors).toEqual([]);
     const spec = p.steps[0].pipeline_spec!;
@@ -368,9 +396,81 @@ steps:
   test('an unresolvable reference is a plan ERROR, naming where it looked', () => {
     const p = plan(
       `schema: 2\nname: demo\nsteps:\n  - name: r\n    type: pipeline\n    pipeline: ../ghost\n`,
-      { resolvePipeline: stubResolver },
+      { resolvePipeline: stubResolver, composeFs: EMPTY_FS },
     );
     expect(p.errors.some((e) => e.includes("'../ghost' does not resolve") && e.includes('a, b'))).toBe(true);
+  });
+
+  // The lint below was wired into the v1 walk only, so a schema-2 plan checked
+  // that each reference RESOLVED and stopped there — a manifest pair pointing
+  // at each other planned clean.
+  const SIBLINGS = dirname(ROOT);
+  const sibling = (name: string) => join(SIBLINGS, name);
+  const composerYaml = (name: string, ref: string) =>
+    `schema: 2\nname: ${name}\nsteps:\n  - name: run\n    type: pipeline\n    pipeline: ${ref}\n`;
+  /** Resolve by sibling name over the injected tree (the real rule, narrowed). */
+  const resolveSibling = (ref: string) => ({ root: sibling(ref), tried: [sibling(ref)] });
+
+  test('a cycle between two manifests is a plan ERROR, not a clean plan', () => {
+    const p = plan(composerYaml('demo', 'child'), {
+      resolvePipeline: resolveSibling,
+      // The child's OWN reference resolves through the real resolver over this
+      // tree, so the entry pipeline has to be in it for the cycle to close.
+      composeFs: memFs({
+        [join(ROOT, 'pipeline.yml')]: composerYaml('demo', 'child'),
+        [join(sibling('child'), 'pipeline.yml')]: composerYaml('child', 'demo'),
+      }),
+    });
+    expect(p.errors.length).toBe(1);
+    expect(p.errors[0]).toContain('composition cycle detected: demo → child → demo');
+  });
+
+  test('a chain deeper than the cap is a plan ERROR on the manifest path too', () => {
+    const files: Record<string, string> = {};
+    for (let i = 2; i <= MAX_COMPOSITION_DEPTH + 1; i++) {
+      files[join(sibling(`p${i}`), 'pipeline.yml')] =
+        i <= MAX_COMPOSITION_DEPTH
+          ? composerYaml(`p${i}`, `p${i + 1}`)
+          : `schema: 2\nname: p${i}\nsteps:\n  - name: a\n    body: steps/a.md\n`;
+    }
+    const p = plan(composerYaml('demo', 'p2'), {
+      resolvePipeline: resolveSibling,
+      composeFs: memFs(files),
+    });
+    expect(p.errors.length).toBe(1);
+    expect(p.errors[0]).toContain(
+      `composition depth ${MAX_COMPOSITION_DEPTH + 1} exceeds the cap (${MAX_COMPOSITION_DEPTH})`,
+    );
+  });
+
+  test('an invalid maxCompositionDepth warns and falls back, exactly as on the v1 path', () => {
+    const p = plan(composerYaml('demo', 'child'), {
+      resolvePipeline: resolveSibling,
+      composeFs: EMPTY_FS,
+      maxCompositionDepth: 0,
+    });
+    expect(p.errors).toEqual([]);
+    expect(p.warnings).toContain(
+      `maxCompositionDepth 0 is invalid (positive integer required) — using the default ${MAX_COMPOSITION_DEPTH}`,
+    );
+  });
+
+  test('a pipeline with no composition never reaches the lint', () => {
+    // No `type: pipeline` step ⇒ no edges ⇒ the graph walk never runs, so a
+    // fs seam that throws on every call proves it was not consulted.
+    const throwing: ComposeFs = {
+      exists: () => {
+        throw new Error('the lint must not run for an uncomposed pipeline');
+      },
+      readFile: () => {
+        throw new Error('the lint must not run for an uncomposed pipeline');
+      },
+      listMarkdownFiles: () => {
+        throw new Error('the lint must not run for an uncomposed pipeline');
+      },
+    };
+    const p = plan(LINEAR, { composeFs: throwing });
+    expect(p.errors).toEqual([]);
   });
 });
 
@@ -531,7 +631,7 @@ steps:
         type: string
         from: \${steps.build.output.nope}
 `,
-      { resolvePipeline: () => ({ root: '/somewhere', tried: [] }) },
+      { resolvePipeline: () => ({ root: '/somewhere', tried: [] }), composeFs: EMPTY_FS },
     );
     expect(p.errors.some((e) => e.includes("without field 'nope'"))).toBe(true);
   });

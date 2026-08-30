@@ -122,7 +122,9 @@ export type {
 // reference resolution + cross-pipeline reference-graph lint (cycles, depth).
 export {
   lintComposition,
+  lintCompositionForPlan,
   resolvePipelineRef,
+  unresolvedRefDetail,
   realComposeFs,
   MAX_COMPOSITION_DEPTH,
 } from './lib/compose';

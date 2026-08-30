@@ -30,9 +30,9 @@ import {
   type StepType,
 } from './script-types';
 import {
-  lintComposition,
+  lintCompositionForPlan,
   resolvePipelineRef,
-  MAX_COMPOSITION_DEPTH,
+  unresolvedRefDetail,
   type CompositionEdge,
   type PipelineStepSpec,
 } from './compose';
@@ -1357,7 +1357,8 @@ function computePlanFromMarkdown(pipelineRoot: string, options: ComputePlanOptio
         );
 
       // The `pipeline:` reference is REQUIRED; it must resolve to a pipeline
-      // root (a dir holding PIPELINE.md) — see compose.ts for the candidate
+      // root (a dir holding a `pipeline.yml` or a PIPELINE.md — a v1 pipeline
+      // may compose a schema-2 child) — see compose.ts for the candidate
       // bases (own root / parent dir / enclosing .pipeline).
       const ref =
         typeof fields.pipeline === 'string' && fields.pipeline.trim()
@@ -1372,7 +1373,7 @@ function computePlanFromMarkdown(pipelineRoot: string, options: ComputePlanOptio
         const resolved = resolvePipelineRef(ref, pipelineRoot);
         if (resolved.root === null)
           errors.push(
-            `steps/${rel}: pipeline reference '${ref}' does not resolve — no PIPELINE.md at any of: ${resolved.tried.join(', ')}`,
+            `steps/${rel}: pipeline reference '${ref}' does not resolve — ${unresolvedRefDetail(resolved.tried)}`,
           );
         else resolvedRoot = resolved.root;
       }
@@ -1758,20 +1759,13 @@ function computePlanFromMarkdown(pipelineRoot: string, options: ComputePlanOptio
       ? [{ rel: s.rel, root: s.pipeline_spec.resolved_root }]
       : [],
   );
-  if (compositionEdges.length) {
-    let maxDepth: number | undefined = options.maxCompositionDepth;
-    if (maxDepth !== undefined && (!Number.isInteger(maxDepth) || maxDepth < 1)) {
-      warnings.push(
-        `maxCompositionDepth ${String(maxDepth)} is invalid (positive integer required) — using the default ${MAX_COMPOSITION_DEPTH}`,
-      );
-      maxDepth = undefined;
-    }
-    errors.push(
-      ...lintComposition(pipelineRoot, compositionEdges, {
-        ...(maxDepth === undefined ? {} : { maxDepth }),
-      }),
-    );
-  }
+  lintCompositionForPlan(
+    pipelineRoot,
+    compositionEdges,
+    { maxCompositionDepth: options.maxCompositionDepth },
+    errors,
+    warnings,
+  );
 
   return {
     mode,
