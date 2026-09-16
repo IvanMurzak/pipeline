@@ -1,0 +1,122 @@
+# What does NOT go into the @baizor/pipeline tarball.
+#
+# Before this file existed npm fell back to .gitignore (three lines:
+# node_modules/, dist/, *.log) and the published package carried 309 files /
+# 5.9 MB unpacked — of which 150 were `*.test.ts` and 2 were CI workflow YAML.
+# Every consumer of `bun add -g @baizor/pipeline` was downloading this repo's
+# entire test suite.
+#
+# ── WHY A DENYLIST AND NOT A `files` ALLOWLIST ─────────────────────────────
+#
+# `bin` is `{"pipeline": "src/cli.ts"}` — RAW TYPESCRIPT. There is no build,
+# no bundle, no dist/ in the published artifact (release.yml says so out loud:
+# "No build step: this package's bin ships straight from src"). Bun resolves
+# the import graph AT RUNTIME, from whatever files the install put on disk.
+#
+# That inverts the usual packaging risk. With a bundle, a missing source file
+# is caught at build time. Here, a module that fails to ship is invisible
+# until a user runs the command that imports it — the package installs
+# cleanly and crashes on first use. A `files` allowlist is the shape that
+# makes that mistake easy: add one module under a directory nobody listed and
+# it silently stops shipping. A denylist fails the other way — the worst case
+# is shipping a few bytes too many. That asymmetry is the whole argument, so
+# do NOT "tighten" this into a package.json `files` field.
+# (tests/packed-artifact.test.ts already asserts the templates against this
+# reasoning: "The package declares no `files` allowlist, so they ship by
+# default".)
+#
+# ── ⚠ THIS FILE SHADOWS .gitignore ────────────────────────────────────────
+#
+# The moment .npmignore exists npm STOPS consulting .gitignore entirely. The
+# three .gitignore entries are therefore repeated verbatim below — delete them
+# here and build output starts shipping again.
+#
+# ── THREE ENTRY POINTS, NOT ONE ────────────────────────────────────────────
+#
+#   bin      → src/cli.ts
+#   exports  → "."      → src/index.ts
+#              "./plan" → src/lib/plan.ts
+#
+# An import-graph walk from all three (following `from`, `import()`,
+# `require()`, bare side-effect imports and type-only imports) reaches 107 of
+# the 109 files under src/. The other two — src/lib/hook-runner.ts and
+# src/lib/provider-key.ts — are NOT dead:
+#
+#   * hook-runner.ts is spawned BY PATH, never imported:
+#       src/lib/hooks.ts:  join(dirname(fileURLToPath(import.meta.url)),
+#                               'hook-runner.ts')
+#     No import-graph tool can see that edge. It is the exact hazard that
+#     nearly broke the sibling pipeline-runner package's tarball.
+#   * provider-key.ts is the single owning module for the provider API key,
+#     deliberately kept at arm's length from the rest of src/
+#     (tests/output-scrubber.test.ts asserts no sibling imports it).
+#
+# Which is why NOTHING under src/ is excluded here, by name or by glob — not
+# even a would-be `src/**/*.test.ts` rule (there are no colocated tests today;
+# a rule for them would be a trap waiting for a file that path-resolution
+# depends on to be named unluckily).
+#
+# ── templates/ MUST SHIP ───────────────────────────────────────────────────
+#
+# src/lib/templates.ts resolves them against ITS OWN location, never the cwd:
+#
+#     export const TEMPLATES_DIR = join(import.meta.dir, '..', '..', 'templates')
+#
+# so `pipeline init` / `pipeline clone` read them out of the installed
+# package. A tarball without templates/ works perfectly from a checkout and
+# fails on every fresh install — which is why release.yml's "Pack and inspect
+# the real tarball" step fails the release when templates/ is missing or
+# empty, and why packed-artifact.test.ts asserts example-minimal AND
+# support-answer (PIPELINE.md, steps/, scripts/, sample-docs/) are present.
+#
+# ⚠ EVERY RULE BELOW IS ROOT-ANCHORED WITH A LEADING SLASH. These patterns use
+# .gitignore matching semantics, where an unanchored `tests/` or `scripts/`
+# matches at ANY depth — and templates/support-answer ships BOTH a scripts/
+# directory and a scripts/tests/bm25_retrieve.test.ts inside it, which the
+# turnkey `clone support-answer` run needs. An unanchored rule would quietly
+# gut the template while every root-level check stayed green.
+
+# ── Carried over from .gitignore (see the shadowing note above) ────────────
+node_modules/
+dist/
+*.log
+
+# ── CI/release automation: consumed by GitHub, never by a consumer ─────────
+/.github/
+
+# ── The test suite ─────────────────────────────────────────────────────────
+# 161 files, ~4.5 MB unpacked, the bulk of the old tarball. Nothing under
+# src/ imports anything under tests/ (verified by the graph walk) and no
+# shipped file references one by path. They run from a checkout, in CI.
+/tests/
+
+# ── The repo's own parallel test runner ────────────────────────────────────
+# scripts/parallel-tests.ts exists solely for `bun run test`, which drives
+# /tests/ — gone from the tarball with it. (Root-anchored: templates/*/scripts
+# is user-facing template content and stays.)
+/scripts/
+
+# ── The dev lockfile ───────────────────────────────────────────────────────
+# bun.lock pins THIS repo's dev install. A consumer resolves dependencies
+# through their own lockfile and never reads this one; publishing it only
+# invites confusion about which tree it describes.
+/bun.lock
+
+# ── DELIBERATELY KEPT (do not add rules for these) ─────────────────────────
+#
+# tsconfig.json — 352 bytes, and load-bearing in a raw-TS package for a
+#   reason that is easy to get backwards. It declares no `paths` and no
+#   `baseUrl`, so it is not needed to RESOLVE our imports; it is here so Bun,
+#   which reads the nearest tsconfig when it executes TypeScript, anchors on
+#   OURS instead of walking up into the host project's config when the
+#   package sits in their node_modules.
+#
+# docs/ — 7 files, 224 KB. Kept because shipped content points INTO it:
+#   README.md (which ships) has four relative links to docs/cli.md, and
+#   shipped source comments cite docs/provider-key.md (src/lib/provider-key.ts),
+#   docs/bare-baseline.md and docs/sdk-delta-measurement.md. Nothing prints a
+#   docs/ path to a user's terminal at runtime — checked — but a dead pointer
+#   in an installed package is still worse than the bytes, and these are
+#   markdown next to the megabytes of tests this file removes.
+#
+# README.md, LICENSE, package.json — npm ships these regardless.
