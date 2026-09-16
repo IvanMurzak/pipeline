@@ -41,6 +41,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { CloudError } from './cloud-config';
+import { discardBody, type ResponseBodyHandle } from './http-body';
 
 // ---------------------------------------------------------------------------
 // Injectable seams
@@ -118,6 +119,11 @@ export const realShell: ShellRunner = (cmd, args, envOverride, opts) => {
 export interface HttpResponse {
   status: number;
   json(): Promise<unknown>;
+  /** The undrained response body, present whenever this seam is backed by a
+   *  real `Response` (it is in production — `cloud.ts`'s `realFetch` supplies
+   *  this `fetch`). Optional so the tests' `{ status, json }` doubles still
+   *  satisfy the type. See `lib/http-body.ts`. */
+  body?: ResponseBodyHandle;
 }
 export interface HttpInit {
   method: string;
@@ -387,6 +393,9 @@ async function mintRunner(
   }
 
   if (res.status === 403) {
+    // The only non-201 exit that reads nothing — the generic branch below
+    // parses the error body and so drains it. See `lib/http-body.ts`.
+    await discardBody(res);
     throw new CloudError(
       'connecting a runner needs the admin role in this org — ask an org admin to run ' +
         '`pipeline cloud connect --runner`, or mint one yourself at the dashboard (Runners → New ' +
@@ -399,7 +408,10 @@ async function mintRunner(
       const body = (await res.json()) as { error?: unknown };
       detail = typeof body.error === 'string' ? body.error : undefined;
     } catch {
-      // tolerate a non-JSON error body
+      // Tolerate a non-JSON error body. A `json()` that rejects has usually
+      // already drained the stream, but it can also fail PART-WAY through one
+      // — so release whatever is left rather than assume.
+      await discardBody(res);
     }
     throw new CloudError(`could not connect a runner (HTTP ${res.status}${detail ? `: ${detail}` : ''})`);
   }

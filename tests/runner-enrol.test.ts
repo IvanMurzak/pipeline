@@ -22,8 +22,11 @@ import {
   type HttpInit,
 } from '../src/lib/runner-enrol';
 
-function reply(status: number, body: unknown): HttpResponse {
-  return { status, json: async () => body };
+/** `onCancel` gives the double the `body` handle a real `Response` carries and
+ *  fires when it is cancelled — see `src/lib/http-body.ts` and the
+ *  "response-body release" tests in the `enrolRunner` block below. */
+function reply(status: number, body: unknown, onCancel?: () => void): HttpResponse {
+  return { status, json: async () => body, body: onCancel ? { cancel: async () => onCancel() } : null };
 }
 
 // ---------------------------------------------------------------------------
@@ -265,11 +268,20 @@ describe('enrolRunner', () => {
   const CLIENT_SECRET = 'aipc_SUPER_SECRET_0123456789';
 
   function mintFetch(
-    opts: { status?: number; body?: unknown; capture?: Array<{ url: string; init: HttpInit }> } = {},
+    opts: {
+      status?: number;
+      body?: unknown;
+      capture?: Array<{ url: string; init: HttpInit }>;
+      /** When present, replies carry a body handle and each cancelled one's
+       *  URL lands here. */
+      cancelled?: string[];
+    } = {},
   ) {
     return async (url: string, init: HttpInit): Promise<HttpResponse> => {
       opts.capture?.push({ url, init });
-      if (opts.status && opts.status !== 201) return reply(opts.status, opts.body ?? { error: 'nope' });
+      const recorder = opts.cancelled;
+      const onCancel = recorder ? () => void recorder.push(url) : undefined;
+      if (opts.status && opts.status !== 201) return reply(opts.status, opts.body ?? { error: 'nope' }, onCancel);
       return reply(
         201,
         opts.body ?? {
@@ -420,6 +432,32 @@ describe('enrolRunner', () => {
     expect(outcome.status).toBe('mint-failed');
     expect(outcome.detail).toContain('admin');
     expect(calls.some((c) => c.args[0] === 'register')).toBe(false);
+  });
+
+  // `mintRunner`'s 403 arm throws before reading anything, where the generic
+  // non-201 arm parses `{error}` out of the body and so drains it. Same bug
+  // class as the `department notify` handle leak — see `src/lib/http-body.ts`.
+  test('mint 403: the response body is cancelled, not abandoned', async () => {
+    const { shell } = collectingShell();
+    const cancelled: string[] = [];
+    const deps: RunnerEnrolDeps = { shell, fetch: mintFetch({ status: 403, cancelled }), out: () => {}, err: () => {} };
+    const outcome = await enrolRunner(deps, { server: SERVER, accessToken: TOKEN, name: NAME });
+    expect(outcome.status).toBe('mint-failed');
+    expect(cancelled).toEqual([`${SERVER}/api/v1/runners`]);
+  });
+
+  test('mint 500: the error body is READ (for the detail), so nothing is cancelled', async () => {
+    const { shell } = collectingShell();
+    const cancelled: string[] = [];
+    const deps: RunnerEnrolDeps = {
+      shell,
+      fetch: mintFetch({ status: 500, body: { error: 'boom' }, cancelled }),
+      out: () => {},
+      err: () => {},
+    };
+    const outcome = await enrolRunner(deps, { server: SERVER, accessToken: TOKEN, name: NAME });
+    expect(outcome.detail).toContain('boom');
+    expect(cancelled).toEqual([]);
   });
 
   test('mint non-201/non-403: mint-failed, relays the HTTP status', async () => {

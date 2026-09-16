@@ -88,12 +88,22 @@ function recordingFs(): { fs: CloudFs; rec: Recorded } {
   return { fs, rec };
 }
 
-/** A single scripted HTTP reply. */
-function reply(status: number, body: unknown): HttpResponse {
+/**
+ * A single scripted HTTP reply.
+ *
+ * `onCancel` gives the double the `body` handle a real `Response` always
+ * carries (`realFetch` casts one straight through), and fires when that body
+ * is cancelled — the only way to observe from outside that an early
+ * `throw` released its socket instead of abandoning it. See
+ * `src/lib/http-body.ts` for the leak; the "response-body release" block at
+ * the end of this file for the assertions.
+ */
+function reply(status: number, body: unknown, onCancel?: () => void): HttpResponse {
   return {
     status,
     json: async () => body,
     text: async () => JSON.stringify(body),
+    body: onCancel ? { cancel: async () => onCancel() } : null,
   };
 }
 
@@ -122,6 +132,10 @@ function scriptedFetch(opts: {
   meStatus?: number;
   /** Status `POST /api/v1/orgs` answers with. Default 201 (created). */
   createOrgStatus?: number;
+  /** When present, every reply carries a body handle and the URL of each
+   *  CANCELLED body lands here. Absent by default so the vast majority of
+   *  tests keep the plain bodyless double they always had. */
+  cancelled?: string[];
   log: FetchLog[];
 }) {
   const pending = opts.pendingPolls ?? 0;
@@ -130,6 +144,8 @@ function scriptedFetch(opts: {
   let polls = 0;
   const fetchImpl = async (url: string, init: HttpInit): Promise<HttpResponse> => {
     opts.log.push({ url, init });
+    const recorder = opts.cancelled;
+    const onCancel = recorder ? () => void recorder.push(url) : undefined;
     if (url.endsWith('/oauth/device_authorization')) {
       return reply(200, {
         device_code: DEVICE_CODE,
@@ -164,7 +180,7 @@ function scriptedFetch(opts: {
       });
     }
     if (url.endsWith('/api/v1/me')) {
-      if (opts.meStatus && opts.meStatus !== 200) return reply(opts.meStatus, { error: 'nope' });
+      if (opts.meStatus && opts.meStatus !== 200) return reply(opts.meStatus, { error: 'nope' }, onCancel);
       return reply(200, {
         user: { id: 'u1', email: 'dev@example.com' },
         orgs,
@@ -177,7 +193,7 @@ function scriptedFetch(opts: {
     // control plane's shape broke it (apps/api modules/orgs/types.ts).
     if (url.endsWith('/api/v1/orgs')) {
       const status = opts.createOrgStatus ?? 201;
-      if (status !== 201) return reply(status, { error: 'nope' });
+      if (status !== 201) return reply(status, { error: 'nope' }, onCancel);
       return reply(201, {
         org: { orgId: 'org-new', slug: 'dev-s-workspace', name: "dev's workspace", role: 'owner' },
         selected: true,
@@ -2428,5 +2444,60 @@ describe('08 J1 budget — measured against the REAL browser-flow path', () => {
         `process_spawns=${processSpawns} config_edit_prompts=0 restarts=0 ` +
         `history_delivered=${ingestRequests.length}/5 exit_code=${code}`,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Response-body release
+//
+// Same bug class as the `department notify` daemon leak written up in
+// `src/lib/http-body.ts`: an early `throw` on a non-2xx status that never
+// reaches the `res.json()` below it leaves the response body an open stream,
+// and the socket handle behind it pinned until GC. These commands are
+// one-shot, so one leaked handle per run is survivable where the daemon's was
+// not — but it is the same omission, and the fix is the same call.
+//
+// The double only grows a `body` handle when a test opts in (`cancelled`),
+// which is why every other test in this file is untouched.
+// ---------------------------------------------------------------------------
+
+describe('response-body release', () => {
+  test('fetchMe: a 401 cancels the response body before throwing', async () => {
+    const log: FetchLog[] = [];
+    const cancelled: string[] = [];
+    const { deps, err } = makeDeps(scriptedFetch({ meStatus: 401, cancelled, log }), recordingFs());
+    // Unchanged behaviour: still exit 1, still says how to recover.
+    expect(await runCloud(['connect'], deps)).toBe(1);
+    expect(err()).toContain('--reauth');
+    // ...and the body it never read was released.
+    expect(cancelled.filter((u) => u.endsWith('/api/v1/me'))).toHaveLength(1);
+  });
+
+  test('fetchMe: a non-401 failure status cancels it too', async () => {
+    const log: FetchLog[] = [];
+    const cancelled: string[] = [];
+    const { deps } = makeDeps(scriptedFetch({ meStatus: 503, cancelled, log }), recordingFs());
+    expect(await runCloud(['connect'], deps)).toBe(1);
+    expect(cancelled.filter((u) => u.endsWith('/api/v1/me'))).toHaveLength(1);
+  });
+
+  test('createFirstOrg: the 403 arm cancels the body (it returns BEFORE the errorCode() that drains every other status)', async () => {
+    const log: FetchLog[] = [];
+    const cancelled: string[] = [];
+    const { deps, err } = makeDeps(scriptedFetch({ orgs: [], createOrgStatus: 403, cancelled, log }), recordingFs());
+    expect(await runCloud(['connect'], deps)).toBe(1);
+    expect(err()).toContain('--org');
+    expect(cancelled.filter((u) => u.endsWith('/api/v1/orgs'))).toHaveLength(1);
+  });
+
+  test('createFirstOrg: a non-403 failure still reads the error body rather than cancelling it', async () => {
+    // The contrast case — the generic branch parses `{error}` out of the body
+    // to name the failure, so there is nothing left to cancel and the fix must
+    // not have inserted one there (it would make that read fail).
+    const log: FetchLog[] = [];
+    const cancelled: string[] = [];
+    const { deps } = makeDeps(scriptedFetch({ orgs: [], createOrgStatus: 500, cancelled, log }), recordingFs());
+    expect(await runCloud(['connect'], deps)).toBe(1);
+    expect(cancelled.filter((u) => u.endsWith('/api/v1/orgs'))).toHaveLength(0);
   });
 });

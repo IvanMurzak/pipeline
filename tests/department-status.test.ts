@@ -87,8 +87,12 @@ function departmentProject(): string {
   return dir;
 }
 
-function reply(status: number, body: unknown): ServeHttpResponse {
-  return { status, json: async () => body };
+/** `onCancel` gives the double the `body` handle a real `Response` carries
+ *  (`realStatusDeps` casts one straight through) and fires when it is
+ *  cancelled — see `src/lib/http-body.ts` and the "response-body release"
+ *  block at the end of this file. */
+function reply(status: number, body: unknown, onCancel?: () => void): ServeHttpResponse {
+  return { status, json: async () => body, body: onCancel ? { cancel: async () => onCancel() } : null };
 }
 
 // ---------------------------------------------------------------------------
@@ -1627,5 +1631,87 @@ describe('status — --follow', () => {
     expect(w.sleeps()).toBe(2);
     // The online line was printed 3 times.
     expect(w.out().split('online · 1 running').length - 1).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Response-body release
+//
+// `fetchMeOrgs`'s 401/403 arm answered `{ kind: 'unauthorized' }` with the
+// response body untouched, leaving the socket's handle pinned until GC — the
+// same omission as the `department notify` daemon leak written up in
+// `src/lib/http-body.ts`.
+//
+// It matters more here than the word "error path" suggests. As `MeOutcome`'s
+// own doc says, a 401 from `/api/v1/me` is the endpoint's CORRECT answer for a
+// machine credential, so this exit is what an ordinary `pipeline department
+// status` takes on a bot host EVERY time it runs — including under `--follow`,
+// which gathers on a loop.
+// ---------------------------------------------------------------------------
+
+describe('status — response-body release', () => {
+  test('fetchMeOrgs: a 401 cancels the response body', async () => {
+    const dir = departmentProject();
+    const cancelled: string[] = [];
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      fetchOverride: (url, init) => {
+        if (url.endsWith('/api/v1/me')) return reply(401, { error: 'unauthorized' }, () => void cancelled.push(url));
+        throw new Error(`nothing else must be attempted once identity is refused: ${init.method} ${url}`);
+      },
+    });
+    // Unchanged behaviour: still exit 0 (a diagnostic never fails on the cloud
+    // half), still explains the 401 rather than saying "offline".
+    expect(await runDepartmentStatus(['--server', SERVER], w.deps)).toBe(0);
+    expect(w.out()).toContain('HTTP 401');
+    expect(cancelled).toEqual([`${SERVER}/api/v1/me`]);
+  });
+
+  test('fetchMeOrgs: a 5xx (the `unavailable` arm) cancels it too', async () => {
+    const dir = departmentProject();
+    const cancelled: string[] = [];
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      fetchOverride: (url, init) => {
+        if (url.endsWith('/api/v1/me')) return reply(503, { error: 'unavailable' }, () => void cancelled.push(url));
+        throw new Error(`unexpected fetch: ${init.method} ${url}`);
+      },
+    });
+    expect(await runDepartmentStatus(['--server', SERVER], w.deps)).toBe(0);
+    expect(cancelled).toEqual([`${SERVER}/api/v1/me`]);
+  });
+
+  test('a 200 identity body is read, never cancelled', async () => {
+    const dir = departmentProject();
+    const cancelled: string[] = [];
+    const w = makeStatusWorld({
+      cwd: dir,
+      signedIn: true,
+      bindingsDeptId: DEPT_ID,
+      fetchOverride: (url, init) => {
+        if (url.endsWith('/api/v1/me')) {
+          return reply(
+            200,
+            { user: { id: USER_ID }, orgs: [{ id: ORG_ID, slug: ORG, name: 'Acme', role: 'member' }] },
+            () => void cancelled.push(url),
+          );
+        }
+        if (url.endsWith(`/api/v1/departments/${DEPT_ID}`) && init.method === 'GET') {
+          return reply(200, { department: { id: DEPT_ID, slug: 'unity-review', enabled: true, retired: false, online: true, manifestDigest: DIGEST } });
+        }
+        if (url.endsWith(`/api/v1/departments/${DEPT_ID}/installs`)) return reply(200, { installs: [] });
+        if (url.endsWith('/api/v1/dept-usage')) {
+          return reply(200, { departments: { limit: null, used: 1, remaining: null }, daily_actions: { limit: null, used: 0, remaining: null, reset_at: null } });
+        }
+        if (url.includes('/api/v1/dept-tasks')) return reply(200, { tasks: [] });
+        throw new Error(`unexpected fetch: ${init.method} ${url}`);
+      },
+    });
+    expect(await runDepartmentStatus(['--server', SERVER], w.deps)).toBe(0);
+    expect(cancelled).toEqual([]);
   });
 });
