@@ -41,8 +41,21 @@ function mkHome(): string {
   return d;
 }
 
-function reply(status: number, body: unknown): HttpResponse {
-  return { status, json: async () => body };
+/**
+ * One scripted reply.
+ *
+ * `onCancel` gives the double the `body` handle a REAL `Response` always has
+ * (`realDepartmentNotifyFetch` casts one straight through), so a test can
+ * observe that an early exit released it. Without it the double is what it
+ * always was — `{ status, json }` plus an explicitly null body, which is also
+ * what a real 204 looks like and which `discardBody` no-ops on.
+ */
+function reply(status: number, body: unknown, onCancel?: () => void): HttpResponse {
+  return {
+    status,
+    json: async () => body,
+    body: onCancel ? { cancel: async () => onCancel() } : null,
+  };
 }
 
 interface Call {
@@ -57,16 +70,24 @@ const TOKEN = 'pat_server1_secret';
 function scriptedFetch(opts: {
   me: { status: number; body?: unknown };
   tasksByOrg: Record<string, unknown[]>;
+  /** Status for `/api/v1/dept-tasks` (default 200). */
+  tasksStatus?: number;
   calls?: Call[];
+  /** When present, every reply carries a body handle and its URL is appended
+   *  here the moment that body is cancelled — the observable the handle-leak
+   *  regressions at the bottom of this file assert on. */
+  cancelled?: string[];
 }): FetchLike {
   return async (url: string, init: HttpInit): Promise<HttpResponse> => {
     opts.calls?.push({ url, headers: init.headers });
+    const recorder = opts.cancelled;
+    const onCancel = recorder ? () => void recorder.push(url) : undefined;
     if (url.endsWith('/api/v1/me')) {
-      return reply(opts.me.status, opts.me.body ?? { user: { id: 'u1' }, orgs: [] });
+      return reply(opts.me.status, opts.me.body ?? { user: { id: 'u1' }, orgs: [] }, onCancel);
     }
     if (url.endsWith('/api/v1/dept-tasks')) {
       const orgId = init.headers['x-org-id'];
-      return reply(200, { tasks: opts.tasksByOrg[orgId ?? ''] ?? [] });
+      return reply(opts.tasksStatus ?? 200, { tasks: opts.tasksByOrg[orgId ?? ''] ?? [] }, onCancel);
     }
     throw new Error(`unexpected fetch to ${url}`);
   };
@@ -503,6 +524,105 @@ describe('pollLoop', () => {
       maxIterations: 1,
     });
     expect(errors.some((e) => e.includes('toast backend unavailable'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Response-body release (the reported handle leak)
+//
+// THE BUG THESE PIN. `fetchMe` used to answer a non-200 with a bare
+// `return null`, leaving the response body an open stream — which under Bun
+// and Node holds the socket's handle until GC gets round to it. This daemon
+// polls once a MINUTE forever, and a credential the control plane has stopped
+// accepting makes that exit the one taken every single cycle: a user's daemon
+// was found after ~5,350 cycles holding ~5,536 handles, roughly 1:1 with
+// cycles because `pollOnce` gives up at identity and never reaches
+// `/dept-tasks`.
+//
+// The leak is invisible from outside the function — it returns the same
+// `null`, `pollOnce` reports the same error — so these tests give the double
+// the `body` handle a real `Response` has and assert it was cancelled. See
+// `src/lib/http-body.ts`.
+// ---------------------------------------------------------------------------
+
+describe('response-body release', () => {
+  test('a non-200 from /api/v1/me cancels the response body', async () => {
+    const home = mkHome();
+    seedCredential(home, SERVER, TOKEN);
+    const cancelled: string[] = [];
+    const fetchImpl = scriptedFetch({
+      me: { status: 401, body: { error: 'invalid_token' } },
+      tasksByOrg: {},
+      cancelled,
+    });
+    const result = await pollOnce(makeDeps(fetchImpl, home));
+    // Same outcome as before the fix — the identity failure is still reported.
+    expect(result.serversPolled).toBe(0);
+    expect(result.errors).toHaveLength(1);
+    // ...and the abandoned body was released.
+    expect(cancelled).toEqual([`${SERVER}/api/v1/me`]);
+  });
+
+  test('a 500 from /api/v1/me cancels the response body too (not just 401)', async () => {
+    const home = mkHome();
+    seedCredential(home, SERVER, TOKEN);
+    const cancelled: string[] = [];
+    const fetchImpl = scriptedFetch({ me: { status: 500 }, tasksByOrg: {}, cancelled });
+    await pollOnce(makeDeps(fetchImpl, home));
+    expect(cancelled).toEqual([`${SERVER}/api/v1/me`]);
+  });
+
+  test('a non-200 from /api/v1/dept-tasks cancels the response body', async () => {
+    const home = mkHome();
+    seedCredential(home, SERVER, TOKEN);
+    const cancelled: string[] = [];
+    const orgs = [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'member' }];
+    const fetchImpl = scriptedFetch({
+      me: { status: 200, body: { user: { id: 'u1' }, orgs } },
+      tasksByOrg: { 'org-1': [task()] },
+      tasksStatus: 503,
+      cancelled,
+    });
+    const result = await pollOnce(makeDeps(fetchImpl, home));
+    expect(result.notifications).toEqual([]);
+    // The /me body is READ (200), so only the abandoned dept-tasks one is
+    // cancelled — which is exactly why the field ratio was ~1 handle per
+    // cycle and not 2.
+    expect(cancelled).toEqual([`${SERVER}/api/v1/dept-tasks`]);
+  });
+
+  test('a body that is read (200) is never cancelled', async () => {
+    const home = mkHome();
+    seedCredential(home, SERVER, TOKEN);
+    const cancelled: string[] = [];
+    const orgs = [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'member' }];
+    const fetchImpl = scriptedFetch({
+      me: { status: 200, body: { user: { id: 'u1' }, orgs } },
+      tasksByOrg: { 'org-1': [task()] },
+      cancelled,
+    });
+    const result = await pollOnce(makeDeps(fetchImpl, home));
+    expect(result.notifications).toHaveLength(1);
+    expect(cancelled).toEqual([]);
+  });
+
+  test('the daemon loop releases one body PER CYCLE — the shape of the field report', async () => {
+    const home = mkHome();
+    seedCredential(home, SERVER, TOKEN);
+    const cancelled: string[] = [];
+    const fetchImpl = scriptedFetch({
+      me: { status: 401, body: { error: 'invalid_token' } },
+      tasksByOrg: {},
+      cancelled,
+    });
+    await pollLoop(makeDeps(fetchImpl, home), {
+      intervalMs: 60_000,
+      sleep: async () => {},
+      maxIterations: 5,
+    });
+    // Five cycles, five bodies released. Before the fix this was five
+    // permanently-held handles.
+    expect(cancelled).toHaveLength(5);
   });
 });
 

@@ -139,6 +139,7 @@ import {
   type ServeHttpResponse,
   type ServeState,
 } from '../lib/department-serve';
+import { discardBody } from '../lib/http-body';
 // a10: the silent (never-interactive) credential read `status` uses — the
 // SAME store `cloud connect`/`serve` write, read WITHOUT the interactive
 // ladder so a routine, possibly-scripted `status` call never pops a browser
@@ -2410,16 +2411,30 @@ type MeOutcome = { kind: 'ok'; orgs: MeOrgLite[] } | { kind: 'unauthorized' } | 
  *  same call this file already makes twice elsewhere, `department-notify.ts`'s
  *  `fetchMe` and `cloud.ts`'s own). */
 async function fetchMeOrgs(deps: Pick<StatusCommandDeps, 'fetch'>, server: string, accessToken: string): Promise<MeOutcome> {
+  let res: ServeHttpResponse | undefined;
   try {
-    const res = await deps.fetch(`${server}/api/v1/me`, {
+    res = await deps.fetch(`${server}/api/v1/me`, {
       method: 'GET',
       headers: { accept: 'application/json', authorization: `Bearer ${accessToken}` },
     });
-    if (res.status === 401 || res.status === 403) return { kind: 'unauthorized' };
-    if (res.status !== 200) return { kind: 'unavailable' };
+    // Neither refusal reads the body, so both have to release it
+    // (`lib/http-body.ts`). The 401 arm especially: as the doc above says, it
+    // is the endpoint's CORRECT answer for a machine credential — so this is
+    // not the rare error path it looks like, it is what an ordinary
+    // `pipeline department status` on a machine-credential host does every
+    // single time it runs.
+    if (res.status === 401 || res.status === 403) {
+      await discardBody(res);
+      return { kind: 'unauthorized' };
+    }
+    if (res.status !== 200) {
+      await discardBody(res);
+      return { kind: 'unavailable' };
+    }
     const body = (await res.json()) as { orgs?: unknown };
     return { kind: 'ok', orgs: parseMeOrgs(body.orgs) };
   } catch {
+    await discardBody(res);
     return { kind: 'unavailable' };
   }
 }

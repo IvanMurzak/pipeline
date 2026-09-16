@@ -70,6 +70,7 @@ import {
   type StoredCredential,
 } from './cloud-config';
 import { ensureFreshCredential, type RefreshDeps } from './credential-refresh';
+import { discardBody, type ResponseBodyHandle } from './http-body';
 
 // ---------------------------------------------------------------------------
 // HTTP seam (deliberately local — lib/ must not depend on commands/; see
@@ -79,6 +80,13 @@ import { ensureFreshCredential, type RefreshDeps } from './credential-refresh';
 export interface HttpResponse {
   status: number;
   json(): Promise<unknown>;
+  /** The undrained response body, when the seam is backed by a real
+   *  `Response` (it always is in production — see `realDepartmentNotifyFetch`
+   *  below, which casts one straight through). Optional so the plain
+   *  `{ status, json }` doubles the tests inject still satisfy the type, and
+   *  so `discardBody` short-circuits on them. The daemon leak this exists for
+   *  is written up in `lib/http-body.ts`. */
+  body?: ResponseBodyHandle;
 }
 
 export interface HttpInit {
@@ -289,17 +297,30 @@ interface MeResponse {
   orgs: MeOrg[];
 }
 
+/**
+ * ⚠ EVERY exit from here releases the response body — this is the function the
+ * handle leak in `lib/http-body.ts`'s header was actually found in. It runs
+ * once per server per poll cycle, forever, and a credential the control plane
+ * has stopped accepting makes it take the `status !== 200` exit EVERY cycle;
+ * the `res` is deliberately hoisted out of the `try` so the `catch` (a body
+ * that errors part-way through `json()`) can release it too.
+ */
 async function fetchMe(deps: DepartmentNotifyDeps, server: string, token: string): Promise<MeResponse | null> {
+  let res: HttpResponse | undefined;
   try {
-    const res = await deps.fetch(`${server}/api/v1/me`, {
+    res = await deps.fetch(`${server}/api/v1/me`, {
       method: 'GET',
       headers: { accept: 'application/json', authorization: `Bearer ${token}` },
     });
-    if (res.status !== 200) return null;
+    if (res.status !== 200) {
+      await discardBody(res);
+      return null;
+    }
     const body = (await res.json()) as MeResponse;
     if (!body || !Array.isArray(body.orgs)) return null;
     return body;
   } catch {
+    await discardBody(res);
     return null;
   }
 }
@@ -310,16 +331,22 @@ async function fetchOpenTasks(
   token: string,
   orgId: string,
 ): Promise<DepartmentTaskSummary[]> {
+  let res: HttpResponse | undefined;
   try {
-    const res = await deps.fetch(`${server}/api/v1/dept-tasks`, {
+    res = await deps.fetch(`${server}/api/v1/dept-tasks`, {
       method: 'GET',
       headers: { accept: 'application/json', authorization: `Bearer ${token}`, 'x-org-id': orgId },
     });
-    if (res.status !== 200) return [];
+    if (res.status !== 200) {
+      // Same leak as `fetchMe` above, one org later in the same poll cycle.
+      await discardBody(res);
+      return [];
+    }
     const body = (await res.json()) as { tasks?: unknown };
     if (!Array.isArray(body.tasks)) return [];
     return body.tasks as DepartmentTaskSummary[];
   } catch {
+    await discardBody(res);
     return [];
   }
 }

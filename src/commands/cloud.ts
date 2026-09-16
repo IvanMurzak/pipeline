@@ -203,6 +203,7 @@ import {
   type UploadTarget,
 } from '../lib/telemetry-upload';
 import { recordLastFlush } from '../lib/telemetry-status';
+import { discardBody, type ResponseBodyHandle } from '../lib/http-body';
 
 // ---------------------------------------------------------------------------
 // HTTP seam
@@ -212,6 +213,13 @@ export interface HttpResponse {
   status: number;
   json(): Promise<unknown>;
   text(): Promise<string>;
+  /** The undrained response body, present whenever this seam is backed by a
+   *  real `Response` (always, in production — `realFetch` below casts one
+   *  straight through). Optional so the tests' plain `{ status, json, text }`
+   *  doubles still satisfy the type. Anything that exits without reading the
+   *  body must hand it to `discardBody`; see `lib/http-body.ts` for the handle
+   *  leak that motivated it. */
+  body?: ResponseBodyHandle;
 }
 
 export interface HttpInit {
@@ -858,7 +866,10 @@ async function exchangeAuthorizationCode(
  * call site is unchanged.
  */
 export interface MachineExchangeDeps {
-  fetch: (url: string, init: HttpInit) => Promise<{ status: number; json(): Promise<unknown> }>;
+  fetch: (
+    url: string,
+    init: HttpInit,
+  ) => Promise<{ status: number; json(): Promise<unknown>; body?: ResponseBodyHandle }>;
 }
 
 /** What a machine-credential exchange returns: an access token and nothing
@@ -1085,10 +1096,16 @@ async function fetchMe(deps: CloudDeps, server: string, token: string): Promise<
     method: 'GET',
     headers: { accept: 'application/json', authorization: `Bearer ${token}` },
   });
+  // Both refusals leave without reading the body, so both must release it
+  // (`lib/http-body.ts`). One-shot commands rather than a daemon, so the cost
+  // is one handle per run and not a slow death — but the bug class is the same
+  // one, and a leak that only bites the long-lived caller is still a leak.
   if (res.status === 401) {
+    await discardBody(res);
     throw new CloudError('the credential is no longer valid — re-run with --reauth to sign in again');
   }
   if (res.status !== 200) {
+    await discardBody(res);
     throw new CloudError(`identity lookup failed (HTTP ${res.status})`);
   }
   const body = (await res.json()) as MeResponse;
@@ -1166,6 +1183,10 @@ async function createFirstOrg(
     // its org from `--org` and never calls `/api/v1/me`), so if it does, say
     // what to do rather than relaying an opaque status.
     if (res.status === 403) {
+      // The named-403 arm returns BEFORE the `errorCode(res)` below, which is
+      // what drains the body on every other non-201 status — so this one exit
+      // has to release it itself (`lib/http-body.ts`).
+      await discardBody(res);
       throw new CloudError(
         'this credential may not create an organization — create one in the dashboard, then re-run with --org <slug>',
       );
@@ -2036,6 +2057,10 @@ async function parseOptOutResponse(res: HttpResponse, verb: 'read' | 'set'): Pro
     return { optedOut: body.optedOut, optedOutAt: typeof body.optedOutAt === 'string' ? body.optedOutAt : null };
   }
   if (res.status === 401) {
+    // The one arm here that reads nothing: 200 calls `json()`, and both the
+    // 403 and the default arm call `errorCode(res)`. Release it explicitly
+    // (`lib/http-body.ts`).
+    await discardBody(res);
     throw new CloudError('the credential was rejected by the server — run `pipeline cloud connect --reauth`');
   }
   if (res.status === 403) {

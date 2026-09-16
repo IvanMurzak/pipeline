@@ -61,6 +61,7 @@ import {
   SUPPORTED_ENGINES,
 } from './department-manifest';
 import type { RunnerServiceState, ShellRunner } from './runner-enrol';
+import type { ResponseBodyHandle } from './http-body';
 
 // ---------------------------------------------------------------------------
 // Seams
@@ -72,6 +73,13 @@ import type { RunnerServiceState, ShellRunner } from './runner-enrol';
 export interface ServeHttpResponse {
   status: number;
   json(): Promise<unknown>;
+  /** The undrained response body, present whenever this seam is backed by a
+   *  real `Response` (it is in production — see `realStatusDeps` and the serve
+   *  deps in `commands/department.ts`, which cast one straight through).
+   *  Optional so the tests' `{ status, json }` doubles still satisfy the type.
+   *  Any exit that does not read the body must call `discardBody`; see
+   *  `lib/http-body.ts`. */
+  body?: ResponseBodyHandle;
 }
 
 export interface ServeHttpInit {

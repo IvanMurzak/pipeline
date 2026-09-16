@@ -43,8 +43,16 @@ afterEach(() => {
 // shapes exactly, trimmed to what this file needs.
 // ---------------------------------------------------------------------------
 
-function reply(status: number, body: unknown): HttpResponse {
-  return { status, json: async () => body, text: async () => JSON.stringify(body) };
+/** `onCancel` gives the double the `body` handle a real `Response` carries, so
+ *  a test can see that an exit which reads nothing still released it — see
+ *  `src/lib/http-body.ts` and the "response-body release" block below. */
+function reply(status: number, body: unknown, onCancel?: () => void): HttpResponse {
+  return {
+    status,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+    body: onCancel ? { cancel: async () => onCancel() } : null,
+  };
 }
 
 interface FetchLog {
@@ -105,20 +113,29 @@ function humanScriptedFetch(opts: {
   optOutGetBody?: unknown;
   optOutPutStatus?: number;
   optOutPutBody?: unknown;
+  /** When present, every reply carries a body handle and the URL of each
+   *  CANCELLED body lands here. */
+  cancelled?: string[];
 }) {
   const orgs = opts.orgs ?? [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'owner' }];
   return async (url: string, init: HttpInit): Promise<HttpResponse> => {
     opts.log.push({ url, init });
+    const recorder = opts.cancelled;
+    const onCancel = recorder ? () => void recorder.push(`${init.method} ${url}`) : undefined;
     if (url.endsWith('/api/v1/me')) {
-      if (opts.meStatus && opts.meStatus !== 200) return reply(opts.meStatus, { error: 'nope' });
+      if (opts.meStatus && opts.meStatus !== 200) return reply(opts.meStatus, { error: 'nope' }, onCancel);
       return reply(200, { user: { id: 'u1', email: 'dev@example.com' }, orgs, selectedOrgId: opts.selectedOrgId ?? null });
     }
     if (url.endsWith('/api/v1/fleet-telemetry/optout')) {
       if (init.method === 'GET') {
-        return reply(opts.optOutGetStatus ?? 200, opts.optOutGetBody ?? { optedOut: false, optedOutAt: null });
+        return reply(opts.optOutGetStatus ?? 200, opts.optOutGetBody ?? { optedOut: false, optedOutAt: null }, onCancel);
       }
       if (init.method === 'PUT') {
-        return reply(opts.optOutPutStatus ?? 200, opts.optOutPutBody ?? { optedOut: true, optedOutAt: '2026-08-05T12:00:00.000Z' });
+        return reply(
+          opts.optOutPutStatus ?? 200,
+          opts.optOutPutBody ?? { optedOut: true, optedOutAt: '2026-08-05T12:00:00.000Z' },
+          onCancel,
+        );
       }
     }
     throw new Error(`unexpected fetch to ${url} (${init.method})`);
@@ -530,5 +547,50 @@ describe('runCloud — dispatches `optout` to runCloudOptout', () => {
     expect(await runCloud([], deps)).toBe(2);
     expect(err()).toContain('Usage: pipeline cloud connect');
     expect(err()).toContain('optout');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Response-body release
+//
+// `parseOptOutResponse` has four arms and only ONE of them read nothing: 200
+// calls `json()`, the 403 arm and the default arm both call `errorCode(res)`.
+// The 401 arm threw straight out, abandoning the body and its socket handle —
+// the same omission as the `department notify` daemon leak written up in
+// `src/lib/http-body.ts`.
+// ---------------------------------------------------------------------------
+
+describe('response-body release', () => {
+  test('parseOptOutResponse: the 401 arm cancels the body before throwing', async () => {
+    const home = mkHome();
+    seedCredential(home, { access_token: 'at1' });
+    const log: FetchLog[] = [];
+    const cancelled: string[] = [];
+    const fetchImpl = humanScriptedFetch({ log, optOutGetStatus: 401, optOutGetBody: { error: 'invalid_token' }, cancelled });
+    const { deps, err } = makeDeps(home, fetchImpl);
+
+    // Unchanged behaviour: exit 1, and the sentence that names the fix.
+    expect(await runCloudOptout([], deps)).toBe(1);
+    expect(err()).toContain('--reauth');
+    expect(cancelled).toEqual([`GET ${SERVER}/api/v1/fleet-telemetry/optout`]);
+  });
+
+  test('parseOptOutResponse: the 403 arm does NOT cancel — it reads the server\'s own reason out of the body', async () => {
+    const home = mkHome();
+    seedCredential(home, { access_token: 'at1' });
+    const log: FetchLog[] = [];
+    const cancelled: string[] = [];
+    const fetchImpl = humanScriptedFetch({
+      log,
+      orgs: [{ id: 'org-1', slug: 'acme', name: 'Acme', role: 'member' }],
+      optOutPutStatus: 403,
+      optOutPutBody: { error: 'this action requires the admin role (your role: member)' },
+      cancelled,
+    });
+    const { deps, err } = makeDeps(home, fetchImpl);
+
+    expect(await runCloudOptout(['--set', 'true'], deps)).toBe(1);
+    expect(err()).toContain('this action requires the admin role (your role: member)');
+    expect(cancelled).toEqual([]);
   });
 });
