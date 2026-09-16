@@ -209,14 +209,40 @@ jobs:
             --generate-notes \
             --target "$GITHUB_SHA"
 
+      # ⚠ THE BUDGET HERE MUST OUTLAST NPM'S OWN PROPAGATION DELAY.
+      #
+      # `npm publish` prints, on the line right before it reports success:
+      #
+      #     npm notice Your package is being processed and may take a few
+      #     minutes to become available.
+      #
+      # This step used to wait 6 x 10s = 60 seconds, i.e. a budget shorter than
+      # the delay the command immediately above it documents. On the 0.24.2
+      # release that cost a false FAILURE: the publish succeeded (provenance
+      # signed into the sigstore transparency log, `+ @baizor/pipeline@0.24.2`),
+      # the tag and Release were cut, and then this step failed the run — while
+      # the version showed up on the registry ~6 minutes after publish, roughly
+      # SIX TIMES the window it was given.
+      #
+      # That is worse than a wasted re-run. A release workflow that goes red on
+      # a successful release teaches everyone to shrug at red, which is the one
+      # signal a publish gate exists to protect.
+      #
+      # 20 x 30s = 10 minutes, measured against a ~6 minute observation. Do not
+      # shrink it back toward the npm notice: this gate answers "can a consumer
+      # actually install what we just published", and being slow to say yes
+      # costs a few CI minutes, while being wrong costs a broken release.
+      #
+      # `--prefer-online` because a warm npm metadata cache on the runner can
+      # answer from a stale document and report a version that is not servable.
       - name: Verify the published version resolves
         env:
           V: ${{ needs.verify.outputs.version }}
         run: |
-          for i in 1 2 3 4 5 6; do
-            if npm view "@baizor/pipeline@$V" version >/dev/null 2>&1; then
-              echo "npm serves $V"; exit 0
+          for i in $(seq 1 20); do
+            if npm view "@baizor/pipeline@$V" version --prefer-online >/dev/null 2>&1; then
+              echo "npm serves $V (attempt $i)"; exit 0
             fi
-            echo "not visible yet, retrying ($i)"; sleep 10
+            echo "not visible yet, retrying ($i/20)"; sleep 30
           done
-          echo "::error::published, but npm does not serve $V"; exit 1
+          echo "::error::published, but npm does not serve $V after 10 minutes"; exit 1
