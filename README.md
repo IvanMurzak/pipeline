@@ -1,5 +1,6 @@
 # `pipeline` CLI
 
+[![version](https://img.shields.io/github/package-json/v/IvanMurzak/pipeline/main?style=flat-square&label=version&color=4c1)](https://github.com/IvanMurzak/pipeline/blob/main/package.json)
 [![npm](https://img.shields.io/npm/v/@baizor/pipeline?style=flat-square&logo=npm&logoColor=white&label=npm&color=CB3837)](https://www.npmjs.com/package/@baizor/pipeline)
 [![downloads](https://img.shields.io/npm/dm/@baizor/pipeline?style=flat-square&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/@baizor/pipeline)
 [![CI](https://img.shields.io/github/actions/workflow/status/IvanMurzak/pipeline/ci.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/IvanMurzak/pipeline/actions/workflows/ci.yml)
